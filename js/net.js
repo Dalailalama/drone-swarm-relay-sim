@@ -140,18 +140,6 @@ function linkCost(s, aId, bId) {
   return 1 / Math.max(0.05, pktSuccessProb(m - FADE_MARGIN_DB));
 }
 
-// Total ETX cost of a path; Infinity if any link along it is unusable.
-function pathCost(s, path) {
-  if (!path || path.length < 2) return Infinity;
-  let sum = 0;
-  for (let i = 0; i < path.length - 1; i++) {
-    const c = linkCost(s, path[i], path[i + 1]);
-    if (c === Infinity) return Infinity;
-    sum += c;
-  }
-  return sum;
-}
-
 // Dijkstra over ETX costs (the node count is tiny — a dozen drones).
 function routePath(s, from, to) {
   if (from === to) return [from];

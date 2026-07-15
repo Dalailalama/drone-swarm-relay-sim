@@ -978,39 +978,23 @@ function chainStatus(s) {
   // line through a tower shadow is misleading if traffic is flowing around
   // it. Only when nothing routes do we draw the planned chain, so a truly
   // broken chain still shows its red hops.
-  // Display stability (route-flap damping, like real routers): keep the same
-  // flock representative while it stays valid — orbiting drones would
-  // otherwise swap the chain's endpoint every frame — and keep the current
-  // displayed route unless a fresh route is CLEARLY cheaper, so shadowing
-  // wobble doesn't make the chain line dance between near-equal paths.
   let chainPts = nodes;
   if (flock.length) {
-    let rep = flock.find(d => d.id === s._repId);
-    if (!rep) {
-      let cx2 = 0, cy2 = 0;
-      for (const d of flock) { cx2 += d.x; cy2 += d.y; }
-      cx2 /= flock.length; cy2 /= flock.length;
-      let repD = Infinity;
-      for (const d of flock) {
-        const dd = Math.hypot(d.x - cx2, d.y - cy2);
-        if (dd < repD) { repD = dd; rep = d; }
-      }
-      s._repId = rep.id;
-      s._dispRoute = null;
+    let cx2 = 0, cy2 = 0;
+    for (const d of flock) { cx2 += d.x; cy2 += d.y; }
+    cx2 /= flock.length; cy2 /= flock.length;
+    let rep = flock[0], repD = Infinity;
+    for (const d of flock) {
+      const dd = Math.hypot(d.x - cx2, d.y - cy2);
+      if (dd < repD) { repD = dd; rep = d; }
     }
-    const fresh = routePath(s, 'C2', rep.id);
-    const cached = s._dispRoute && s._dispRoute[s._dispRoute.length - 1] === rep.id ? s._dispRoute : null;
-    let route = fresh;
-    if (cached && pathCost(s, cached) <= pathCost(s, fresh) * 1.25) route = cached;
+    const route = routePath(s, 'C2', rep.id);
     if (route && route.length > 1) {
-      s._dispRoute = route;
       chainPts = route.map(id => {
         if (id === 'C2') return { kind: 'base', x: s.base.x, y: s.base.y, label: 'C2', id: 'C2' };
         const d = nodePos(s, id);
         return { kind: effRole(d) === 'relay' ? 'relay' : 'mesh', x: d.x, y: d.y, label: d.id, id: d.id, drone: d };
       });
-    } else {
-      s._dispRoute = null;
     }
   }
 
