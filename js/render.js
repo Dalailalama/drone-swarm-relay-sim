@@ -2,28 +2,28 @@
 // view = { cx, cy, pxPerM }  (cx,cy = world point at canvas centre)
 
 const COLORS = {
-  grid: 'rgba(148,163,184,0.10)',
-  gridMajor: 'rgba(148,163,184,0.22)',
-  ring: 'rgba(56,189,248,0.10)',
-  ringEdge: 'rgba(56,189,248,0.28)',
-  linkOk: '#34d399',
-  linkDegraded: '#fbbf24',
-  linkLost: '#f87171',
-  base: '#94a3b8',
-  target: '#38bdf8',
-  mission: '#34d399',
-  relay: '#fbbf24',
-  rtb: '#a78bfa',
-  rtl: '#a78bfa',
-  hold: '#f472b6',
-  relink: '#22d3ee',
-  rescue: '#60a5fa',
-  landed: '#64748b',
-  dead: '#ef4444',
-  text: '#cbd5e1',
-  textDim: '#64748b',
-  packetCmd: '#38bdf8',
-  packetTlm: '#e2e8f0',
+  grid: 'rgba(138,136,122,0.10)',
+  gridMajor: 'rgba(138,136,122,0.22)',
+  ring: 'rgba(111,159,230,0.08)',
+  ringEdge: 'rgba(111,159,230,0.30)',
+  linkOk: '#8fd960',
+  linkDegraded: '#e0a63c',
+  linkLost: '#e06050',
+  base: '#a5a293',
+  target: '#6f9fe6',
+  mission: '#7fc95e',
+  relay: '#e6b345',
+  rtb: '#a48fe0',
+  rtl: '#a48fe0',
+  hold: '#d970a8',
+  relink: '#5ecfcf',
+  rescue: '#6f9fe6',
+  landed: '#8a887a',
+  dead: '#e06050',
+  text: '#d6d4c8',
+  textDim: '#8a887a',
+  packetCmd: '#6f9fe6',
+  packetTlm: '#e8e6da',
 };
 
 function worldToScreen(view, cv, x, y) {
@@ -98,9 +98,9 @@ function drawTerrain(ctx, cv, view, s) {
           const slope = Math.max(-1, Math.min(1, (g - gE) / Math.max(1, stepM) * 2));
           const base = 40 + hn * 92 + slope * 24;
           const i = (py * w + px) * 4;
-          img.data[i] = base * 0.9;
-          img.data[i + 1] = base;
-          img.data[i + 2] = base * 0.96;
+          img.data[i] = base * 1.0;
+          img.data[i + 1] = base * 0.97;
+          img.data[i + 2] = base * 0.78;
           img.data[i + 3] = g < 1 ? 0 : 110 + hn * 100;
         }
       }
@@ -116,10 +116,10 @@ function drawTerrain(ctx, cv, view, s) {
     const wpx = b.w * view.pxPerM, dpx = b.d * view.pxPerM;
     if (wpx < 1.2) continue;
     const tall = b.heightM > s.altitudeM;
-    ctx.fillStyle = tall ? 'rgba(120,86,96,0.5)' : 'rgba(71,85,105,0.38)';
+    ctx.fillStyle = tall ? 'rgba(122,74,66,0.55)' : 'rgba(138,136,122,0.28)';
     ctx.fillRect(p.x, p.y, wpx, dpx);
     if (tall) {
-      ctx.strokeStyle = 'rgba(248,113,113,0.5)'; ctx.lineWidth = 1;
+      ctx.strokeStyle = 'rgba(224,96,80,0.55)'; ctx.lineWidth = 1;
       ctx.strokeRect(p.x, p.y, wpx, dpx);
     }
   }
@@ -135,7 +135,7 @@ function drawCoverage(ctx, cv, view, s) {
     const [i, j] = key.split(',').map(Number);
     const p = worldToScreen(view, cv, i * cell, j * cell);
     if (p.x < -px || p.y < -px || p.x > cv.width || p.y > cv.height) continue;
-    ctx.fillStyle = e.bad > e.good ? 'rgba(248,113,113,0.16)' : 'rgba(52,211,153,0.08)';
+    ctx.fillStyle = e.bad > e.good ? 'rgba(224,96,80,0.16)' : 'rgba(127,201,94,0.08)';
     ctx.fillRect(p.x, p.y, px, px);
   }
 }
@@ -225,7 +225,7 @@ function drawDrone(ctx, cv, view, d, selected) {
 
   if (selected) {
     ctx.beginPath(); ctx.arc(c.x, c.y, 14, 0, Math.PI * 2);
-    ctx.strokeStyle = '#e2e8f0'; ctx.lineWidth = 1.5; ctx.setLineDash([3, 3]);
+    ctx.strokeStyle = '#e8e6da'; ctx.lineWidth = 1.5; ctx.setLineDash([3, 3]);
     ctx.stroke(); ctx.setLineDash([]);
   }
 
@@ -247,7 +247,7 @@ function drawDrone(ctx, cv, view, d, selected) {
   if (alive(d)) {
     ctx.beginPath();
     ctx.arc(c.x, c.y, 11, -Math.PI / 2, -Math.PI / 2 + (d.batteryPct / 100) * Math.PI * 2);
-    ctx.strokeStyle = d.batteryPct > 40 ? 'rgba(52,211,153,0.5)' : d.batteryPct > 20 ? 'rgba(251,191,36,0.6)' : 'rgba(248,113,113,0.7)';
+    ctx.strokeStyle = d.batteryPct > 40 ? 'rgba(127,201,94,0.5)' : d.batteryPct > 20 ? 'rgba(230,179,69,0.6)' : 'rgba(224,96,80,0.7)';
     ctx.lineWidth = 2; ctx.stroke();
   }
 

@@ -103,7 +103,7 @@ function clamp255(v) { return Math.max(0, Math.min(255, Math.round(v))); }
 // the ground, it should fully occlude whatever painter-sorts behind it.
 function terrainQuadColor(avgHeightM, lambert) {
   const t = Math.max(0, Math.min(1, avgHeightM / 150));
-  const lo = [45, 60, 72], hi = [110, 130, 120];
+  const lo = [34, 35, 27], hi = [128, 126, 100];
   const shade = 1 + Math.max(-1, Math.min(1, lambert)) * 0.25;
   const r = clamp255((lo[0] + (hi[0] - lo[0]) * t) * shade);
   const g = clamp255((lo[1] + (hi[1] - lo[1]) * t) * shade);
@@ -148,12 +148,12 @@ function addQuad(items, cam, cv, p1, p2, p3, p4, fill, stroke, lineWidth) {
 }
 
 const ROLE_COLOR_3D = {
-  mission: '#34d399',
-  relay: '#fbbf24',
-  hold: '#f472b6',
-  relink: '#22d3ee',
-  rtl: '#a78bfa',
-  rtb: '#a78bfa',
+  mission: '#7fc95e',
+  relay: '#e6b345',
+  hold: '#d970a8',
+  relink: '#5ecfcf',
+  rtl: '#a48fe0',
+  rtb: '#a48fe0',
 };
 
 // --- Main render -----------------------------------------------------------
@@ -203,7 +203,7 @@ function renderView3D(ctx, cv, s, status, cam, selected) {
       const normal = v3norm(v3cross(v3sub(p2, p1), v3sub(p4, p1)));
       const lambert = v3dot(normal, LIGHT_DIR);
       const avgH = (h00 + h10 + h01 + h11) / 4;
-      addQuad(items, cam, cv, p1, p2, p3, p4, terrainQuadColor(avgH, lambert), 'rgba(148,163,184,0.06)', 1);
+      addQuad(items, cam, cv, p1, p2, p3, p4, terrainQuadColor(avgH, lambert), 'rgba(138,136,122,0.07)', 1);
     }
   }
 
@@ -214,7 +214,7 @@ function renderView3D(ctx, cv, s, status, cam, selected) {
     const base = terrainGroundAt(s.terrain, b.x, b.y);
     const top = base + b.heightM;
     const hw = b.w / 2, hd = b.d / 2;
-    const edgeStroke = b.heightM > s.altitudeM ? 'rgba(248,113,113,0.45)' : 'rgba(15,23,42,0.5)';
+    const edgeStroke = b.heightM > s.altitudeM ? 'rgba(224,96,80,0.5)' : 'rgba(19,20,16,0.55)';
 
     const BFL = { x: b.x - hw, y: b.y - hd, z: base };
     const BFR = { x: b.x + hw, y: b.y - hd, z: base };
@@ -225,8 +225,8 @@ function renderView3D(ctx, cv, s, status, cam, selected) {
     const TBR = { x: b.x + hw, y: b.y + hd, z: top };
     const TBL = { x: b.x - hw, y: b.y + hd, z: top };
 
-    const wallFill = (lambert) => 'rgba(71,85,105,' + wallAlpha(lambert).toFixed(2) + ')';
-    const topFill = 'rgba(100,116,139,' + wallAlpha(WALL_LAMBERT.top).toFixed(2) + ')';
+    const wallFill = (lambert) => 'rgba(90,89,76,' + wallAlpha(lambert).toFixed(2) + ')';
+    const topFill = 'rgba(120,118,103,' + wallAlpha(WALL_LAMBERT.top).toFixed(2) + ')';
 
     addQuad(items, cam, cv, BFL, BFR, TFR, TFL, wallFill(WALL_LAMBERT.north), edgeStroke, 1);
     addQuad(items, cam, cv, BFR, BBR, TBR, TFR, wallFill(WALL_LAMBERT.east), edgeStroke, 1);
@@ -262,9 +262,9 @@ function renderView3D(ctx, cv, s, status, cam, selected) {
     const pb = project3D(cam, cv.width, cv.height, hop.b.x, hop.b.y, altB);
     if (!pa || !pb) continue;
     ctx.beginPath(); ctx.moveTo(pa.x, pa.y); ctx.lineTo(pb.x, pb.y);
-    if (hop.state === 'ok') { ctx.strokeStyle = '#34d399'; ctx.setLineDash([]); }
-    else if (hop.state === 'degraded') { ctx.strokeStyle = '#fbbf24'; ctx.setLineDash([8, 5]); }
-    else { ctx.strokeStyle = '#f87171'; ctx.setLineDash([3, 6]); }
+    if (hop.state === 'ok') { ctx.strokeStyle = '#7fc95e'; ctx.setLineDash([]); }
+    else if (hop.state === 'degraded') { ctx.strokeStyle = '#e6b345'; ctx.setLineDash([8, 5]); }
+    else { ctx.strokeStyle = '#e06050'; ctx.setLineDash([3, 6]); }
     ctx.lineWidth = 1.5;
     ctx.stroke(); ctx.setLineDash([]);
   }
@@ -277,7 +277,7 @@ function renderView3D(ctx, cv, s, status, cam, selected) {
       const groundAlt = terrainGroundAt(s.terrain, d.x, d.y);
       const gp = project3D(cam, cv.width, cv.height, d.x, d.y, groundAlt);
       if (!gp) continue;
-      ctx.strokeStyle = '#f87171'; ctx.lineWidth = 2;
+      ctx.strokeStyle = '#e06050'; ctx.lineWidth = 2;
       ctx.beginPath();
       ctx.moveTo(gp.x - 5, gp.y - 5); ctx.lineTo(gp.x + 5, gp.y + 5);
       ctx.moveTo(gp.x + 5, gp.y - 5); ctx.lineTo(gp.x - 5, gp.y + 5);
@@ -292,18 +292,18 @@ function renderView3D(ctx, cv, s, status, cam, selected) {
     const dp = project3D(cam, cv.width, cv.height, d.x, d.y, altitude);
     if (!gp || !dp) continue;
 
-    ctx.strokeStyle = 'rgba(148,163,184,0.4)'; ctx.lineWidth = 1;
+    ctx.strokeStyle = 'rgba(138,136,122,0.4)'; ctx.lineWidth = 1;
     ctx.beginPath(); ctx.moveTo(gp.x, gp.y); ctx.lineTo(dp.x, dp.y); ctx.stroke();
 
     ctx.beginPath(); ctx.arc(gp.x, gp.y, 2, 0, Math.PI * 2);
-    ctx.fillStyle = 'rgba(148,163,184,0.5)'; ctx.fill();
+    ctx.fillStyle = 'rgba(138,136,122,0.5)'; ctx.fill();
 
     const role = effRole(d);
-    const col = ROLE_COLOR_3D[role] || '#a78bfa';
+    const col = ROLE_COLOR_3D[role] || '#a48fe0';
 
     if (d === selected) {
       ctx.beginPath(); ctx.arc(dp.x, dp.y, 9, 0, Math.PI * 2);
-      ctx.strokeStyle = '#e2e8f0'; ctx.lineWidth = 1.5; ctx.setLineDash([3, 3]);
+      ctx.strokeStyle = '#e8e6da'; ctx.lineWidth = 1.5; ctx.setLineDash([3, 3]);
       ctx.stroke(); ctx.setLineDash([]);
     }
 
@@ -311,7 +311,7 @@ function renderView3D(ctx, cv, s, status, cam, selected) {
     ctx.fillStyle = col; ctx.fill();
 
     ctx.font = '10px "Segoe UI", sans-serif'; ctx.textAlign = 'center';
-    ctx.fillStyle = 'rgba(100,116,139,1)';
+    ctx.fillStyle = 'rgba(120,118,103,1)';
     ctx.fillText(d.id, dp.x, dp.y + 14);
   }
 
@@ -322,12 +322,12 @@ function renderView3D(ctx, cv, s, status, cam, selected) {
     const gp = project3D(cam, cv.width, cv.height, s.base.x, s.base.y, groundAlt);
     const tp = project3D(cam, cv.width, cv.height, s.base.x, s.base.y, groundAlt + 12);
     if (gp && tp) {
-      ctx.strokeStyle = '#94a3b8'; ctx.lineWidth = 2;
+      ctx.strokeStyle = '#a5a293'; ctx.lineWidth = 2;
       ctx.beginPath(); ctx.moveTo(gp.x, gp.y); ctx.lineTo(tp.x, tp.y); ctx.stroke();
       ctx.beginPath(); ctx.arc(tp.x, tp.y, 3, 0, Math.PI * 2);
-      ctx.fillStyle = '#94a3b8'; ctx.fill();
+      ctx.fillStyle = '#a5a293'; ctx.fill();
       ctx.font = '12px "Segoe UI", sans-serif'; ctx.textAlign = 'center';
-      ctx.fillStyle = '#94a3b8';
+      ctx.fillStyle = '#a5a293';
       ctx.fillText('C2', tp.x, tp.y - 10);
     }
   }
@@ -337,14 +337,14 @@ function renderView3D(ctx, cv, s, status, cam, selected) {
     const groundAlt = terrainGroundAt(s.terrain, s.target.x, s.target.y);
     const tp = project3D(cam, cv.width, cv.height, s.target.x, s.target.y, groundAlt);
     if (tp) {
-      ctx.strokeStyle = '#38bdf8'; ctx.lineWidth = 2;
+      ctx.strokeStyle = '#6f9fe6'; ctx.lineWidth = 2;
       ctx.beginPath(); ctx.arc(tp.x, tp.y, 12, 0, Math.PI * 2); ctx.stroke();
       ctx.beginPath(); ctx.moveTo(tp.x - 18, tp.y); ctx.lineTo(tp.x - 6, tp.y); ctx.stroke();
       ctx.beginPath(); ctx.moveTo(tp.x + 6, tp.y); ctx.lineTo(tp.x + 18, tp.y); ctx.stroke();
       ctx.beginPath(); ctx.moveTo(tp.x, tp.y - 18); ctx.lineTo(tp.x, tp.y - 6); ctx.stroke();
       ctx.beginPath(); ctx.moveTo(tp.x, tp.y + 6); ctx.lineTo(tp.x, tp.y + 18); ctx.stroke();
       ctx.font = '12px "Segoe UI", sans-serif'; ctx.textAlign = 'center';
-      ctx.fillStyle = '#38bdf8';
+      ctx.fillStyle = '#6f9fe6';
       ctx.fillText('target', tp.x, tp.y + 32);
     }
   }

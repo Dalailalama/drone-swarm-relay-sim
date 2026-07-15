@@ -10,6 +10,8 @@ and drones peel off to bridge the link; kill a relay and the swarm heals;
 run the battery down and drones excuse themselves and fly home.
 
 No build step, no dependencies. Open `index.html` from any static server.
+(UI typeface — IBM Plex Mono — loads from Google Fonts and degrades
+gracefully to your system monospace offline.)
 
 ```
 python -m http.server 8000
