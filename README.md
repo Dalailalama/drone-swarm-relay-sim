@@ -53,6 +53,20 @@ the link last worked:
 Current limitation, stated plainly: the rescue tentacle extends one hop
 beyond the existing network. Multi-hop rescue chains are on the roadmap.
 
+### The commitment rule
+
+Methodology borrowed from [MIT ACL's FASTER
+planner](https://github.com/mit-acl/faster) (not its code): *never commit to
+a plan unless a backup plan provably closes.* FASTER applies it to
+trajectories in unknown terrain; here it's applied to energy. Before a drone
+adopts any in-flight tasking — relay slot, rescue point, new mission target —
+it checks that flying there still leaves enough battery to get home against
+the current wind, with pessimism margin and reserve intact. If not, it
+declines the order, keeps flying its current (already-vetted) one, and
+reports the refusal; C2 benches it for a while and elects a drone that can
+actually afford the job. A drone that says yes has proven it can also say
+goodbye safely.
+
 ## The radio model (and its honesty)
 
 Every radio preset is a real product with datasheet numbers — TX power,

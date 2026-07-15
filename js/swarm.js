@@ -83,6 +83,7 @@ function makeDrone(x, y, target, rng, airframe) {
     relinkUntil: null,
     relinkAttempt: 0,
     relinkGoalX: 0, relinkGoalY: 0,
+    rejectedRole: null, rejectedSig: null,
     inbox: [],
     nextTlm: rng() * C2.tlmIntervalSec,
     orbitPhase: rng() * Math.PI * 2,
@@ -105,7 +106,7 @@ function makeSwarm(opts) {
     envFactor: opts.envFactor,
     shadowSigmaDb: opts.shadowSigmaDb || 0,
     net: makeNet(opts.seed || 42),
-    c2: { known: {}, relays: [], inbox: [], nextCmd: 0, wasFresh: {}, lost: {}, rescuer: null },
+    c2: { known: {}, relays: [], inbox: [], nextCmd: 0, wasFresh: {}, lost: {}, rescuer: null, unfit: {} },
   };
   for (let i = 0; i < opts.count; i++) {
     const a = (i / opts.count) * Math.PI * 2;
@@ -140,6 +141,28 @@ function liveMarginDb(s, aId, bId) {
   if (ground > radioHorizonM(nodeAltM(s, aId), nodeAltM(s, bId))) return -Infinity;
   const slant = Math.hypot(ground, nodeAltM(s, aId) - nodeAltM(s, bId));
   return linkMarginDb(s.radio, s.envFactor, slant) + fadeDb(s, aId, bId);
+}
+
+// Where would this order send the drone?
+function orderGoal(s, order) {
+  if (order.role === 'relay') return slotFromOrder(s, order);
+  if (order.role === 'rescue' && order.goto) return order.goto;
+  return order.target;
+}
+
+// FASTER-style commitment rule (methodology from MIT ACL's FASTER planner:
+// never commit to a plan unless a backup plan provably closes). Here the
+// backup plan is energetic: fly to the goal, then still make it home against
+// the wind with the pessimism margin and reserve intact.
+function orderFeasible(s, d, order) {
+  const af = s.airframe;
+  const goal = orderGoal(s, order);
+  const windMs = Math.hypot(s.wind.x, s.wind.y);
+  const speed = Math.max(1, af.maxSpeedMs - windMs);
+  const pw = flightPowerW(af, af.maxSpeedMs);
+  const whToGoal = pw * (dist2d(d, goal) / speed) / 3600;
+  const whGoalHome = pw * (dist2d(goal, s.base) / speed) / 3600 * BATTERY.homeMargin;
+  return d.energyWh > whToGoal + whGoalHome + usableWh(af) * BATTERY.reserveFrac;
 }
 
 // Slot i of k relays: fraction (i+1)/(k+1) along base → ordered target.
@@ -191,6 +214,21 @@ function c2Step(s) {
     }
   }
 
+  // A drone that declined its tasking gets struck off and benched for a
+  // while, so C2 immediately elects someone with the reserves for the job.
+  for (const id of [...s.c2.relays]) {
+    if (fresh(id) && known[id].reject === 'relay') {
+      s.c2.relays = s.c2.relays.filter(r => r !== id);
+      s.c2.unfit[id] = s.time + 60;
+      logEvent(s, 'C2: ' + id + ' declined relay duty (low reserves) — benched, reassigning', 'warn');
+    }
+  }
+  if (s.c2.rescuer && fresh(s.c2.rescuer) && known[s.c2.rescuer].reject === 'rescue') {
+    s.c2.unfit[s.c2.rescuer] = s.time + 60;
+    logEvent(s, 'C2: ' + s.c2.rescuer + ' declined rescue tasking — benched', 'warn');
+    s.c2.rescuer = null;
+  }
+
   // Roster hygiene: relays C2 can no longer account for are struck off
   const before = s.c2.relays.length;
   s.c2.relays = s.c2.relays.filter(id =>
@@ -225,7 +263,8 @@ function c2Step(s) {
     // Elect from fresh mission drones with battery to spare
     const candidates = Object.keys(known).filter(id =>
       fresh(id) && known[id].role === 'mission' &&
-      known[id].battery >= RELAY.minBatteryPct && !s.c2.relays.includes(id));
+      known[id].battery >= RELAY.minBatteryPct && !s.c2.relays.includes(id) &&
+      !(s.c2.unfit[id] > s.time));
     if (candidates.length) {
       const slotF = (k + 1) / (k + 2);
       const slot = { x: s.base.x + (s.target.x - s.base.x) * slotF, y: s.base.y + (s.target.y - s.base.y) * slotF };
@@ -261,7 +300,8 @@ function c2Step(s) {
       lostIds.some(id => s.time - s.c2.lost[id].at > RESCUE.delaySec)) {
     const candidates = Object.keys(known).filter(id =>
       fresh(id) && known[id].role === 'mission' &&
-      known[id].battery >= RELAY.minBatteryPct && !s.c2.relays.includes(id));
+      known[id].battery >= RELAY.minBatteryPct && !s.c2.relays.includes(id) &&
+      !(s.c2.unfit[id] > s.time));
     if (candidates.length) {
       const c = lostCentroid(s);
       let best = null, bestD = Infinity;
@@ -324,16 +364,33 @@ function lostCentroid(s) {
 function droneComms(s, d) {
   for (const p of d.inbox) {
     if (p.kind !== 'cmd') continue;
-    const prevRole = d.order.role;
-    d.order = p.payload;
+    // Any received command proves the link works here, order accepted or not
     d.lastC2 = s.time;
-    d.lastLinkX = d.x; d.lastLinkY = d.y; // the link works HERE, remember it
+    d.lastLinkX = d.x; d.lastLinkY = d.y;
     d.relinkUntil = null;
     d.relinkAttempt = 0;
     if (d.mode === 'hold' || d.mode === 'relink' || d.mode === 'rtl') {
       d.mode = 'ok';
       logEvent(s, d.id + ' link restored — resuming orders', 'info');
     }
+
+    // Commitment rule: refuse a NEW tasking whose recovery plan doesn't
+    // close; keep flying the current (previously vetted) order instead.
+    const o = p.payload;
+    const sig = o.role + '/' + o.slot + '/' + Math.round(o.target.x) + ',' + Math.round(o.target.y);
+    const changed = sig !== (d.order.role + '/' + d.order.slot + '/' + Math.round(d.order.target.x) + ',' + Math.round(d.order.target.y));
+    if (changed && !orderFeasible(s, d, o)) {
+      d.rejectedRole = o.role;
+      if (d.rejectedSig !== sig) {
+        d.rejectedSig = sig;
+        const pct = (d.energyWh / usableWh(s.airframe) * 100).toFixed(0);
+        logEvent(s, d.id + ' declines ' + o.role + ' tasking — recovery plan does not close (' + pct + '% battery)', 'warn');
+      }
+      continue;
+    }
+    const prevRole = d.order.role;
+    d.order = o;
+    d.rejectedRole = null; d.rejectedSig = null;
     if (d.mode === 'ok' && prevRole !== d.order.role) {
       logEvent(s, d.id + ' now ' + d.order.role + (d.order.role === 'relay' ? ' (slot ' + (d.order.slot + 1) + ')' : ''), 'relay');
     }
@@ -349,6 +406,7 @@ function droneComms(s, d) {
       x: d.x + GPS_SIGMA_M * gaussian(s.net.rng),
       y: d.y + GPS_SIGMA_M * gaussian(s.net.rng),
       battery: d.batteryPct, role: effRole(d),
+      reject: d.rejectedRole || null,
     });
   }
 
