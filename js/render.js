@@ -186,18 +186,27 @@ function drawDrone(ctx, cv, view, d, selected) {
 }
 
 // C2's memory of where each lost drone was last heard — ghost markers the
-// operator (and the rescue logic) work from.
+// operator (and the rescue logic) work from. When a drone is visibly sitting
+// on its own ghost (the common case: it froze right where it went dark), the
+// text label is dropped so it doesn't collide with the drone's ID label.
 function drawLostMarkers(ctx, cv, view, s) {
   for (const [id, e] of Object.entries(s.c2.lost)) {
     const c = worldToScreen(view, cv, e.x, e.y);
+    let droneNearby = false;
+    for (const d of s.drones) {
+      const p = worldToScreen(view, cv, d.x, d.y);
+      if (Math.hypot(p.x - c.x, p.y - c.y) < 26) { droneNearby = true; break; }
+    }
     ctx.beginPath(); ctx.arc(c.x, c.y, 10, 0, Math.PI * 2);
     ctx.strokeStyle = COLORS.lost; ctx.lineWidth = 1.5; ctx.setLineDash([3, 4]);
     ctx.stroke(); ctx.setLineDash([]);
-    ctx.font = '11px "Segoe UI", sans-serif'; ctx.textAlign = 'center';
-    ctx.fillStyle = COLORS.lost;
-    ctx.fillText('?', c.x, c.y + 4);
-    ctx.fillStyle = COLORS.textDim;
-    ctx.fillText(id + ' last seen', c.x, c.y + 24);
+    if (!droneNearby) {
+      ctx.font = '11px "Segoe UI", sans-serif'; ctx.textAlign = 'center';
+      ctx.fillStyle = COLORS.lost;
+      ctx.fillText('?', c.x, c.y + 4);
+      ctx.fillStyle = COLORS.textDim;
+      ctx.fillText(id + ' last seen', c.x, c.y - 16);
+    }
   }
 }
 
