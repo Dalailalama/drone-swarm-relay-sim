@@ -69,14 +69,25 @@ test('LOS: a ridge between two valleys blocks at low altitude, clear from high a
   assert.ok(!T.losBlocked(t, peakX - 400, 0, t.groundAmpM + 60, peakX + 400, 0, t.groundAmpM + 60));
 });
 
-test('urban preset: deterministic district with some swarm-blocking towers', () => {
+test('urban preset: deterministic city with a downtown of swarm-blocking towers', () => {
   const a = T.makeTerrain('urban', OPTS);
   const b = T.makeTerrain('urban', OPTS);
   assert.deepStrictEqual(a.buildings, b.buildings);
-  assert.ok(a.buildings.length > 20, 'expected a real district, got ' + a.buildings.length);
+  assert.ok(a.buildings.length > 80, 'expected a real city, got ' + a.buildings.length);
   const tall = a.buildings.filter(x => x.heightM > OPTS.altM);
-  assert.ok(tall.length >= 2, 'expected towers above flight altitude');
+  assert.ok(tall.length >= 5, 'expected downtown towers above flight altitude');
   assert.ok(tall.length < a.buildings.length / 2, 'most buildings should be low-rise');
+});
+
+test('building spatial index agrees with linear scan', () => {
+  const t = T.makeTerrain('urban', OPTS);
+  const linear = { ...t, bGrid: null };
+  for (let i = 0; i < 300; i++) {
+    const x = (i * 37) % 1400 - 200, y = ((i * 53) % 1000) - 500;
+    const viaGrid = T.buildingAt(t, x, y);
+    const viaScan = T.buildingAt(linear, x, y);
+    assert.strictEqual(viaGrid, viaScan, 'index mismatch at ' + x + ',' + y);
+  }
 });
 
 test('mixed preset has both ground relief and buildings', () => {

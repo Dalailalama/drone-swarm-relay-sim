@@ -54,8 +54,12 @@ function terrainGroundAt(t, x, y) {
 }
 
 function buildingAt(t, x, y) {
-  if (!t || !t.buildings) return null;
-  for (const b of t.buildings) {
+  if (!t || !t.buildings || !t.buildings.length) return null;
+  const list = t.bGrid
+    ? t.bGrid.get(Math.floor(x / BGRID_CELL_M) + ',' + Math.floor(y / BGRID_CELL_M))
+    : t.buildings;
+  if (!list) return null;
+  for (const b of list) {
     if (Math.abs(x - b.x) <= b.w / 2 && Math.abs(y - b.y) <= b.d / 2) return b;
   }
   return null;
@@ -100,29 +104,53 @@ function mulberry32(a) {
   };
 }
 
-// A city district: seeded grid of blocks with street gaps. Mostly low-rise,
-// a scattering of towers tall enough to matter to the swarm.
-function makeDistrict(cx, cy, spanM, rng) {
+// A city: seeded street grid with a downtown core. Towers cluster downtown
+// (60-150 m, real city heights), low-rise sprawl thins out toward the
+// edges, with parks and lots left empty. Reads like an actual city from
+// the 3D view, not a single block.
+function makeCity(cx, cy, spanM, rng) {
   const buildings = [];
-  const pitch = Math.max(45, spanM / 9);       // block spacing incl. street
-  const n = Math.max(3, Math.round(spanM / pitch));
+  const pitch = Math.max(40, spanM / 22);        // block spacing incl. street
+  const n = Math.max(5, Math.round(spanM / pitch));
   for (let i = 0; i < n; i++) {
     for (let j = 0; j < n; j++) {
-      if (rng() < 0.18) continue;              // parks, parking lots
-      const bx = cx + (i - (n - 1) / 2) * pitch + (rng() - 0.5) * pitch * 0.2;
-      const by = cy + (j - (n - 1) / 2) * pitch + (rng() - 0.5) * pitch * 0.2;
-      const w = pitch * (0.45 + rng() * 0.25);
-      const d = pitch * (0.45 + rng() * 0.25);
-      const r = rng();
-      // height distribution: mostly 10-35 m low-rise, ~15% towers at real
-      // city-tower heights (60-140 m) — fly higher and fewer of them matter
-      const heightM = r < 0.85
-        ? 10 + rng() * 25
-        : 60 + rng() * 80;
+      const gx = cx + (i - (n - 1) / 2) * pitch;
+      const gy = cy + (j - (n - 1) / 2) * pitch;
+      const rCore = Math.hypot(gx - cx, gy - cy) / (spanM / 2); // 0 downtown → 1 edge
+      if (rng() < 0.12 + rCore * 0.5) continue;  // density falls off from the core
+      const bx = gx + (rng() - 0.5) * pitch * 0.2;
+      const by = gy + (rng() - 0.5) * pitch * 0.2;
+      const w = pitch * (0.42 + rng() * 0.26);
+      const d = pitch * (0.42 + rng() * 0.26);
+      const towerP = 0.30 * Math.max(0, 1 - rCore * 1.3); // towers live downtown
+      const heightM = rng() < towerP
+        ? 60 + rng() * 90
+        : 8 + rng() * 26;
       buildings.push({ x: bx, y: by, w, d, heightM });
     }
   }
   return buildings;
+}
+
+// Spatial hash so 150+ buildings stay cheap to query: buildingAt only looks
+// at the handful of buildings whose footprints overlap one grid cell.
+const BGRID_CELL_M = 120;
+
+function indexBuildings(t) {
+  t.bGrid = new Map();
+  for (const b of t.buildings) {
+    const x0 = Math.floor((b.x - b.w / 2) / BGRID_CELL_M), x1 = Math.floor((b.x + b.w / 2) / BGRID_CELL_M);
+    const y0 = Math.floor((b.y - b.d / 2) / BGRID_CELL_M), y1 = Math.floor((b.y + b.d / 2) / BGRID_CELL_M);
+    for (let ix = x0; ix <= x1; ix++) {
+      for (let iy = y0; iy <= y1; iy++) {
+        const key = ix + ',' + iy;
+        let arr = t.bGrid.get(key);
+        if (!arr) { arr = []; t.bGrid.set(key, arr); }
+        arr.push(b);
+      }
+    }
+  }
+  return t;
 }
 
 function makeTerrain(name, opts) {
@@ -143,17 +171,17 @@ function makeTerrain(name, opts) {
   }
   if (name === 'urban') {
     const c = along(0.5);
-    return {
+    return indexBuildings({
       seed, groundAmpM: 0, groundScaleM: 1,
-      buildings: makeDistrict(c.x, c.y, distM * 0.55, rng),
-    };
+      buildings: makeCity(c.x, c.y, distM * 1.15, rng),
+    });
   }
   if (name === 'mixed') {
     const c = along(0.55);
-    return {
+    return indexBuildings({
       seed, groundAmpM: 2.0 * altM + 30, groundScaleM: distM * 0.45,
-      buildings: makeDistrict(c.x, c.y, distM * 0.35, rng),
-    };
+      buildings: makeCity(c.x, c.y, distM * 0.55, rng),
+    });
   }
   // 'flat' and anything unknown
   return { seed, buildings: [], groundAmpM: 0, groundScaleM: 1 };
