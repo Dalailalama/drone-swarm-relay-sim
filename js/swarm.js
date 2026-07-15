@@ -851,13 +851,38 @@ function chainStatus(s) {
     nodes.push({ kind: 'mission', x: cx / flock.length, y: cy / flock.length, label: 'flock', id: flock[0].id });
   }
 
+  // The hops shown to the operator are the ACTUAL route packets take (BFS
+  // over live links to the flock) whenever one exists — a planned-adjacency
+  // line through a tower shadow is misleading if traffic is flowing around
+  // it. Only when nothing routes do we draw the planned chain, so a truly
+  // broken chain still shows its red hops.
+  let chainPts = nodes;
+  if (flock.length) {
+    let cx2 = 0, cy2 = 0;
+    for (const d of flock) { cx2 += d.x; cy2 += d.y; }
+    cx2 /= flock.length; cy2 /= flock.length;
+    let rep = flock[0], repD = Infinity;
+    for (const d of flock) {
+      const dd = Math.hypot(d.x - cx2, d.y - cy2);
+      if (dd < repD) { repD = dd; rep = d; }
+    }
+    const route = routePath(s, 'C2', rep.id);
+    if (route && route.length > 1) {
+      chainPts = route.map(id => {
+        if (id === 'C2') return { kind: 'base', x: s.base.x, y: s.base.y, label: 'C2', id: 'C2' };
+        const d = nodePos(s, id);
+        return { kind: effRole(d) === 'relay' ? 'relay' : 'mesh', x: d.x, y: d.y, label: d.id, id: d.id, drone: d };
+      });
+    }
+  }
+
   const hops = [];
-  for (let i = 0; i < nodes.length - 1; i++) {
-    const dM = dist2d(nodes[i], nodes[i + 1]);
-    const margin = Math.max(-99, liveMarginDb(s, nodes[i].id, nodes[i + 1].id));
+  for (let i = 0; i < chainPts.length - 1; i++) {
+    const dM = dist2d(chainPts[i], chainPts[i + 1]);
+    const margin = Math.max(-99, liveMarginDb(s, chainPts[i].id, chainPts[i + 1].id));
     const state = margin >= FADE_MARGIN_DB ? 'ok' : margin >= 0 ? 'degraded' : 'lost';
     hops.push({
-      a: nodes[i], b: nodes[i + 1], distM: dM, marginDb: margin,
+      a: chainPts[i], b: chainPts[i + 1], distM: dM, marginDb: margin,
       rssiDbm: margin + s.radio.sensDbm,
       lossPct: (1 - pktSuccessProb(margin)) * 100,
       state,
