@@ -129,6 +129,13 @@ function chainThroughputKbps(radio, hops) {
   return radio.airRateKbps / Math.max(1, hops);
 }
 
+// Radio horizon between two antennas (4/3-Earth model): beyond this distance
+// the planet itself blocks the path, no matter how much power you have.
+//     d_km ≈ 4.12 · (√h1 + √h2)   with h in metres
+function radioHorizonM(h1M, h2M) {
+  return 4120 * (Math.sqrt(Math.max(0, h1M)) + Math.sqrt(Math.max(0, h2M)));
+}
+
 // Probability a single packet transmission succeeds, given the link's mean
 // margin above sensitivity. Logistic curve: ~16% at 0 dB, 50% at 2 dB,
 // ~95% at 6 dB — the reason nobody plans a link at 0 dB margin.

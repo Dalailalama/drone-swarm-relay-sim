@@ -10,6 +10,7 @@
   const airframeSel = el('airframeSel'), airframeInfo = el('airframeInfo');
   const countRange = el('countRange'), countOut = el('countOut');
   const distRange = el('distRange'), distOut = el('distOut');
+  const altRange = el('altRange'), altOut = el('altOut');
   const speedBtns = Array.from(document.querySelectorAll('[data-speed]'));
   const statusPill = el('statusPill'), specCard = el('specCard');
   const hopsBody = el('hopsBody'), fleetBody = el('fleetBody'), eventLog = el('eventLog');
@@ -55,6 +56,7 @@
     swarm = makeSwarm({
       count: +countRange.value,
       airframe,
+      altitudeM: +altRange.value,
       targetX: dist, targetY: -dist * 0.25,
       radio, envFactor: env.factor,
       shadowSigmaDb: env.shadowSigmaDb,
@@ -86,6 +88,7 @@
       '<div class="spec-row"><span>Air data rate</span><b>' + (radio.airRateKbps >= 1000 ? (radio.airRateKbps / 1000) + ' Mbps' : radio.airRateKbps + ' kbps') + '</b></div>' +
       '<div class="spec-row"><span>Rated LOS range</span><b>' + fmtDist(radio.rangeLosM) + '</b></div>' +
       '<div class="spec-row"><span>Usable here (' + env.name.split(' ')[0].toLowerCase() + ', ' + FADE_MARGIN_DB + ' dB fade)</span><b>' + fmtDist(u) + '</b></div>' +
+      '<div class="spec-row"><span>Radio horizon (C2 &rarr; ' + (altRange ? altRange.value : 50) + ' m)</span><b>' + fmtDist(radioHorizonM(2, +altRange.value)) + '</b></div>' +
       '<p class="spec-note">' + radio.note + '</p>';
   }
 
@@ -122,6 +125,11 @@
     const dist = +distRange.value / 100 * defaultTargetDist();
     distOut.textContent = fmtDist(dist);
     if (swarm) { swarm.target.x = dist; swarm.target.y = -dist * 0.25; }
+  });
+  altRange.addEventListener('input', () => {
+    altOut.textContent = altRange.value + ' m';
+    if (swarm) swarm.altitudeM = +altRange.value;
+    updateSpecCard();
   });
   speedBtns.forEach(b => b.addEventListener('click', () => {
     const v = b.dataset.speed;

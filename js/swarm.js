@@ -71,6 +71,7 @@ function makeSwarm(opts) {
     drones: [],
     time: 0,
     airframe: opts.airframe,
+    altitudeM: opts.altitudeM || 50,
     events: [],
     radio: opts.radio,
     envFactor: opts.envFactor,
@@ -94,13 +95,23 @@ function dist2d(a, b) { return Math.hypot(a.x - b.x, a.y - b.y); }
 function alive(d) { return d.mode !== 'dead' && d.mode !== 'landed'; }
 function effRole(d) { return d.mode === 'ok' ? d.order.role : d.mode; }
 
-// Live link margin between two nodes: deterministic path loss plus the
-// link's current shadowing offset. This is what routing, packet delivery,
-// and the hop display all consume — one consistent radio truth.
+const C2_ANTENNA_M = 2; // ground station mast height
+
+function nodeAltM(s, id) {
+  return id === 'C2' ? C2_ANTENNA_M : s.altitudeM;
+}
+
+// Live link margin between two nodes: 3D slant-range path loss plus the
+// link's current shadowing offset, hard-blocked beyond the radio horizon.
+// This is what routing, packet delivery, and the hop display all consume —
+// one consistent radio truth.
 function liveMarginDb(s, aId, bId) {
   const a = nodePos(s, aId), b = nodePos(s, bId);
   if (!a || !b) return -Infinity;
-  return linkMarginDb(s.radio, s.envFactor, dist2d(a, b)) + fadeDb(s, aId, bId);
+  const ground = dist2d(a, b);
+  if (ground > radioHorizonM(nodeAltM(s, aId), nodeAltM(s, bId))) return -Infinity;
+  const slant = Math.hypot(ground, nodeAltM(s, aId) - nodeAltM(s, bId));
+  return linkMarginDb(s.radio, s.envFactor, slant) + fadeDb(s, aId, bId);
 }
 
 // Slot i of k relays: fraction (i+1)/(k+1) along base → ordered target.
@@ -147,8 +158,12 @@ function c2Step(s) {
     logEvent(s, 'C2: relay roster degraded (' + s.c2.relays.length + '/' + before + ') — re-planning', 'error');
   }
 
-  // Hysteresis on chain length, planned against operator intent
-  const usable = usableRangeM(s.radio, s.envFactor);
+  // Hysteresis on chain length, planned against operator intent.
+  // Hop span is capped by the radio horizon at operating altitude — a 40 km
+  // radio is still a ~30 km radio when the Earth gets in the way.
+  const usable = Math.min(
+    usableRangeM(s.radio, s.envFactor),
+    radioHorizonM(C2_ANTENNA_M, s.altitudeM));
   const D = dist2d(s.base, s.target);
   const k = s.c2.relays.length;
   const kNeeded = relaysRequired(D, usable * RELAY.deployFrac);
@@ -338,11 +353,11 @@ function chainStatus(s) {
   const hops = [];
   for (let i = 0; i < nodes.length - 1; i++) {
     const dM = dist2d(nodes[i], nodes[i + 1]);
-    const margin = liveMarginDb(s, nodes[i].id, nodes[i + 1].id);
+    const margin = Math.max(-99, liveMarginDb(s, nodes[i].id, nodes[i + 1].id));
     const state = margin >= FADE_MARGIN_DB ? 'ok' : margin >= 0 ? 'degraded' : 'lost';
     hops.push({
       a: nodes[i], b: nodes[i + 1], distM: dM, marginDb: margin,
-      rssiDbm: rssiAt(s.radio, s.envFactor, dM) + fadeDb(s, nodes[i].id, nodes[i + 1].id),
+      rssiDbm: margin + s.radio.sensDbm,
       lossPct: (1 - pktSuccessProb(margin)) * 100,
       state,
     });
