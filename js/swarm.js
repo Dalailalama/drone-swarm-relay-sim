@@ -72,6 +72,7 @@ function makeSwarm(opts) {
     time: 0,
     airframe: opts.airframe,
     altitudeM: opts.altitudeM || 50,
+    wind: { x: opts.windX || 0, y: opts.windY || 0 },
     events: [],
     radio: opts.radio,
     envFactor: opts.envFactor,
@@ -246,8 +247,11 @@ function updateBattery(s, d, dt, vAirMs) {
   d.batteryPct = d.energyWh / usableWh(af) * 100;
 
   if (d.mode === 'ok' || d.mode === 'hold') {
-    // Onboard smart-RTH: energy to fly home at cruise, with pessimism + reserve
-    const secsHome = dist2d(d, s.base) / af.maxSpeedMs;
+    // Onboard smart-RTH: energy to fly home at cruise, with pessimism + reserve.
+    // Assumes the whole trip could be upwind — conservative, like real firmware.
+    const windMs = Math.hypot(s.wind.x, s.wind.y);
+    const homeSpeed = Math.max(1, af.maxSpeedMs - windMs);
+    const secsHome = dist2d(d, s.base) / homeSpeed;
     const whHome = flightPowerW(af, af.maxSpeedMs) * secsHome / 3600 * BATTERY.homeMargin;
     if (d.energyWh <= whHome + usableWh(af) * BATTERY.reserveFrac) {
       d.mode = 'rtb';
@@ -319,11 +323,19 @@ function stepDrone(s, d, dt) {
   const aMag = Math.hypot(ax, ay);
   if (aMag > DRONE.accelMs2) { ax = ax / aMag * DRONE.accelMs2; ay = ay / aMag * DRONE.accelMs2; }
   d.vx += ax * dt; d.vy += ay * dt;
-  const v = Math.hypot(d.vx, d.vy);
-  if (v > maxV) { d.vx = d.vx / v * maxV; d.vy = d.vy / v * maxV; }
+
+  // The speed limit and the power bill are paid in AIRSPEED. Wind shifts the
+  // ground-frame envelope: full tailwind adds, headwind subtracts, and a
+  // strong enough wind blows the drone backwards at full throttle.
+  let vax = d.vx - s.wind.x, vay = d.vy - s.wind.y;
+  const va = Math.hypot(vax, vay);
+  if (va > maxV) {
+    vax *= maxV / va; vay *= maxV / va;
+    d.vx = vax + s.wind.x; d.vy = vay + s.wind.y;
+  }
   d.x += d.vx * dt; d.y += d.vy * dt;
 
-  updateBattery(s, d, dt, Math.min(v, maxV));
+  updateBattery(s, d, dt, Math.min(va, maxV));
 
   if ((d.mode === 'rtb' || d.mode === 'rtl') && dist2d(d, s.base) < DRONE.landThresholdM) {
     if (d.mode === 'rtb') {

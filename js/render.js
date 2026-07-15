@@ -183,6 +183,20 @@ function drawDrone(ctx, cv, view, d, selected) {
   ctx.fillText(d.id, c.x, c.y + 24);
 }
 
+function drawWind(ctx, cv, s) {
+  const spd = Math.hypot(s.wind.x, s.wind.y);
+  if (spd < 0.5) return;
+  const cx = cv.width - 52, cy = 46, ang = Math.atan2(s.wind.y, s.wind.x);
+  ctx.save(); ctx.translate(cx, cy); ctx.rotate(ang);
+  ctx.strokeStyle = COLORS.text; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(-14, 0); ctx.lineTo(12, 0); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(12, 0); ctx.lineTo(5, -5); ctx.moveTo(12, 0); ctx.lineTo(5, 5); ctx.stroke();
+  ctx.restore();
+  ctx.font = '11px "Segoe UI", sans-serif'; ctx.textAlign = 'center';
+  ctx.fillStyle = COLORS.text;
+  ctx.fillText(spd.toFixed(0) + ' m/s wind', cx, cy + 22);
+}
+
 function drawScaleBar(ctx, cv, view) {
   const step = niceStep(90 / view.pxPerM);
   const px = step * view.pxPerM;
@@ -210,5 +224,6 @@ function render(ctx, cv, view, s, status, selected, usable) {
   drawBase(ctx, cv, view, s.base);
   drawTarget(ctx, cv, view, s.target);
   for (const d of s.drones) drawDrone(ctx, cv, view, d, d === selected);
+  drawWind(ctx, cv, s);
   drawScaleBar(ctx, cv, view);
 }

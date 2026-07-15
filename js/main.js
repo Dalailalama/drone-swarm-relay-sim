@@ -11,6 +11,8 @@
   const countRange = el('countRange'), countOut = el('countOut');
   const distRange = el('distRange'), distOut = el('distOut');
   const altRange = el('altRange'), altOut = el('altOut');
+  const windSpdRange = el('windSpdRange'), windSpdOut = el('windSpdOut');
+  const windDirRange = el('windDirRange'), windDirOut = el('windDirOut');
   const speedBtns = Array.from(document.querySelectorAll('[data-speed]'));
   const statusPill = el('statusPill'), specCard = el('specCard');
   const hopsBody = el('hopsBody'), fleetBody = el('fleetBody'), eventLog = el('eventLog');
@@ -57,6 +59,8 @@
       count: +countRange.value,
       airframe,
       altitudeM: +altRange.value,
+      windX: +windSpdRange.value * Math.cos(+windDirRange.value * Math.PI / 180),
+      windY: +windSpdRange.value * Math.sin(+windDirRange.value * Math.PI / 180),
       targetX: dist, targetY: -dist * 0.25,
       radio, envFactor: env.factor,
       shadowSigmaDb: env.shadowSigmaDb,
@@ -131,6 +135,15 @@
     if (swarm) swarm.altitudeM = +altRange.value;
     updateSpecCard();
   });
+  function applyWind() {
+    const spd = +windSpdRange.value;
+    const rad = +windDirRange.value * Math.PI / 180;
+    windSpdOut.textContent = spd + ' m/s';
+    windDirOut.textContent = windDirRange.value + '°';
+    if (swarm) { swarm.wind.x = spd * Math.cos(rad); swarm.wind.y = spd * Math.sin(rad); }
+  }
+  windSpdRange.addEventListener('input', applyWind);
+  windDirRange.addEventListener('input', applyWind);
   speedBtns.forEach(b => b.addEventListener('click', () => {
     const v = b.dataset.speed;
     if (v === 'pause') { paused = !paused; b.textContent = paused ? 'Resume' : 'Pause'; }
