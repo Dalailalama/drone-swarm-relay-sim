@@ -67,6 +67,22 @@ reports the refusal; C2 benches it for a while and elects a drone that can
 actually afford the job. A drone that says yes has proven it can also say
 goodbye safely.
 
+### The tether rule
+
+The swarm's most bird-like behavior: **no drone ever outruns its link.**
+C2 names each drone's upstream chain neighbor in every order; the drone
+tracks that neighbor's beacon RSSI (smoothed), and as the measured margin
+sinks toward a floor it stops extending — and below the floor it closes
+back in. Retreats and homeward flights are never blocked; the tether only
+stops you from flying *away* from your own connectivity. Deployment
+becomes a caterpillar unroll — the flock waits for the chain instead of
+sprinting into blackout — and in bad RF the chain compresses automatically,
+spacing itself by measured link quality instead of planned geometry.
+
+Measured effect: launch-phase dark time drops to zero, and the urban
+scenario at 50 m AGL goes from ~15% link uptime (swarm repeatedly marooned
+in street canyons) to 100%, with the mission still reaching its target.
+
 ### Corridor transit
 
 Second borrowing from FASTER's methodology (safe corridors): far transits

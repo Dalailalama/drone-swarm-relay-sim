@@ -54,6 +54,23 @@ const BATTERY = {
 
 const GPS_SIGMA_M = 1.5; // typical GNSS horizontal error — C2 sees noisy positions
 
+// Tether rule: never outrun your link. Each drone tracks the beacon RSSI of
+// its upstream chain neighbor; as that margin thins it stops extending, and
+// when it nearly dies it closes back in. Thresholds sit just under the
+// planned per-hop margin, so tighter hop-spacing settings still work — the
+// tether is a floor, not a leash of fixed length.
+const TETHER = {
+  emaAlpha: 0.15,       // beacon RSSI smoothing per tick
+  slowBelowPlanDb: 1.5, // start pausing extension this far under planned margin
+  stopBelowPlanDb: 6,   // close back in this far under planned margin
+  minSlowDb: 1.5,
+  minStopDb: 0.5,
+};
+
+function plannedHopMarginDb(s) {
+  return linkMarginDb(s.radio, s.envFactor, usableRangeM(s.radio, s.envFactor) * s.deployFrac);
+}
+
 const COVERAGE = {
   deadLogIntervalSec: 5,  // while disconnected, log a dead-zone sample this often
   deadLogMax: 20,         // onboard black-box capacity
@@ -81,7 +98,8 @@ function makeDrone(x, y, target, rng, airframe) {
     energyWh: usableWh(airframe),
     batteryPct: 100,
     // Onboard state — the drone's own little world
-    order: { role: 'mission', slot: -1, k: 0, target: { x: target.x, y: target.y } }, // preflight upload
+    order: { role: 'mission', slot: -1, k: 0, upstream: 'C2', target: { x: target.x, y: target.y } }, // preflight upload
+    upMarginEma: 30, // smoothed RSSI margin to the upstream neighbor, dB
     mode: 'ok',            // ok | hold | relink | rtl | rtb | landed | dead
     lastC2: 0,
     holdX: 0, holdY: 0,
@@ -436,24 +454,30 @@ function c2Step(s) {
     // stays connected while it hunts. As its own telemetry comes back from
     // farther out, the reach point advances.
     const c = lostCentroid(s);
-    let anchor = s.base, aD = dist2d(s.base, c);
+    let anchor = s.base, anchorId = 'C2', aD = dist2d(s.base, c);
     for (const id of Object.keys(known)) {
       if (!fresh(id) || id === s.c2.rescuer) continue; // can't anchor on itself
       const dd = dist2d(known[id], c);
-      if (dd < aD) { aD = dd; anchor = known[id]; }
+      if (dd < aD) { aD = dd; anchor = known[id]; anchorId = id; }
     }
     const reach = Math.min(usable * s.deployFrac, aD);
     rescueGoto = aD < 1 ? { x: c.x, y: c.y } : {
       x: anchor.x + (c.x - anchor.x) / aD * reach,
       y: anchor.y + (c.y - anchor.y) / aD * reach,
     };
+    rescueGoto.anchorId = anchorId;
   }
 
-  // Dispatch orders — best effort; packets die if no route exists
+  // Dispatch orders — best effort; packets die if no route exists. Every
+  // order names the drone's UPSTREAM chain neighbor, so it can tether to it:
+  // relays hang off the previous slot (slot 0 off C2), the flock hangs off
+  // the last relay, the rescuer off its anchor.
+  const lastRelay = s.c2.relays.length ? s.c2.relays[s.c2.relays.length - 1] : 'C2';
   for (const id of Object.keys(known)) {
     if (id === s.c2.rescuer && rescueGoto) {
       sendPacket(s, 'cmd', 'C2', id, {
         role: 'rescue', slot: -1, goto: rescueGoto,
+        upstream: rescueGoto.anchorId,
         k: s.c2.relays.length,
         target: { x: s.target.x, y: s.target.y },
       });
@@ -463,6 +487,7 @@ function c2Step(s) {
     sendPacket(s, 'cmd', 'C2', id, {
       role: slot >= 0 ? 'relay' : 'mission',
       slot,
+      upstream: slot > 0 ? s.c2.relays[slot - 1] : (slot === 0 ? 'C2' : lastRelay),
       k: s.c2.relays.length,
       slotPos: slot >= 0 ? adjustedSlotPos(s, slot, s.c2.relays.length) : null,
       target: { x: s.target.x, y: s.target.y },
@@ -654,12 +679,50 @@ function goalFor(s, d) {
   };
 }
 
+// The tether applied to a goal: while the upstream link is healthy the goal
+// passes through; as the measured margin sinks toward the floor, outbound
+// progress (anything that increases distance from the upstream node) is
+// throttled to zero; below the floor the drone closes back in. Retreats and
+// homeward flights are never blocked — the tether only stops you from
+// flying AWAY from your link.
+function tetherGoal(s, d, goal) {
+  if (d.mode !== 'ok' || !d.order.upstream) return goal;
+  const upPos = d.order.upstream === 'C2' ? s.base : nodePos(s, d.order.upstream);
+  if (!upPos || (upPos !== s.base && !alive(upPos))) return goal;
+
+  const plan = plannedHopMarginDb(s);
+  const slowDb = Math.max(TETHER.minSlowDb, plan - TETHER.slowBelowPlanDb);
+  const stopDb = Math.max(TETHER.minStopDb, plan - TETHER.stopBelowPlanDb);
+  const m = d.upMarginEma;
+
+  if (m >= slowDb) return goal;
+  // only throttle motion that takes us FARTHER from the upstream node
+  if (dist2d(goal, upPos) <= dist2d(d, upPos)) return goal;
+
+  if (m <= stopDb) {
+    // link nearly gone: step back toward the upstream neighbor
+    if (!d.tethered) { d.tethered = true; logEvent(s, d.id + ' tether: link to ' + d.order.upstream + ' thin — closing up', 'warn'); }
+    return { x: d.x + (upPos.x - d.x) * 0.4, y: d.y + (upPos.y - d.y) * 0.4 };
+  }
+  // in the slow band: freeze outbound progress proportionally
+  const f = (m - stopDb) / (slowDb - stopDb);
+  return { x: d.x + (goal.x - d.x) * f, y: d.y + (goal.y - d.y) * f };
+}
+
 function stepDrone(s, d, dt) {
   if (!alive(d)) return;
 
   droneComms(s, d);
 
-  const goal = corridorGoal(s, d, goalFor(s, d));
+  // Track the upstream beacon (radios hear their neighbors constantly)
+  if (d.order.upstream) {
+    const raw = liveMarginDb(s, d.id, d.order.upstream);
+    const capped = Math.max(-20, Math.min(40, raw));
+    d.upMarginEma += (capped - d.upMarginEma) * TETHER.emaAlpha;
+    if (d.tethered && d.upMarginEma > plannedHopMarginDb(s) - TETHER.slowBelowPlanDb + 1) d.tethered = false;
+  }
+
+  const goal = tetherGoal(s, d, corridorGoal(s, d, goalFor(s, d)));
   const maxV = s.airframe.maxSpeedMs;
   const dx = goal.x - d.x, dy = goal.y - d.y;
   const dGoal = Math.hypot(dx, dy);
