@@ -100,6 +100,7 @@ function makeSwarm(opts) {
     airframe: opts.airframe,
     altitudeM: opts.altitudeM || 50,
     deployFrac: opts.deployFrac || RELAY.deployFrac,
+    corridorRouting: opts.corridorRouting !== false,
     wind: { x: opts.windX || 0, y: opts.windY || 0 },
     events: [],
     radio: opts.radio,
@@ -141,6 +142,29 @@ function liveMarginDb(s, aId, bId) {
   if (ground > radioHorizonM(nodeAltM(s, aId), nodeAltM(s, bId))) return -Infinity;
   const slant = Math.hypot(ground, nodeAltM(s, aId) - nodeAltM(s, bId));
   return linkMarginDb(s.radio, s.envFactor, slant) + fadeDb(s, aId, bId);
+}
+
+// Comms-corridor transit (methodology from FASTER's safe corridors: keep the
+// path inside space you can trust). The trusted space here is the coverage
+// tube along the base→target spine where the relay chain lives. For any
+// far-away goal, converge onto the spine and travel along it, peeling off
+// only for the final hop — so a transiting drone stays commandable instead
+// of cutting a dark corner. Built purely from the drone's own order: no
+// god-view needed.
+function corridorGoal(s, d, g) {
+  if (!s.corridorRouting) return g;
+  const hop = usableRangeM(s.radio, s.envFactor) * 0.8;
+  if (dist2d(d, g) <= hop) return g;                    // final hop: go direct
+  const B = s.base, T = d.order.target;
+  const L = dist2d(B, T);
+  if (L < 1) return g;
+  const ux = (T.x - B.x) / L, uy = (T.y - B.y) / L;
+  const tMe = Math.max(0, Math.min(L, (d.x - B.x) * ux + (d.y - B.y) * uy));
+  const tGoal = Math.max(0, Math.min(L, (g.x - B.x) * ux + (g.y - B.y) * uy));
+  if (Math.abs(tGoal - tMe) < hop * 0.5) return g;      // same stretch: direct
+  const step = Math.sign(tGoal - tMe) * Math.min(hop * 0.75, Math.abs(tGoal - tMe));
+  const t = tMe + step;
+  return { x: B.x + ux * t, y: B.y + uy * t };
 }
 
 // Where would this order send the drone?
@@ -511,7 +535,7 @@ function stepDrone(s, d, dt) {
 
   droneComms(s, d);
 
-  const goal = goalFor(s, d);
+  const goal = corridorGoal(s, d, goalFor(s, d));
   const maxV = s.airframe.maxSpeedMs;
   const dx = goal.x - d.x, dy = goal.y - d.y;
   const dGoal = Math.hypot(dx, dy);

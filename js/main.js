@@ -14,6 +14,7 @@
   const windSpdRange = el('windSpdRange'), windSpdOut = el('windSpdOut');
   const windDirRange = el('windDirRange'), windDirOut = el('windDirOut');
   const spacingRange = el('spacingRange'), spacingOut = el('spacingOut'), spacingInfo = el('spacingInfo');
+  const corridorChk = el('corridorChk'), corridorOut = el('corridorOut');
   const speedBtns = Array.from(document.querySelectorAll('[data-speed]'));
   const statusPill = el('statusPill'), specCard = el('specCard');
   const hopsBody = el('hopsBody'), fleetBody = el('fleetBody'), eventLog = el('eventLog');
@@ -62,6 +63,7 @@
       airframe,
       altitudeM: +altRange.value,
       deployFrac: +spacingRange.value / 100,
+      corridorRouting: corridorChk.checked,
       windX: +windSpdRange.value * Math.cos(+windDirRange.value * Math.PI / 180),
       windY: +windSpdRange.value * Math.sin(+windDirRange.value * Math.PI / 180),
       targetX: dist, targetY: -dist * 0.25,
@@ -161,6 +163,10 @@
       (margin < 3 ? ' — fragile: shadowing swings will break these links' : '');
   }
   spacingRange.addEventListener('input', applySpacing);
+  corridorChk.addEventListener('change', () => {
+    if (swarm) swarm.corridorRouting = corridorChk.checked;
+    corridorOut.textContent = corridorChk.checked ? 'transits follow the chain' : 'straight-line transits';
+  });
   speedBtns.forEach(b => b.addEventListener('click', () => {
     const v = b.dataset.speed;
     if (v === 'pause') { paused = !paused; b.textContent = paused ? 'Resume' : 'Pause'; }

@@ -67,6 +67,23 @@ reports the refusal; C2 benches it for a while and elects a drone that can
 actually afford the job. A drone that says yes has proven it can also say
 goodbye safely.
 
+### Corridor transit
+
+Second borrowing from FASTER's methodology (safe corridors): far transits
+converge onto the base→target spine — where the relay chain lives — and
+travel along it, peeling off only for the final hop. A toggle in Mission
+setup switches it off for comparison.
+
+Measured honestly: in today's obstacle-free world this changes transit
+paths but rarely changes connectivity. Two emergent reasons: when the
+mission retargets, the relays re-slot along the rotating line, so the whole
+swarm sweeps together and escorts itself; and every drone is a mesh node,
+so group transits carry their own coverage. Corridors start earning their
+keep when transits are solo and the world has radio dead zones — i.e. once
+terrain and the learned RF coverage map (roadmap) exist, corridors will
+bend around *measured* dead zones instead of following a straight spine.
+Same dependency as FASTER itself: corridors need a map to matter.
+
 ## The radio model (and its honesty)
 
 Every radio preset is a real product with datasheet numbers — TX power,
