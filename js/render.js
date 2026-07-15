@@ -14,11 +14,14 @@ const COLORS = {
   mission: '#34d399',
   relay: '#fbbf24',
   rtb: '#a78bfa',
+  rtl: '#a78bfa',
+  hold: '#f472b6',
   landed: '#64748b',
   dead: '#ef4444',
   text: '#cbd5e1',
   textDim: '#64748b',
-  packet: '#e2e8f0',
+  packetCmd: '#38bdf8',
+  packetTlm: '#e2e8f0',
 };
 
 function worldToScreen(view, cv, x, y) {
@@ -93,17 +96,22 @@ function drawLinks(ctx, cv, view, hops, timeSec, connected) {
     ctx.fillText(fmtDist(hop.distM) + '  ' + hop.marginDb.toFixed(0) + ' dB', mx, my - 6);
   }
 
-  // Animated packets flowing along healthy chain
-  if (connected && hops.length) {
-    const phase = (timeSec % 2) / 2;
-    for (const hop of hops) {
-      if (hop.state === 'lost') break;
-      const a = worldToScreen(view, cv, hop.a.x, hop.a.y);
-      const b = worldToScreen(view, cv, hop.b.x, hop.b.y);
-      const p = { x: a.x + (b.x - a.x) * phase, y: a.y + (b.y - a.y) * phase };
-      ctx.beginPath(); ctx.arc(p.x, p.y, 3, 0, Math.PI * 2);
-      ctx.fillStyle = COLORS.packet; ctx.fill();
-    }
+}
+
+// Real packets from the network layer, drawn mid-flight on their current hop.
+function drawPackets(ctx, cv, view, s) {
+  for (const p of s.net.packets) {
+    const a = nodePos(s, p.path[p.hop]);
+    const b = nodePos(s, p.path[p.hop + 1]);
+    if (!a || !b) continue;
+    const span = p.tArrive - p.tHopStart;
+    const frac = span > 0 ? Math.min(1, Math.max(0, (s.time - p.tHopStart) / span)) : 1;
+    const sa = worldToScreen(view, cv, a.x, a.y);
+    const sb = worldToScreen(view, cv, b.x, b.y);
+    ctx.beginPath();
+    ctx.arc(sa.x + (sb.x - sa.x) * frac, sa.y + (sb.y - sa.y) * frac, 2.5, 0, Math.PI * 2);
+    ctx.fillStyle = p.kind === 'cmd' ? COLORS.packetCmd : COLORS.packetTlm;
+    ctx.fill();
   }
 }
 
@@ -133,11 +141,8 @@ function drawTarget(ctx, cv, view, target) {
 }
 
 function droneColor(d) {
-  if (d.role === 'mission') return COLORS.mission;
-  if (d.role === 'relay') return COLORS.relay;
-  if (d.role === 'rtb') return COLORS.rtb;
-  if (d.role === 'landed') return COLORS.landed;
-  return COLORS.dead;
+  const r = effRole(d);
+  return COLORS[r] || COLORS.dead;
 }
 
 function drawDrone(ctx, cv, view, d, selected) {
@@ -152,10 +157,10 @@ function drawDrone(ctx, cv, view, d, selected) {
   }
 
   ctx.save(); ctx.translate(c.x, c.y);
-  if (d.role === 'dead') {
+  if (d.mode === 'dead') {
     ctx.strokeStyle = col; ctx.lineWidth = 2;
     ctx.beginPath(); ctx.moveTo(-5, -5); ctx.lineTo(5, 5); ctx.moveTo(5, -5); ctx.lineTo(-5, 5); ctx.stroke();
-  } else if (d.role === 'landed') {
+  } else if (d.mode === 'landed') {
     ctx.fillStyle = col;
     ctx.beginPath(); ctx.arc(0, 0, 4, 0, Math.PI * 2); ctx.fill();
   } else {
@@ -201,6 +206,7 @@ function render(ctx, cv, view, s, status, selected, usable) {
   }
 
   drawLinks(ctx, cv, view, status.hops, s.time, status.connected);
+  drawPackets(ctx, cv, view, s);
   drawBase(ctx, cv, view, s.base);
   drawTarget(ctx, cv, view, s.target);
   for (const d of s.drones) drawDrone(ctx, cv, view, d, d === selected);

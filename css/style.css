@@ -74,6 +74,7 @@ main { flex: 1; display: flex; min-height: 0; }
 }
 #legend .lg-mission::before { background: var(--ok); }
 #legend .lg-relay::before { background: var(--warn); }
+#legend .lg-hold::before { background: #f472b6; }
 #legend .lg-rtb::before { background: #a78bfa; }
 #legend .lg-dead::before { background: var(--lost); }
 
@@ -158,6 +159,8 @@ td.dim { color: var(--dim); }
 .fleet-row .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
 .role-mission .dot { background: var(--ok); }
 .role-relay .dot { background: var(--warn); }
+.role-hold .dot { background: #f472b6; }
+.role-rtl .dot { background: #a78bfa; }
 .role-rtb .dot { background: #a78bfa; }
 .role-landed .dot { background: var(--dim); }
 .role-dead .dot { background: var(--lost); }

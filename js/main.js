@@ -15,6 +15,7 @@
   const hopsBody = el('hopsBody'), fleetBody = el('fleetBody'), eventLog = el('eventLog');
   const killBtn = el('killBtn'), resetBtn = el('resetBtn');
   const kpiRelays = el('kpiRelays'), kpiMission = el('kpiMission'), kpiThroughput = el('kpiThroughput'), kpiClock = el('kpiClock');
+  const kpiContact = el('kpiContact'), kpiPackets = el('kpiPackets');
 
   RADIOS.forEach(r => {
     const o = document.createElement('option');
@@ -40,13 +41,16 @@
 
   function defaultTargetDist() { return usable() * 2.4; } // far enough to need 2 relays
 
+  let missionSeq = 0;
   function resetSwarm() {
     const dist = +distRange.value / 100 * defaultTargetDist();
+    missionSeq += 1;
     swarm = makeSwarm({
       count: +countRange.value,
       enduranceMin: +endurRange.value,
       targetX: dist, targetY: -dist * 0.25,
       radio, envFactor: env.factor,
+      seed: 42 + missionSeq,
     });
     selected = null;
     fitView();
@@ -173,10 +177,10 @@
   }
 
   function updatePanels(status) {
-    const relays = swarm.relays.length;
-    const airborne = swarm.drones.filter(alive).length;
-    kpiRelays.textContent = relays;
+    kpiRelays.textContent = status.relayCount;
     kpiMission.textContent = status.missionCount;
+    kpiContact.textContent = status.freshCount + '/' + status.aliveCount;
+    kpiPackets.textContent = swarm.net.delivered.toLocaleString();
     kpiThroughput.textContent = status.connected
       ? (chainThroughputKbps(radio, status.hops.length) >= 1000
         ? (chainThroughputKbps(radio, status.hops.length) / 1000).toFixed(1) + ' Mbps'
@@ -184,16 +188,18 @@
       : '—';
     kpiClock.textContent = fmtSimClock(swarm.time);
 
-    if (!status.missionCount && !airborne) {
+    if (!status.aliveCount) {
       statusPill.textContent = 'Swarm down';
       statusPill.className = 'pill lost';
     } else if (status.connected) {
       statusPill.textContent = 'Connected — ' + status.hops.length + ' hop' + (status.hops.length > 1 ? 's' : '');
       statusPill.className = 'pill ok';
+    } else if (status.freshCount > 0) {
+      statusPill.textContent = 'Flock out of contact — C2 sees ' + status.freshCount + '/' + status.aliveCount;
+      statusPill.className = 'pill warn';
     } else {
-      const anyDegraded = status.hops.some(h => h.state !== 'lost');
-      statusPill.textContent = status.hops.some(h => h.state === 'lost') ? 'Link lost — repositioning' : 'Degraded';
-      statusPill.className = 'pill ' + (anyDegraded ? 'warn' : 'lost');
+      statusPill.textContent = 'All contact lost';
+      statusPill.className = 'pill lost';
     }
 
     hopsBody.innerHTML = status.hops.map((h, i) =>
@@ -203,9 +209,10 @@
 
     fleetBody.innerHTML = swarm.drones.map(d => {
       const sel = d === selected ? ' style="outline:1px solid #e2e8f0;"' : '';
-      return '<div class="fleet-row role-' + d.role + '"' + sel + ' data-id="' + d.id + '">' +
+      const role = effRole(d);
+      return '<div class="fleet-row role-' + role + '"' + sel + ' data-id="' + d.id + '">' +
         '<span class="dot"></span><span class="fid">' + d.id + '</span>' +
-        '<span class="frole">' + d.role + '</span>' +
+        '<span class="frole">' + role + '</span>' +
         '<span class="fbat"><span class="fbat-fill" style="width:' + d.batteryPct.toFixed(0) + '%"></span></span>' +
         '<span class="fpct">' + d.batteryPct.toFixed(0) + '%</span></div>';
     }).join('');
@@ -259,6 +266,14 @@
 
     requestAnimationFrame(frame);
   }
+
+  // Debug/inspection handle (also handy from the devtools console)
+  window.sim = {
+    get swarm() { return swarm; },
+    get radio() { return radio; },
+    view,
+    setTimeScale(v) { timeScale = v; },
+  };
 
   // --- Boot -------------------------------------------------------------------
   resize();
