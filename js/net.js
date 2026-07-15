@@ -117,8 +117,7 @@ function nodePos(s, id) {
   return s.drones.find(d => d.id === id) || null;
 }
 
-const ROUTE_MIN_MARGIN_DB = 3; // route selection avoids marginal links...
-const LINK_MIN_MARGIN_DB = 0;  // ...but an in-flight packet uses what's there
+const LINK_MIN_MARGIN_DB = 0; // an in-flight packet uses whatever exists
 
 function linkUsable(s, aId, bId, minMarginDb) {
   const a = nodePos(s, aId), b = nodePos(s, bId);
@@ -128,36 +127,47 @@ function linkUsable(s, aId, bId, minMarginDb) {
   return liveMarginDb(s, aId, bId) > (minMarginDb ?? LINK_MIN_MARGIN_DB);
 }
 
-// BFS shortest-hop route. Real mesh firmwares (DigiMesh, 802.11s) do roughly
-// this with routing tables; hop count is the metric, but link-quality gating
-// keeps traffic off barely-alive links. If no quality route exists, fall back
-// to anything with positive margin (desperation mode).
-function routePath(s, from, to) {
-  return bfsRoute(s, from, to, ROUTE_MIN_MARGIN_DB) || bfsRoute(s, from, to, LINK_MIN_MARGIN_DB);
+// ETX-style link cost: expected transmissions, evaluated PESSIMISTICALLY
+// (margin minus the fade reserve). Min-hop routing famously prefers one long
+// barely-alive link over two solid short ones — the mesh-networking "gray
+// link" problem that pushed real protocols (OLSR, Babel, 802.11s) to
+// link-quality metrics. Costing at margin-minus-reserve means an engineered
+// relay hop with headroom beats a marginal shortcut, while desperate links
+// stay usable when nothing better exists.
+function linkCost(s, aId, bId) {
+  if (!linkUsable(s, aId, bId)) return Infinity;
+  const m = liveMarginDb(s, aId, bId);
+  return 1 / Math.max(0.05, pktSuccessProb(m - FADE_MARGIN_DB));
 }
 
-function bfsRoute(s, from, to, minMarginDb) {
+// Dijkstra over ETX costs (the node count is tiny — a dozen drones).
+function routePath(s, from, to) {
   if (from === to) return [from];
   const ids = nodeIds(s);
   if (!ids.includes(from) || !ids.includes(to)) return null;
-  const prev = { [from]: from };
-  const queue = [from];
-  while (queue.length) {
-    const cur = queue.shift();
+  const dist = new Map(ids.map(id => [id, Infinity]));
+  const prev = new Map();
+  const done = new Set();
+  dist.set(from, 0);
+  for (;;) {
+    let cur = null, best = Infinity;
+    for (const id of ids) {
+      if (!done.has(id) && dist.get(id) < best) { best = dist.get(id); cur = id; }
+    }
+    if (cur === null) return null;   // target unreachable
+    if (cur === to) break;
+    done.add(cur);
     for (const nxt of ids) {
-      if (nxt in prev) continue;
-      if (!linkUsable(s, cur, nxt, minMarginDb)) continue;
-      prev[nxt] = cur;
-      if (nxt === to) {
-        const path = [to];
-        let p = to;
-        while (p !== from) { p = prev[p]; path.unshift(p); }
-        return path;
-      }
-      queue.push(nxt);
+      if (done.has(nxt)) continue;
+      const c = linkCost(s, cur, nxt);
+      if (c === Infinity) continue;
+      if (best + c < dist.get(nxt)) { dist.set(nxt, best + c); prev.set(nxt, cur); }
     }
   }
-  return null;
+  const path = [to];
+  let p = to;
+  while (p !== from) { p = prev.get(p); if (p === undefined) return null; path.unshift(p); }
+  return path;
 }
 
 // --- Packets ------------------------------------------------------------------
