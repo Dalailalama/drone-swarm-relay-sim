@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Drone swarm relay simulator</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='80' font-size='80'>&#128760;</text></svg>">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<header>
+  <h1>Drone swarm relay sim</h1>
+  <span class="sub">C2 mesh link planner &middot; real radio hardware specs</span>
+  <span id="statusPill" class="pill ok">—</span>
+</header>
+
+<main>
+  <div id="mapWrap">
+    <canvas id="map"></canvas>
+    <div id="legend">
+      <span class="lg-mission">mission</span>
+      <span class="lg-relay">relay</span>
+      <span class="lg-rtb">RTB</span>
+      <span class="lg-dead">down</span>
+    </div>
+  </div>
+
+  <aside>
+    <section>
+      <h2>Status</h2>
+      <div class="kpis">
+        <div class="kpi"><div class="k-label">Relay drones</div><div class="k-val" id="kpiRelays">0</div></div>
+        <div class="kpi"><div class="k-label">Mission drones</div><div class="k-val" id="kpiMission">0</div></div>
+        <div class="kpi"><div class="k-label">Chain throughput</div><div class="k-val" id="kpiThroughput">—</div></div>
+        <div class="kpi"><div class="k-label">Mission clock</div><div class="k-val" id="kpiClock">T+00:00</div></div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Radio hardware</h2>
+      <select id="radioSel"></select>
+      <div style="height:8px"></div>
+      <select id="envSel"></select>
+      <div style="height:10px"></div>
+      <div id="specCard"></div>
+    </section>
+
+    <section>
+      <h2>Mission setup</h2>
+      <div class="ctl-row">
+        <label for="countRange">Drones</label>
+        <input type="range" id="countRange" min="3" max="30" value="10" step="1">
+        <output id="countOut">10</output>
+      </div>
+      <div class="ctl-row">
+        <label for="endurRange">Endurance</label>
+        <input type="range" id="endurRange" min="10" max="90" value="25" step="5">
+        <output id="endurOut">25 min</output>
+      </div>
+      <div class="ctl-row">
+        <label for="distRange">Target distance</label>
+        <input type="range" id="distRange" min="10" max="220" value="100" step="1">
+        <output id="distOut">—</output>
+      </div>
+      <div class="speed-row">
+        <button data-speed="1">1&times;</button>
+        <button data-speed="5">5&times;</button>
+        <button data-speed="30">30&times;</button>
+        <button data-speed="120">120&times;</button>
+        <button data-speed="pause">Pause</button>
+      </div>
+      <div class="btn-row">
+        <button id="killBtn" class="danger" disabled>Kill drone (select one)</button>
+        <button id="resetBtn">Relaunch</button>
+      </div>
+    </section>
+
+    <section>
+      <h2>Link chain</h2>
+      <table>
+        <thead><tr><th>Hop</th><th>Dist</th><th>RSSI dBm</th><th>Margin dB</th></tr></thead>
+        <tbody id="hopsBody"></tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>Fleet</h2>
+      <div id="fleetBody"></div>
+    </section>
+
+    <section>
+      <h2>Event log</h2>
+      <div id="eventLog"></div>
+    </section>
+  </aside>
+</main>
+
+<script src="js/radios.js"></script>
+<script src="js/swarm.js"></script>
+<script src="js/render.js"></script>
+<script src="js/main.js"></script>
+
+</body>
+</html>
