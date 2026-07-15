@@ -38,6 +38,7 @@ const FAILSAFE = {
 const RESCUE = {
   delaySec: 12,        // give the drones' own failsafes a moment first
   memorySec: 180,      // how long C2 hunts for a silent drone before giving up
+  maxChain: 3,         // rescuers may chain off each other this many deep
 };
 
 const C2 = {
@@ -144,7 +145,7 @@ function makeSwarm(opts) {
     showCoverage: true,
     broadcastC2: opts.broadcastC2 !== false,
     net: makeNet(opts.seed || 42),
-    c2: { known: {}, relays: [], inbox: [], nextCmd: 0, wasFresh: {}, lost: {}, rescuer: null, unfit: {}, cov: new Map(), slotCache: {}, bcastSeq: 0 },
+    c2: { known: {}, relays: [], inbox: [], nextCmd: 0, wasFresh: {}, lost: {}, rescuers: [], unfit: {}, cov: new Map(), slotCache: {}, bcastSeq: 0 },
   };
   for (let i = 0; i < opts.count; i++) {
     const a = (i / opts.count) * Math.PI * 2;
@@ -365,10 +366,12 @@ function c2Step(s) {
       logEvent(s, 'C2: ' + id + ' declined relay duty (low reserves) — benched, reassigning', 'warn');
     }
   }
-  if (s.c2.rescuer && fresh(s.c2.rescuer) && known[s.c2.rescuer].reject === 'rescue') {
-    s.c2.unfit[s.c2.rescuer] = s.time + 60;
-    logEvent(s, 'C2: ' + s.c2.rescuer + ' declined rescue tasking — benched', 'warn');
-    s.c2.rescuer = null;
+  for (const rid of [...s.c2.rescuers]) {
+    if (fresh(rid) && known[rid].reject === 'rescue') {
+      s.c2.unfit[rid] = s.time + 60;
+      logEvent(s, 'C2: ' + rid + ' declined rescue tasking — benched', 'warn');
+      s.c2.rescuers = s.c2.rescuers.filter(x => x !== rid);
+    }
   }
 
   // Roster hygiene: relays C2 can no longer account for are struck off
@@ -406,7 +409,7 @@ function c2Step(s) {
     const candidates = Object.keys(known).filter(id =>
       fresh(id) && known[id].role === 'mission' &&
       known[id].battery >= RELAY.minBatteryPct && !s.c2.relays.includes(id) &&
-      !(s.c2.unfit[id] > s.time));
+      !s.c2.rescuers.includes(id) && !(s.c2.unfit[id] > s.time));
     if (candidates.length) {
       const slotF = (k + 1) / (k + 2);
       const slot = { x: s.base.x + (s.target.x - s.base.x) * slotF, y: s.base.y + (s.target.y - s.base.y) * slotF };
@@ -426,24 +429,39 @@ function c2Step(s) {
   }
 
   // --- Rescue dispatch (fallback engine, C2 side) ------------------------
+  // Multi-hop tentacle: rescuers chain off each other — the first anchors on
+  // the nearest fresh node, each next one on the rescuer before it — and the
+  // chain crawls toward the lost group's last-known centroid one
+  // link-length at a time, every member tethered and connected as it goes.
   const lostIds = Object.keys(s.c2.lost);
-  if (s.c2.rescuer) {
-    const kR = known[s.c2.rescuer];
-    const still = fresh(s.c2.rescuer) && kR && !['rtb', 'landed', 'dead'].includes(kR.role);
-    if (!still) {
-      logEvent(s, 'C2: rescue drone ' + s.c2.rescuer + ' unavailable — reassigning', 'warn');
-      s.c2.rescuer = null;
-    } else if (!lostIds.length) {
-      logEvent(s, 'C2: contact restored — ' + s.c2.rescuer + ' released from rescue', 'relay');
-      s.c2.rescuer = null;
+  if (s.c2.rescuers.length && !lostIds.length) {
+    logEvent(s, 'C2: contact restored — rescue chain of ' + s.c2.rescuers.length + ' released', 'relay');
+    s.c2.rescuers = [];
+  } else {
+    const before = s.c2.rescuers.length;
+    s.c2.rescuers = s.c2.rescuers.filter(rid => {
+      const kR = known[rid];
+      return fresh(rid) && kR && !['rtb', 'landed', 'dead'].includes(kR.role);
+    });
+    if (s.c2.rescuers.length < before) {
+      logEvent(s, 'C2: rescue chain degraded (' + s.c2.rescuers.length + '/' + before + ') — reassigning', 'warn');
     }
   }
-  if (!s.c2.rescuer && lostIds.length &&
-      lostIds.some(id => s.time - s.c2.lost[id].at > RESCUE.delaySec)) {
+
+  const reach = usable * s.deployFrac;
+  const wantMoreRescuers = (() => {
+    if (!lostIds.length || s.c2.rescuers.length >= RESCUE.maxChain) return false;
+    if (!lostIds.some(id => s.time - s.c2.lost[id].at > RESCUE.delaySec)) return false;
+    if (!s.c2.rescuers.length) return true;
+    // extend only when the current tip is on station and still short
+    const tip = known[s.c2.rescuers[s.c2.rescuers.length - 1]];
+    return tip && dist2d(tip, lostCentroid(s)) > reach * 1.05;
+  })();
+  if (wantMoreRescuers) {
     const candidates = Object.keys(known).filter(id =>
       fresh(id) && known[id].role === 'mission' &&
       known[id].battery >= RELAY.minBatteryPct && !s.c2.relays.includes(id) &&
-      !(s.c2.unfit[id] > s.time));
+      !s.c2.rescuers.includes(id) && !(s.c2.unfit[id] > s.time));
     if (candidates.length) {
       const c = lostCentroid(s);
       let best = null, bestD = Infinity;
@@ -451,29 +469,35 @@ function c2Step(s) {
         const dd = dist2d(known[id], c);
         if (dd < bestD) { bestD = dd; best = id; }
       }
-      s.c2.rescuer = best;
-      logEvent(s, 'C2 dispatches ' + best + ' toward last-known contact point', 'relay');
+      s.c2.rescuers.push(best);
+      logEvent(s, 'C2 extends rescue chain (' + s.c2.rescuers.length + '): ' + best + ' toward last-known contact', 'relay');
     }
   }
-  let rescueGoto = null;
-  if (s.c2.rescuer) {
-    // Tentacle rule: extend from the nearest fresh node toward the lost
-    // group's last-known centroid, one link-length at a time, so the rescuer
-    // stays connected while it hunts. As its own telemetry comes back from
-    // farther out, the reach point advances.
+
+  // Per-rescuer goto: link i anchors on link i-1 (first on the nearest
+  // fresh non-rescuer node), each stepping one reach toward the centroid.
+  const rescueOrders = {};
+  if (s.c2.rescuers.length) {
     const c = lostCentroid(s);
     let anchor = s.base, anchorId = 'C2', aD = dist2d(s.base, c);
     for (const id of Object.keys(known)) {
-      if (!fresh(id) || id === s.c2.rescuer) continue; // can't anchor on itself
+      if (!fresh(id) || s.c2.rescuers.includes(id)) continue;
       const dd = dist2d(known[id], c);
       if (dd < aD) { aD = dd; anchor = known[id]; anchorId = id; }
     }
-    const reach = Math.min(usable * s.deployFrac, aD);
-    rescueGoto = aD < 1 ? { x: c.x, y: c.y } : {
-      x: anchor.x + (c.x - anchor.x) / aD * reach,
-      y: anchor.y + (c.y - anchor.y) / aD * reach,
-    };
-    rescueGoto.anchorId = anchorId;
+    for (const rid of s.c2.rescuers) {
+      const dHop = dist2d(anchor, c);
+      const step = Math.min(reach, dHop);
+      const goto = dHop < 1 ? { x: c.x, y: c.y } : {
+        x: anchor.x + (c.x - anchor.x) / dHop * step,
+        y: anchor.y + (c.y - anchor.y) / dHop * step,
+      };
+      rescueOrders[rid] = { goto, upstream: anchorId };
+      // the next link anchors on this one: its live position if fresh,
+      // otherwise where it was told to go
+      anchor = fresh(rid) && known[rid] ? known[rid] : goto;
+      anchorId = rid;
+    }
   }
 
   // Build every drone's order. Every order names the drone's UPSTREAM chain
@@ -482,10 +506,10 @@ function c2Step(s) {
   // its anchor.
   const lastRelay = s.c2.relays.length ? s.c2.relays[s.c2.relays.length - 1] : 'C2';
   const orderFor = id => {
-    if (id === s.c2.rescuer && rescueGoto) {
+    if (rescueOrders[id]) {
       return {
-        role: 'rescue', slot: -1, goto: rescueGoto,
-        upstream: rescueGoto.anchorId,
+        role: 'rescue', slot: -1, goto: rescueOrders[id].goto,
+        upstream: rescueOrders[id].upstream,
         k: s.c2.relays.length,
         target: { x: s.target.x, y: s.target.y },
       };

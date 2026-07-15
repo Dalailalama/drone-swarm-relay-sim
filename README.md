@@ -53,8 +53,10 @@ the link last worked:
   the lost drone's telemetry reappears through the extended coverage, both
   are re-tasked and the mission resumes where it left off.
 
-Current limitation, stated plainly: the rescue tentacle extends one hop
-beyond the existing network. Multi-hop rescue chains are on the roadmap.
+Rescuers chain off each other (up to three deep): the first anchors on the
+nearest connected node, each next one on the rescuer before it, and the
+tentacle crawls toward the lost group's last-known position with every
+member tethered as it goes.
 
 ### The commitment rule
 
@@ -218,9 +220,6 @@ node --test
 
 - Corridor routing through the learned coverage map (bend transits around
   measured dead zones, not just relay slots)
-- Broadcast C2 mode (one packet orders the whole swarm — what LoRa C2
-  actually does)
-- Spare drones auto-launching to replace battery-RTB relays
 - Packet capture export for protocol debugging
 - PX4/ArduPilot SITL bridge: same planner, real autopilot firmware
 
