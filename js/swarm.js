@@ -50,6 +50,7 @@ const C2 = {
 const BATTERY = {
   homeMargin: 1.3,      // plan the flight home with 30% pessimism
   reserveFrac: 0.07,    // plus a fixed floor of usable energy
+  swapSec: 90,          // ground-crew battery swap time before relaunch
 };
 
 const GPS_SIGMA_M = 1.5; // typical GNSS horizontal error — C2 sees noisy positions
@@ -803,7 +804,8 @@ function stepDrone(s, d, dt) {
   if ((d.mode === 'rtb' || d.mode === 'rtl') && dist2d(d, s.base) < DRONE.landThresholdM) {
     if (d.mode === 'rtb') {
       d.mode = 'landed'; d.vx = d.vy = 0;
-      logEvent(s, d.id + ' landed at base', 'info');
+      d.swapAt = s.time + BATTERY.swapSec;
+      logEvent(s, d.id + ' landed at base — battery swap in progress', 'info');
     }
     // rtl drones hovering at base will regain link and be re-tasked
   }
@@ -853,6 +855,20 @@ function chainStatus(s) {
 function stepSwarm(s, dt) {
   s.time += dt;
   c2Step(s);
+
+  // Ground crew: landed drones get a fresh pack and go back to work
+  for (const d of s.drones) {
+    if (d.mode === 'landed' && d.swapAt && s.time >= d.swapAt) {
+      d.mode = 'ok';
+      d.energyWh = usableWh(s.airframe);
+      d.batteryPct = 100;
+      d.swapAt = null;
+      d.lastC2 = s.time;
+      d.order = { role: 'mission', slot: -1, k: 0, upstream: 'C2', target: { x: s.target.x, y: s.target.y } };
+      logEvent(s, d.id + ' battery swapped — relaunching', 'info');
+    }
+  }
+
   for (const d of s.drones) stepDrone(s, d, dt);
   stepNet(s, dt);
   return chainStatus(s);
