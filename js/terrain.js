@@ -108,7 +108,10 @@ function mulberry32(a) {
 // (60-150 m, real city heights), low-rise sprawl thins out toward the
 // edges, with parks and lots left empty. Reads like an actual city from
 // the 3D view, not a single block.
-function makeCity(cx, cy, spanM, rng) {
+// keepOut: [{x, y, rM}] — clearings where no block may be planted. The
+// ground station's staging area and the objective are always clearings;
+// nobody sites a GCS mast inside a random building cluster.
+function makeCity(cx, cy, spanM, rng, keepOut) {
   const buildings = [];
   const pitch = Math.max(40, spanM / 22);        // block spacing incl. street
   const n = Math.max(5, Math.round(spanM / pitch));
@@ -116,6 +119,7 @@ function makeCity(cx, cy, spanM, rng) {
     for (let j = 0; j < n; j++) {
       const gx = cx + (i - (n - 1) / 2) * pitch;
       const gy = cy + (j - (n - 1) / 2) * pitch;
+      if (keepOut && keepOut.some(z => Math.hypot(gx - z.x, gy - z.y) < z.rM)) { rng(); continue; }
       const rCore = Math.hypot(gx - cx, gy - cy) / (spanM / 2); // 0 downtown → 1 edge
       if (rng() < 0.12 + rCore * 0.5) continue;  // density falls off from the core
       const bx = gx + (rng() - 0.5) * pitch * 0.2;
@@ -169,18 +173,22 @@ function makeTerrain(name, opts) {
       groundScaleM: distM * 0.35,      // feature wavelength ~ a few hops
     };
   }
+  const keepOut = [
+    { x: 0, y: 0, rM: 130 },      // GCS staging clearing
+    { x: tX, y: tY, rM: 110 },    // objective clearing (at generation time)
+  ];
   if (name === 'urban') {
     const c = along(0.5);
     return indexBuildings({
       seed, groundAmpM: 0, groundScaleM: 1,
-      buildings: makeCity(c.x, c.y, distM * 1.15, rng),
+      buildings: makeCity(c.x, c.y, distM * 1.15, rng, keepOut),
     });
   }
   if (name === 'mixed') {
     const c = along(0.55);
     return indexBuildings({
       seed, groundAmpM: 2.0 * altM + 30, groundScaleM: distM * 0.45,
-      buildings: makeCity(c.x, c.y, distM * 0.55, rng),
+      buildings: makeCity(c.x, c.y, distM * 0.55, rng, keepOut),
     });
   }
   // 'flat' and anything unknown
