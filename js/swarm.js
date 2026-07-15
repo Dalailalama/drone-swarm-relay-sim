@@ -29,8 +29,10 @@ const FAILSAFE = {
   holdSec: 8,          // silence before a drone freezes in place
   rtlMissionSec: 30,   // silence before a mission drone retreats to regain link
   rtlRelaySec: 90,     // relays hold much longer — they ARE the link
-  relinkWaitSec: 45,   // how long to wait at the last-link point before full RTL
-  relinkArriveM: 40,   // "close enough" to the last-link point
+  relinkWaitSec: 35,   // listen time at each relink attempt point
+  relinkArriveM: 40,   // "close enough" to an attempt point
+  relinkAttempts: 3,   // tries before giving up and flying home to C2
+  relinkStepFrac: 0.7, // each failed attempt falls back this fraction of usable range toward base
 };
 
 const RESCUE = {
@@ -79,6 +81,8 @@ function makeDrone(x, y, target, rng, airframe) {
     holdX: 0, holdY: 0,
     lastLinkX: x, lastLinkY: y, // where the link last provably worked
     relinkUntil: null,
+    relinkAttempt: 0,
+    relinkGoalX: 0, relinkGoalY: 0,
     inbox: [],
     nextTlm: rng() * C2.tlmIntervalSec,
     orbitPhase: rng() * Math.PI * 2,
@@ -203,6 +207,19 @@ function c2Step(s) {
   const D = dist2d(s.base, s.target);
   const k = s.c2.relays.length;
   const kNeeded = relaysRequired(D, usable * RELAY.deployFrac);
+
+  // Operator warning: mission demands more relays than the fleet can supply.
+  // Drones will still try (and their failsafes will bring them back) — but
+  // the operator should know the plan doesn't close.
+  const assets = Object.keys(known).filter(id => fresh(id)).length;
+  const infeasible = kNeeded >= assets && assets > 0;
+  if (infeasible && !s.c2.infeasibleWarned) {
+    logEvent(s, 'C2 warning: target needs ' + kNeeded + ' relays but only ' + assets + ' drones in contact — link cannot close', 'error');
+    s.c2.infeasibleWarned = true;
+  } else if (!infeasible) {
+    s.c2.infeasibleWarned = false;
+  }
+
   if (kNeeded > k) {
     // Elect from fresh mission drones with battery to spare
     const candidates = Object.keys(known).filter(id =>
@@ -311,6 +328,7 @@ function droneComms(s, d) {
     d.lastC2 = s.time;
     d.lastLinkX = d.x; d.lastLinkY = d.y; // the link works HERE, remember it
     d.relinkUntil = null;
+    d.relinkAttempt = 0;
     if (d.mode === 'hold' || d.mode === 'relink' || d.mode === 'rtl') {
       d.mode = 'ok';
       logEvent(s, d.id + ' link restored — resuming orders', 'info');
@@ -348,16 +366,31 @@ function droneComms(s, d) {
   if (d.mode === 'hold' && age > rtlAfter) {
     // Fallback engine, stage 1: don't abandon the mission for base yet —
     // retreat to the last position where the link provably worked.
-    d.mode = 'relink'; d.relinkUntil = null;
-    logEvent(s, d.id + ' link timeout — retreating to last-link point', 'warn');
+    d.mode = 'relink';
+    d.relinkAttempt = 1;
+    d.relinkGoalX = d.lastLinkX; d.relinkGoalY = d.lastLinkY;
+    d.relinkUntil = null;
+    logEvent(s, d.id + ' link timeout — retreating to last-link point (attempt 1/' + FAILSAFE.relinkAttempts + ')', 'warn');
   }
   if (d.mode === 'relink') {
-    if (dist2d(d, { x: d.lastLinkX, y: d.lastLinkY }) < FAILSAFE.relinkArriveM) {
+    if (dist2d(d, { x: d.relinkGoalX, y: d.relinkGoalY }) < FAILSAFE.relinkArriveM) {
       if (d.relinkUntil === null) d.relinkUntil = s.time + FAILSAFE.relinkWaitSec;
       else if (s.time > d.relinkUntil) {
-        // Stage 2: the old link spot is dead too — go home for real.
-        d.mode = 'rtl';
-        logEvent(s, d.id + ' no contact at last-link point — RTL', 'warn');
+        // Attempt failed. Fall back one radio-range step toward base and
+        // listen again; after the last attempt, go home for real.
+        const dHome = dist2d(d, s.base);
+        const step = usableRangeM(s.radio, s.envFactor) * FAILSAFE.relinkStepFrac;
+        if (d.relinkAttempt >= FAILSAFE.relinkAttempts || dHome <= step) {
+          d.mode = 'rtl';
+          logEvent(s, d.id + ' no contact after ' + d.relinkAttempt + ' attempts — returning to C2', 'warn');
+        } else {
+          d.relinkAttempt += 1;
+          const f = step / dHome;
+          d.relinkGoalX = d.x + (s.base.x - d.x) * f;
+          d.relinkGoalY = d.y + (s.base.y - d.y) * f;
+          d.relinkUntil = null;
+          logEvent(s, d.id + ' still silent — falling back toward C2 (attempt ' + d.relinkAttempt + '/' + FAILSAFE.relinkAttempts + ')', 'warn');
+        }
       }
     }
   }
@@ -400,7 +433,7 @@ function killDrone(s, d) {
 function goalFor(s, d) {
   if (d.mode === 'rtb' || d.mode === 'rtl') return { x: s.base.x, y: s.base.y };
   if (d.mode === 'hold') return { x: d.holdX, y: d.holdY };
-  if (d.mode === 'relink') return { x: d.lastLinkX, y: d.lastLinkY };
+  if (d.mode === 'relink') return { x: d.relinkGoalX, y: d.relinkGoalY };
   if (d.order.role === 'rescue' && d.order.goto) return d.order.goto;
   if (d.order.role === 'relay') return slotFromOrder(s, d.order);
   // Mission: loiter ring around the ORDERED target (which may be stale — that's the point)

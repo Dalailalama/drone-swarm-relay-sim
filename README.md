@@ -38,9 +38,11 @@ Link loss is recovered from **both ends**, using each side's memory of where
 the link last worked:
 
 - **Drone side** — every drone stamps the position where the last command
-  physically reached it. On link timeout it runs a ladder:
-  *hold → retreat to that last-link point and wait → only then RTL home.*
-  The mission position is abandoned as a last resort, not a first one.
+  physically reached it. On link timeout it runs a ladder: *hold → retreat
+  to that last-link point and listen → fall back one radio-range step toward
+  base and listen again → third strike → only then RTL home.* Three attempts
+  before the mission position is abandoned — base is the last resort, not
+  the first one.
 - **C2 side** — the ground station remembers where every lost drone was
   last heard (rendered as dashed ghost markers). After a grace period it
   dispatches a rescue drone toward that point — held one link-length from
