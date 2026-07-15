@@ -5,8 +5,10 @@
 
 const NET = {
   procDelaySec: 0.02,   // per-hop forward/processing delay (store-and-forward)
-  cmdBytes: 48,         // role order: target, role, slot, chain length
+  cmdBytes: 48,         // unicast role order: target, role, slot, chain length
   tlmBytes: 32,         // position, battery, status
+  bcastHeaderBytes: 16, // broadcast order table: header...
+  bcastRowBytes: 12,    // ...plus one packed row per drone
 };
 
 // Deterministic seeded RNG (mulberry32) — same seed, same mission playback.
@@ -28,11 +30,50 @@ function gaussian(rng) {
 
 function makeNet(seed) {
   return {
-    packets: [], fades: new Map(), rng: mulberry32(seed),
+    packets: [], bcasts: [], fades: new Map(), rng: mulberry32(seed),
     dropped: 0, delivered: 0,
     // shared-channel accounting: every transmission (and retry) occupies air
     airtimeAccum: 0, utilSince: 0, utilization: 0,
   };
+}
+
+// --- Broadcast flooding -------------------------------------------------------
+// One packet carries the whole swarm's order table. Every node that hears a
+// broadcast with a new sequence number takes its own row and re-transmits
+// the packet ONCE — classic mesh flooding. No routes, no ACKs, no retries:
+// each receiver rolls the packet-error dice exactly once per transmission it
+// can hear, which is honestly how broadcast works.
+function sendBroadcast(s, srcId, payload, bytes) {
+  s.net.bcasts.push({ srcId, payload, bytes, tFire: s.time + hopTimeSec(s.radio, bytes) });
+}
+
+function stepBcasts(s) {
+  const list = s.net.bcasts;
+  if (!list.length) return;
+  const next = [];
+  // index loop on purpose: firing a broadcast appends rebroadcasts to `list`,
+  // and those must be visited (they're future-scheduled, so they land in
+  // `next` and fire on a later tick)
+  for (let i = 0; i < list.length; i++) {
+    const b = list[i];
+    if (s.time < b.tFire) { next.push(b); continue; }
+    s.net.airtimeAccum += (b.bytes * 8) / (s.radio.airRateKbps * 1000);
+    for (const id of nodeIds(s)) {
+      if (id === b.srcId || id === 'C2') continue;
+      const d = nodePos(s, id);
+      if (!d || !alive(d)) continue;
+      if (d.bcastSeen >= b.payload.seq) continue;
+      const m = liveMarginDb(s, b.srcId, id);
+      if (m <= 0) continue;
+      if (s.net.rng() >= pktSuccessProb(m)) continue; // one roll, no retry
+      d.bcastSeen = b.payload.seq;
+      d.inbox.push({ kind: 'bcast', src: 'C2', payload: b.payload });
+      s.net.delivered++;
+      // this node re-transmits the table once, after its own airtime
+      list.push({ srcId: id, payload: b.payload, bytes: b.bytes, tFire: s.time + hopTimeSec(s.radio, b.bytes) });
+    }
+  }
+  s.net.bcasts = next;
 }
 
 // --- Shadowing --------------------------------------------------------------
@@ -146,6 +187,7 @@ function deliverPacket(s, p) {
 
 function stepNet(s, dt) {
   stepFades(s, dt);
+  stepBcasts(s);
   const bytesOf = p => (p.kind === 'cmd' ? NET.cmdBytes : NET.tlmBytes);
   const keep = [];
   for (const p of s.net.packets) {

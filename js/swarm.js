@@ -84,8 +84,13 @@ function tlmIntervalSec(s) {
 }
 
 function cmdIntervalSec(s, nDrones) {
-  const tx = (NET.cmdBytes * 8) / (s.radio.airRateKbps * 1000);
-  return Math.max(C2.cmdIntervalSec, s.radio.dutyCycle ? tx * nDrones / s.radio.dutyCycle : 0);
+  // Broadcast mode: ONE packet per round regardless of fleet size — the
+  // whole reason low-bandwidth C2 links broadcast instead of unicasting.
+  const bytes = s.broadcastC2
+    ? NET.bcastHeaderBytes + NET.bcastRowBytes * nDrones
+    : NET.cmdBytes * nDrones;
+  const tx = (bytes * 8) / (s.radio.airRateKbps * 1000);
+  return Math.max(C2.cmdIntervalSec, s.radio.dutyCycle ? tx / s.radio.dutyCycle : 0);
 }
 
 let droneSeq = 0;
@@ -110,6 +115,7 @@ function makeDrone(x, y, target, rng, airframe) {
     rejectedRole: null, rejectedSig: null,
     deadLog: [],          // onboard black box: positions where the link was dead
     nextDeadLog: 0,
+    bcastSeen: 0,         // highest broadcast sequence heard (flood dedup)
     inbox: [],
     nextTlm: rng() * C2.tlmIntervalSec,
     orbitPhase: rng() * Math.PI * 2,
@@ -135,8 +141,9 @@ function makeSwarm(opts) {
     terrain: opts.terrain || makeTerrain('flat'),
     covCellM: Math.max(20, usableRangeM(opts.radio, opts.envFactor) * 0.15),
     showCoverage: true,
+    broadcastC2: opts.broadcastC2 !== false,
     net: makeNet(opts.seed || 42),
-    c2: { known: {}, relays: [], inbox: [], nextCmd: 0, wasFresh: {}, lost: {}, rescuer: null, unfit: {}, cov: new Map(), slotCache: {} },
+    c2: { known: {}, relays: [], inbox: [], nextCmd: 0, wasFresh: {}, lost: {}, rescuer: null, unfit: {}, cov: new Map(), slotCache: {}, bcastSeq: 0 },
   };
   for (let i = 0; i < opts.count; i++) {
     const a = (i / opts.count) * Math.PI * 2;
@@ -468,30 +475,42 @@ function c2Step(s) {
     rescueGoto.anchorId = anchorId;
   }
 
-  // Dispatch orders — best effort; packets die if no route exists. Every
-  // order names the drone's UPSTREAM chain neighbor, so it can tether to it:
-  // relays hang off the previous slot (slot 0 off C2), the flock hangs off
-  // the last relay, the rescuer off its anchor.
+  // Build every drone's order. Every order names the drone's UPSTREAM chain
+  // neighbor, so it can tether to it: relays hang off the previous slot
+  // (slot 0 off C2), the flock hangs off the last relay, the rescuer off
+  // its anchor.
   const lastRelay = s.c2.relays.length ? s.c2.relays[s.c2.relays.length - 1] : 'C2';
-  for (const id of Object.keys(known)) {
+  const orderFor = id => {
     if (id === s.c2.rescuer && rescueGoto) {
-      sendPacket(s, 'cmd', 'C2', id, {
+      return {
         role: 'rescue', slot: -1, goto: rescueGoto,
         upstream: rescueGoto.anchorId,
         k: s.c2.relays.length,
         target: { x: s.target.x, y: s.target.y },
-      });
-      continue;
+      };
     }
     const slot = s.c2.relays.indexOf(id);
-    sendPacket(s, 'cmd', 'C2', id, {
+    return {
       role: slot >= 0 ? 'relay' : 'mission',
       slot,
       upstream: slot > 0 ? s.c2.relays[slot - 1] : (slot === 0 ? 'C2' : lastRelay),
       k: s.c2.relays.length,
       slotPos: slot >= 0 ? adjustedSlotPos(s, slot, s.c2.relays.length) : null,
       target: { x: s.target.x, y: s.target.y },
-    });
+    };
+  };
+
+  const ids = Object.keys(known);
+  if (s.broadcastC2) {
+    // One flooded packet carries the whole table — see stepBcasts
+    const orders = {};
+    for (const id of ids) orders[id] = orderFor(id);
+    s.c2.bcastSeq += 1;
+    sendBroadcast(s, 'C2', { seq: s.c2.bcastSeq, orders },
+      NET.bcastHeaderBytes + NET.bcastRowBytes * ids.length);
+  } else {
+    // Unicast: one routed packet per drone — best effort, dies without a route
+    for (const id of ids) sendPacket(s, 'cmd', 'C2', id, orderFor(id));
   }
 }
 
@@ -521,8 +540,9 @@ function lostCentroid(s) {
 // --- Drone onboard logic -------------------------------------------------------
 function droneComms(s, d) {
   for (const p of d.inbox) {
-    if (p.kind !== 'cmd') continue;
-    // Any received command proves the link works here, order accepted or not
+    if (p.kind !== 'cmd' && p.kind !== 'bcast') continue;
+    // Any heard C2 transmission proves the link works here — even a
+    // broadcast without a row for us (C2 hasn't met us yet)
     d.lastC2 = s.time;
     d.lastLinkX = d.x; d.lastLinkY = d.y;
     d.relinkUntil = null;
@@ -534,7 +554,8 @@ function droneComms(s, d) {
 
     // Commitment rule: refuse a NEW tasking whose recovery plan doesn't
     // close; keep flying the current (previously vetted) order instead.
-    const o = p.payload;
+    const o = p.kind === 'bcast' ? p.payload.orders[d.id] : p.payload;
+    if (!o) continue;
     const sig = o.role + '/' + o.slot + '/' + Math.round(o.target.x) + ',' + Math.round(o.target.y);
     const changed = sig !== (d.order.role + '/' + d.order.slot + '/' + Math.round(d.order.target.x) + ',' + Math.round(d.order.target.y));
     if (changed && !orderFeasible(s, d, o)) {

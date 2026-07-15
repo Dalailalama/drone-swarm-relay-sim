@@ -16,6 +16,7 @@
   const spacingRange = el('spacingRange'), spacingOut = el('spacingOut'), spacingInfo = el('spacingInfo');
   const corridorChk = el('corridorChk'), corridorOut = el('corridorOut');
   const terrainSel = el('terrainSel'), coverageChk = el('coverageChk');
+  const bcastChk = el('bcastChk');
   const viewBtn = el('viewBtn');
   const speedBtns = Array.from(document.querySelectorAll('[data-speed]'));
   const statusPill = el('statusPill'), specCard = el('specCard');
@@ -72,6 +73,7 @@
       altitudeM: +altRange.value,
       deployFrac: +spacingRange.value / 100,
       corridorRouting: corridorChk.checked,
+      broadcastC2: bcastChk.checked,
       windX: +windSpdRange.value * Math.cos(+windDirRange.value * Math.PI / 180),
       windY: +windSpdRange.value * Math.sin(+windDirRange.value * Math.PI / 180),
       targetX: dist, targetY: -dist * 0.25,
@@ -180,6 +182,9 @@
   terrainSel.addEventListener('change', resetSwarm);
   coverageChk.addEventListener('change', () => {
     if (swarm) swarm.showCoverage = coverageChk.checked;
+  });
+  bcastChk.addEventListener('change', () => {
+    if (swarm) swarm.broadcastC2 = bcastChk.checked;
   });
   speedBtns.forEach(b => b.addEventListener('click', () => {
     const v = b.dataset.speed;
