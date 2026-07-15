@@ -1,61 +1,96 @@
-// Terrain model — dome-shaped hills scattered between base and target.
-// Radio links need line of sight (LOS): a link between two antennas is
-// blocked when the straight ray connecting them clips a hill instead of
-// passing clean over it. Drones fly AGL (above ground level), so a drone's
-// absolute altitude is terrainHeightAt(underneath it) + its AGL setting —
-// it rides the terrain profile rather than holding a fixed sea-level height.
+// Terrain model v2 — continuous fractal ground plus buildings.
+//
+// The ground is a value-noise heightfield (4-octave FBM): endless rolling
+// hills and valleys, deterministic from a seed, sampled analytically at any
+// (x, y) — no stored grid. Buildings are axis-aligned boxes planted on the
+// ground in seeded city blocks. Radio links need line of sight over BOTH.
+//
+// Flight model: drones terrain-follow (their absolute altitude is the
+// ground under them + their AGL setting), the way real autopilots fly
+// terrain-following missions. They can't follow a building — anything
+// built taller than their AGL is a no-fly box they steer around.
 
-// Extra clearance (metres) required above the highest terrain sample along a
-// ray before a link counts as line-of-sight — real antennas need a bit of
-// Fresnel-zone breathing room, not just a mathematically-grazing ray.
-const LOS_CLEARANCE_M = 5;
+const LOS_CLEARANCE_M = 5;   // Fresnel-ish breathing room over obstructions
+const LOS_SAMPLES = 28;
 
-// Height of the terrain surface at (x, y): the tallest hill covering that
-// point. Each hill is a paraboloid dome — heightM at the center, tapering
-// to 0 at radiusM, and 0 (no contribution) beyond that.
-//   h = heightM * max(0, 1 - (d/radiusM)^2),  d = horizontal dist to center
-function terrainHeightAt(hills, x, y) {
-  let maxH = 0;
-  for (const hill of hills) {
-    const dx = x - hill.x, dy = y - hill.y;
-    const d = Math.sqrt(dx * dx + dy * dy);
-    const h = hill.heightM * Math.max(0, 1 - (d / hill.radiusM) * (d / hill.radiusM));
-    if (h > maxH) maxH = h;
-  }
-  return maxH;
+// --- Seeded value noise -------------------------------------------------------
+function hash2(ix, iy, seed) {
+  let h = Math.imul(ix, 374761393) + Math.imul(iy, 668265263) + Math.imul(seed | 0, 1013904223);
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
 }
 
-// True if the straight ray from A (ax, ay, aAltAbsM) to B (bx, by, bAltAbsM)
-// — both altitudes absolute, not AGL — dips into the terrain plus clearance
-// anywhere along the way. Sampled at 24 evenly-spaced interior points; good
-// enough for a sim, and cheap since hills are smooth domes with no cliffs.
-function losBlocked(hills, ax, ay, aAltAbsM, bx, by, bAltAbsM) {
-  if (!hills || hills.length === 0) return false;
+function smoothstep(t) { return t * t * (3 - 2 * t); }
 
-  // Bounding-box pre-check: a hill can only matter if its footprint (center
-  // +/- radius) overlaps the segment's bounding box. Cheap way to skip
-  // sampling entirely when nothing is anywhere near the ray.
-  const minX = Math.min(ax, bx), maxX = Math.max(ax, bx);
-  const minY = Math.min(ay, by), maxY = Math.max(ay, by);
-  const relevant = hills.filter(hill =>
-    hill.x + hill.radiusM >= minX && hill.x - hill.radiusM <= maxX &&
-    hill.y + hill.radiusM >= minY && hill.y - hill.radiusM <= maxY
-  );
-  if (relevant.length === 0) return false;
+function valueNoise(x, y, seed) {
+  const ix = Math.floor(x), iy = Math.floor(y);
+  const fx = smoothstep(x - ix), fy = smoothstep(y - iy);
+  const a = hash2(ix, iy, seed), b = hash2(ix + 1, iy, seed);
+  const c = hash2(ix, iy + 1, seed), d = hash2(ix + 1, iy + 1, seed);
+  return a + (b - a) * fx + (c - a) * fy + (a - b - c + d) * fx * fy;
+}
 
-  for (let i = 1; i <= 24; i++) {
-    const t = i / 25;
-    const x = ax + (bx - ax) * t;
-    const y = ay + (by - ay) * t;
-    const rayAltM = aAltAbsM + (bAltAbsM - aAltAbsM) * t;
-    const groundM = terrainHeightAt(relevant, x, y);
-    if (groundM + LOS_CLEARANCE_M >= rayAltM) return true;
+// Fractal Brownian motion: stacked octaves, each half the amplitude and
+// twice the frequency of the last — the standard recipe for natural ground.
+function fbm(x, y, seed) {
+  let v = 0, amp = 1, freq = 1, norm = 0;
+  for (let o = 0; o < 4; o++) {
+    v += amp * valueNoise(x * freq, y * freq, seed + o * 101);
+    norm += amp;
+    amp *= 0.5;
+    freq *= 2;
+  }
+  return v / norm; // 0..1
+}
+
+// --- Terrain object -------------------------------------------------------------
+// { seed, groundAmpM, groundScaleM, buildings: [{x, y, w, d, heightM}] }
+
+function terrainGroundAt(t, x, y) {
+  if (!t || !t.groundAmpM) return 0;
+  const n = fbm(x / t.groundScaleM, y / t.groundScaleM, t.seed);
+  // push the low end down to flat valley floors, keep ridges pronounced
+  return Math.pow(Math.max(0, n - 0.30) / 0.70, 1.4) * t.groundAmpM;
+}
+
+function buildingAt(t, x, y) {
+  if (!t || !t.buildings) return null;
+  for (const b of t.buildings) {
+    if (Math.abs(x - b.x) <= b.w / 2 && Math.abs(y - b.y) <= b.d / 2) return b;
+  }
+  return null;
+}
+
+// Surface height including structures: ground, plus the roof if (x,y) is
+// inside a building footprint.
+function terrainHeightAt(t, x, y) {
+  const g = terrainGroundAt(t, x, y);
+  const b = buildingAt(t, x, y);
+  return b ? terrainGroundAt(t, b.x, b.y) + b.heightM : g;
+}
+
+// True if the ray from A (absolute altitude aAltM) to B clips ground or a
+// building anywhere along the way. The Fresnel clearance requirement tapers
+// to zero at the endpoints — a ray naturally grazes the ground right at its
+// own antenna, and demanding full clearance there would deafen any
+// ground-level station.
+function losBlocked(t, ax, ay, aAltM, bx, by, bAltM) {
+  if (!t || (!t.groundAmpM && (!t.buildings || !t.buildings.length))) return false;
+  for (let i = 1; i <= LOS_SAMPLES; i++) {
+    const f = i / (LOS_SAMPLES + 1);
+    const x = ax + (bx - ax) * f;
+    const y = ay + (by - ay) * f;
+    const rayAlt = aAltM + (bAltM - aAltM) * f;
+    const clearance = LOS_CLEARANCE_M * Math.min(1, 6 * f, 6 * (1 - f));
+    if (terrainHeightAt(t, x, y) + clearance >= rayAlt) return true;
   }
   return false;
 }
 
-// Deterministic seeded RNG (mulberry32) — same as js/net.js. Kept as a local
-// helper so this module stays dependency-free.
+// --- Presets ---------------------------------------------------------------------
+// opts = { distM, altM, targetX, targetY, seed }
+// Base is (0,0); the spine runs to (targetX, targetY).
+
 function mulberry32(a) {
   return function () {
     a |= 0; a = (a + 0x6D2B79F5) | 0;
@@ -65,61 +100,69 @@ function mulberry32(a) {
   };
 }
 
-// Named terrain layouts for scenario setup. Base is always (0, 0); the
-// "spine" is the straight line from base to (targetX, targetY). Hills are
-// returned as absolute {x, y, radiusM, heightM} points.
-function terrainPreset(name, opts) {
-  const { distM, altM, targetX, targetY, seed } = opts;
-  const spineLen = Math.hypot(targetX, targetY) || 1; // avoid div by zero
-  const ux = targetX / spineLen, uy = targetY / spineLen; // unit along spine
-  const px = -uy, py = ux;                              // unit perpendicular
-
-  const along = (frac) => ({ x: targetX * frac, y: targetY * frac });
-  const withPerp = (pt, offsetM) => ({ x: pt.x + px * offsetM, y: pt.y + py * offsetM });
-
-  if (name === 'none') return [];
-
-  if (name === 'ridge') {
-    // Narrow and tall: steep enough that the swarm can't treat it as a
-    // radio tower, small enough that relay slots straddle it — the shape
-    // that actually casts a radio shadow across the spine.
-    const center = along(0.5);
-    return [{
-      x: center.x, y: center.y,
-      radiusM: 0.14 * distM,
-      heightM: 2.2 * altM + 30,
-    }];
-  }
-
-  if (name === 'twin') {
-    const c1 = withPerp(along(1 / 3), 0.18 * distM);
-    const c2 = withPerp(along(2 / 3), -0.18 * distM);
-    const radiusM = 0.22 * distM;
-    const heightM = 2.0 * altM + 20;
-    return [
-      { x: c1.x, y: c1.y, radiusM, heightM },
-      { x: c2.x, y: c2.y, radiusM, heightM },
-    ];
-  }
-
-  if (name === 'random') {
-    const rng = mulberry32(seed);
-    const hills = [];
-    for (let i = 0; i < 4; i++) {
-      const alongFrac = 0.15 + rng() * (0.95 - 0.15);
-      const perpFrac = -0.35 + rng() * (0.35 - -0.35);
-      const radiusM = (0.15 + rng() * (0.30 - 0.15)) * distM;
-      const heightM = (1.5 + rng() * (3.0 - 1.5)) * altM + 20;
-      const base = withPerp(along(alongFrac), perpFrac * distM);
-      hills.push({ x: base.x, y: base.y, radiusM, heightM });
+// A city district: seeded grid of blocks with street gaps. Mostly low-rise,
+// a scattering of towers tall enough to matter to the swarm.
+function makeDistrict(cx, cy, spanM, rng) {
+  const buildings = [];
+  const pitch = Math.max(45, spanM / 9);       // block spacing incl. street
+  const n = Math.max(3, Math.round(spanM / pitch));
+  for (let i = 0; i < n; i++) {
+    for (let j = 0; j < n; j++) {
+      if (rng() < 0.18) continue;              // parks, parking lots
+      const bx = cx + (i - (n - 1) / 2) * pitch + (rng() - 0.5) * pitch * 0.2;
+      const by = cy + (j - (n - 1) / 2) * pitch + (rng() - 0.5) * pitch * 0.2;
+      const w = pitch * (0.45 + rng() * 0.25);
+      const d = pitch * (0.45 + rng() * 0.25);
+      const r = rng();
+      // height distribution: mostly 10-35 m low-rise, ~15% towers at real
+      // city-tower heights (60-140 m) — fly higher and fewer of them matter
+      const heightM = r < 0.85
+        ? 10 + rng() * 25
+        : 60 + rng() * 80;
+      buildings.push({ x: bx, y: by, w, d, heightM });
     }
-    return hills;
   }
+  return buildings;
+}
 
-  return [];
+function makeTerrain(name, opts) {
+  opts = opts || {};
+  const distM = opts.distM || 1000;
+  const altM = opts.altM || 50;
+  const seed = (opts.seed || 1) | 0;
+  const tX = opts.targetX || distM, tY = opts.targetY || 0;
+  const rng = mulberry32(seed ^ 0x5eed);
+  const along = f => ({ x: tX * f, y: tY * f });
+
+  if (name === 'rolling') {
+    return {
+      seed, buildings: [],
+      groundAmpM: 2.6 * altM + 40,     // ridge tops well above flight level
+      groundScaleM: distM * 0.35,      // feature wavelength ~ a few hops
+    };
+  }
+  if (name === 'urban') {
+    const c = along(0.5);
+    return {
+      seed, groundAmpM: 0, groundScaleM: 1,
+      buildings: makeDistrict(c.x, c.y, distM * 0.55, rng),
+    };
+  }
+  if (name === 'mixed') {
+    const c = along(0.55);
+    return {
+      seed, groundAmpM: 2.0 * altM + 30, groundScaleM: distM * 0.45,
+      buildings: makeDistrict(c.x, c.y, distM * 0.35, rng),
+    };
+  }
+  // 'flat' and anything unknown
+  return { seed, buildings: [], groundAmpM: 0, groundScaleM: 1 };
 }
 
 // UMD-lite export so terrain is unit-testable under Node.
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { terrainHeightAt, losBlocked, terrainPreset, LOS_CLEARANCE_M };
+  module.exports = {
+    terrainGroundAt, terrainHeightAt, buildingAt, losBlocked, makeTerrain,
+    fbm, valueNoise, LOS_CLEARANCE_M,
+  };
 }

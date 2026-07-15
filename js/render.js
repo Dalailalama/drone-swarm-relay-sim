@@ -69,20 +69,59 @@ function drawGrid(ctx, cv, view) {
   }
 }
 
-// Hills as flat contour domes — three nested rings at 100/66/33% radius.
-function drawHills(ctx, cv, view, s) {
-  for (const h of s.hills) {
-    const c = worldToScreen(view, cv, h.x, h.y);
-    for (const f of [1, 0.66, 0.33]) {
-      const r = h.radiusM * f * view.pxPerM;
-      if (r < 2) continue;
-      ctx.beginPath(); ctx.arc(c.x, c.y, r, 0, Math.PI * 2);
-      ctx.fillStyle = 'rgba(148,163,184,0.07)'; ctx.fill();
-      ctx.strokeStyle = 'rgba(148,163,184,0.25)'; ctx.lineWidth = 1; ctx.stroke();
+// Terrain layer: hillshaded ground rendered to a cached offscreen canvas
+// (recomputed only when the camera moves), plus building footprints.
+// Buildings taller than the swarm's altitude get a red edge — those are
+// the ones that block both flight paths and radio.
+let terrainLayer = { key: '', canvas: null };
+
+function drawTerrain(ctx, cv, view, s) {
+  const t = s.terrain;
+  const hasGround = t.groundAmpM > 0;
+  if (!hasGround && !t.buildings.length) return;
+
+  if (hasGround) {
+    const key = [Math.round(view.cx), Math.round(view.cy), view.pxPerM.toFixed(5), cv.width, cv.height, t.seed, t.groundAmpM].join('|');
+    if (terrainLayer.key !== key) {
+      const q = 4;
+      const w = Math.max(1, Math.floor(cv.width / q)), h = Math.max(1, Math.floor(cv.height / q));
+      const off = document.createElement('canvas'); off.width = w; off.height = h;
+      const octx = off.getContext('2d');
+      const img = octx.createImageData(w, h);
+      const stepM = q / view.pxPerM;
+      for (let py = 0; py < h; py++) {
+        for (let px = 0; px < w; px++) {
+          const wpt = screenToWorld(view, cv, px * q, py * q);
+          const g = terrainGroundAt(t, wpt.x, wpt.y);
+          const gE = terrainGroundAt(t, wpt.x + stepM, wpt.y);
+          const hn = Math.min(1, g / t.groundAmpM);
+          const slope = Math.max(-1, Math.min(1, (g - gE) / Math.max(1, stepM) * 2));
+          const base = 40 + hn * 92 + slope * 24;
+          const i = (py * w + px) * 4;
+          img.data[i] = base * 0.9;
+          img.data[i + 1] = base;
+          img.data[i + 2] = base * 0.96;
+          img.data[i + 3] = g < 1 ? 0 : 110 + hn * 100;
+        }
+      }
+      octx.putImageData(img, 0, 0);
+      terrainLayer = { key, canvas: off };
     }
-    ctx.font = '11px "Segoe UI", sans-serif'; ctx.textAlign = 'center';
-    ctx.fillStyle = COLORS.textDim;
-    ctx.fillText('hill ' + Math.round(h.heightM) + ' m', c.x, c.y + 4);
+    ctx.imageSmoothingEnabled = true;
+    ctx.drawImage(terrainLayer.canvas, 0, 0, cv.width, cv.height);
+  }
+
+  for (const b of t.buildings) {
+    const p = worldToScreen(view, cv, b.x - b.w / 2, b.y - b.d / 2);
+    const wpx = b.w * view.pxPerM, dpx = b.d * view.pxPerM;
+    if (wpx < 1.2) continue;
+    const tall = b.heightM > s.altitudeM;
+    ctx.fillStyle = tall ? 'rgba(120,86,96,0.5)' : 'rgba(71,85,105,0.38)';
+    ctx.fillRect(p.x, p.y, wpx, dpx);
+    if (tall) {
+      ctx.strokeStyle = 'rgba(248,113,113,0.5)'; ctx.lineWidth = 1;
+      ctx.strokeRect(p.x, p.y, wpx, dpx);
+    }
   }
 }
 
@@ -272,8 +311,8 @@ function drawScaleBar(ctx, cv, view) {
 function render(ctx, cv, view, s, status, selected, usable) {
   ctx.clearRect(0, 0, cv.width, cv.height);
   drawGrid(ctx, cv, view);
+  drawTerrain(ctx, cv, view, s);
   drawCoverage(ctx, cv, view, s);
-  drawHills(ctx, cv, view, s);
 
   // Coverage rings around every transmitting chain node
   for (const node of status.nodes) {

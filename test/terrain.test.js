@@ -1,80 +1,86 @@
-// Terrain unit tests — run with:  node --test test/terrain.test.js
-// Pin down the dome-height math and the LOS ray-vs-terrain check so a PR
-// can't silently break line-of-sight blocking or preset generation.
-
+// Terrain v2 tests — fractal ground + buildings. Run with: node --test test/
 const { test } = require('node:test');
 const assert = require('node:assert');
 
 const T = require('../js/terrain.js');
 
-test('terrainHeightAt: center, edge, beyond radius, empty', () => {
-  const hills = [{ x: 0, y: 0, radiusM: 100, heightM: 50 }];
-  assert.strictEqual(T.terrainHeightAt(hills, 0, 0), 50);
-  assert.strictEqual(T.terrainHeightAt(hills, 100, 0), 0);
-  assert.strictEqual(T.terrainHeightAt(hills, 150, 0), 0);
-  assert.strictEqual(T.terrainHeightAt([], 0, 0), 0);
-  assert.strictEqual(T.terrainHeightAt([], 500, 500), 0);
+const OPTS = { distM: 1000, altM: 50, targetX: 1000, targetY: 0, seed: 7 };
+
+test('flat terrain is flat and buildingless', () => {
+  const t = T.makeTerrain('flat', OPTS);
+  assert.strictEqual(T.terrainGroundAt(t, 123, -456), 0);
+  assert.strictEqual(t.buildings.length, 0);
 });
 
-test('terrainHeightAt: two overlapping hills take the max, not the sum', () => {
-  const hills = [
-    { x: 0, y: 0, radiusM: 100, heightM: 50 },
-    { x: 50, y: 0, radiusM: 100, heightM: 80 },
-  ];
-  const h = T.terrainHeightAt(hills, 25, 0);
-  assert.ok(h < 130, 'must not sum the two hills');
-  assert.ok(h <= 80 + 1e-9, 'must not exceed the taller hill\'s peak');
+test('fractal ground is deterministic, non-negative, and bounded by its amplitude', () => {
+  const a = T.makeTerrain('rolling', OPTS);
+  const b = T.makeTerrain('rolling', OPTS);
+  let maxH = 0;
+  for (let i = 0; i < 500; i++) {
+    const x = (i * 137) % 2000 - 500, y = (i * 89) % 1600 - 300;
+    const ha = T.terrainGroundAt(a, x, y);
+    assert.strictEqual(ha, T.terrainGroundAt(b, x, y), 'same seed, same ground');
+    assert.ok(ha >= 0 && ha <= a.groundAmpM);
+    maxH = Math.max(maxH, ha);
+  }
+  assert.ok(maxH > a.groundAmpM * 0.3, 'terrain should actually have ridges, got max ' + maxH);
 });
 
-test('losBlocked: a tall hill between two low endpoints blocks the link', () => {
-  const hills = [{ x: 1000, y: 0, radiusM: 300, heightM: 200 }];
-  const blocked = T.losBlocked(hills, 0, 0, 50, 2000, 0, 50);
-  assert.strictEqual(blocked, true);
+test('different seeds give different ground', () => {
+  const a = T.makeTerrain('rolling', OPTS);
+  const b = T.makeTerrain('rolling', { ...OPTS, seed: 8 });
+  let diff = 0;
+  for (let i = 0; i < 50; i++) {
+    if (T.terrainGroundAt(a, i * 97, i * 61) !== T.terrainGroundAt(b, i * 97, i * 61)) diff++;
+  }
+  assert.ok(diff > 40);
 });
 
-test('losBlocked: same geometry but both endpoints high clears the peak + margin', () => {
-  const hills = [{ x: 1000, y: 0, radiusM: 300, heightM: 200 }];
-  const blocked = T.losBlocked(hills, 0, 0, 260, 2000, 0, 260);
-  assert.strictEqual(blocked, false);
+test('buildings add height inside their footprint only', () => {
+  const t = { seed: 1, groundAmpM: 0, groundScaleM: 1, buildings: [{ x: 100, y: 100, w: 40, d: 40, heightM: 60 }] };
+  assert.strictEqual(T.terrainHeightAt(t, 100, 100), 60);
+  assert.strictEqual(T.terrainHeightAt(t, 119, 119), 60);
+  assert.strictEqual(T.terrainHeightAt(t, 121, 100), 0);
 });
 
-test('losBlocked: no hills never blocks', () => {
-  assert.strictEqual(T.losBlocked([], 0, 0, 1, 2000, 0, 1), false);
+test('LOS: a 100 m tower between two 50 m drones blocks; flying over it at 120 m clears', () => {
+  const t = { seed: 1, groundAmpM: 0, groundScaleM: 1, buildings: [{ x: 500, y: 0, w: 60, d: 60, heightM: 100 }] };
+  assert.ok(T.losBlocked(t, 0, 0, 50, 1000, 0, 50));
+  assert.ok(!T.losBlocked(t, 0, 0, 120, 1000, 0, 120));
 });
 
-test('losBlocked: ray passing beside the hill (offset > radius) is not blocked', () => {
-  const hills = [{ x: 1000, y: 0, radiusM: 100, heightM: 500 }];
-  // straight line at y=500, well outside the 100 m radius footprint
-  const blocked = T.losBlocked(hills, 0, 500, 50, 2000, 500, 50);
-  assert.strictEqual(blocked, false);
+test('LOS: ray passing beside the tower is clear', () => {
+  const t = { seed: 1, groundAmpM: 0, groundScaleM: 1, buildings: [{ x: 500, y: 200, w: 60, d: 60, heightM: 100 }] };
+  assert.ok(!T.losBlocked(t, 0, 0, 50, 1000, 0, 50));
 });
 
-test('terrainPreset "ridge": exactly one hill, centered on the segment midpoint', () => {
-  const opts = { distM: 1000, altM: 100, targetX: 1000, targetY: 0, seed: 1 };
-  const hills = T.terrainPreset('ridge', opts);
-  assert.strictEqual(hills.length, 1);
-  const dist = Math.hypot(hills[0].x - 500, hills[0].y - 0);
-  assert.ok(dist < 1, 'ridge hill must sit within 1 m of the spine midpoint');
+test('LOS: a ridge between two valleys blocks at low altitude, clear from high above', () => {
+  const t = T.makeTerrain('rolling', OPTS);
+  let peakX = 0, peakH = -1;
+  for (let x = 100; x <= 900; x += 10) {
+    const h = T.terrainGroundAt(t, x, 0);
+    if (h > peakH) { peakH = h; peakX = x; }
+  }
+  const aAlt = T.terrainGroundAt(t, peakX - 400, 0) + 30;
+  const bAlt = T.terrainGroundAt(t, peakX + 400, 0) + 30;
+  if (peakH > Math.max(aAlt, bAlt) + 20) {
+    assert.ok(T.losBlocked(t, peakX - 400, 0, aAlt, peakX + 400, 0, bAlt));
+  }
+  assert.ok(!T.losBlocked(t, peakX - 400, 0, t.groundAmpM + 60, peakX + 400, 0, t.groundAmpM + 60));
 });
 
-test('terrainPreset "twin": two hills flank opposite sides of the spine', () => {
-  const opts = { distM: 1000, altM: 100, targetX: 1000, targetY: 0, seed: 1 };
-  const hills = T.terrainPreset('twin', opts);
-  assert.strictEqual(hills.length, 2);
-  // spine runs along y=0 here, so perpendicular offset is just y
-  assert.ok(hills[0].y * hills[1].y < 0, 'perpendicular offsets must have opposite signs');
+test('urban preset: deterministic district with some swarm-blocking towers', () => {
+  const a = T.makeTerrain('urban', OPTS);
+  const b = T.makeTerrain('urban', OPTS);
+  assert.deepStrictEqual(a.buildings, b.buildings);
+  assert.ok(a.buildings.length > 20, 'expected a real district, got ' + a.buildings.length);
+  const tall = a.buildings.filter(x => x.heightM > OPTS.altM);
+  assert.ok(tall.length >= 2, 'expected towers above flight altitude');
+  assert.ok(tall.length < a.buildings.length / 2, 'most buildings should be low-rise');
 });
 
-test('terrainPreset "random": same seed produces identical hills', () => {
-  const opts = { distM: 1500, altM: 80, targetX: 1200, targetY: 900, seed: 7 };
-  const a = T.terrainPreset('random', opts);
-  const b = T.terrainPreset('random', opts);
-  assert.strictEqual(a.length, 4);
-  assert.deepStrictEqual(a, b);
-});
-
-test('terrainPreset: "none" and unknown names return an empty array', () => {
-  const opts = { distM: 1000, altM: 100, targetX: 1000, targetY: 0, seed: 1 };
-  assert.deepStrictEqual(T.terrainPreset('none', opts), []);
-  assert.deepStrictEqual(T.terrainPreset('garbage', opts), []);
+test('mixed preset has both ground relief and buildings', () => {
+  const t = T.makeTerrain('mixed', OPTS);
+  assert.ok(t.groundAmpM > 0);
+  assert.ok(t.buildings.length > 5);
 });

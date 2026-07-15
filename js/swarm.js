@@ -114,7 +114,7 @@ function makeSwarm(opts) {
     radio: opts.radio,
     envFactor: opts.envFactor,
     shadowSigmaDb: opts.shadowSigmaDb || 0,
-    hills: opts.terrain || [],
+    terrain: opts.terrain || makeTerrain('flat'),
     covCellM: Math.max(20, usableRangeM(opts.radio, opts.envFactor) * 0.15),
     showCoverage: true,
     net: makeNet(opts.seed || 42),
@@ -158,15 +158,15 @@ function covState(s, x, y) {
 }
 
 // C2 carries the same terrain database the drones use for avoidance — a
-// planned position inside a hill's no-fly footprint is a bad plan without
-// needing to be flown first. Measured-bad cells cover what the terrain map
-// can't predict: the RF shadows.
-function insideHillObstacle(s, pos) {
-  return s.hills.some(h => dist2d(pos, h) < hillObstacleRadiusM(s, h) + 10);
+// planned position inside an unfliable building's footprint is a bad plan
+// without needing to be flown first. Measured-bad cells cover what the
+// terrain map can't predict: the RF shadows.
+function insideObstacle(s, pos) {
+  return s.terrain.buildings.some(b => dist2d(pos, b) < buildingObstacleRadiusM(s, b) + 10);
 }
 
 function badPlan(s, pos) {
-  return covState(s, pos.x, pos.y) === 'bad' || insideHillObstacle(s, pos);
+  return covState(s, pos.x, pos.y) === 'bad' || insideObstacle(s, pos);
 }
 
 // If a planned position is a bad plan (measured-bad cell or known terrain),
@@ -192,22 +192,21 @@ function covAdjust(s, pos) {
   return pos; // everything nearby is known-bad — no better idea than the plan
 }
 
-const C2_ANTENNA_M = 2; // ground station mast height
+const C2_ANTENNA_M = 6; // ground station telemetry mast — BVLOS ops raise these
 
-// Absolute antenna altitude. Drones hold their set altitude and treat hills
-// that rise above it as obstacles (see hillAvoidance) rather than riding
-// over them — a smooth dome would otherwise act as a free radio tower and
-// no shadow would ever form.
+// Absolute antenna altitude. Drones terrain-follow: AGL above the ground
+// beneath them, like a real terrain-following mission. Ridges between two
+// valleys still cut line of sight; buildings are handled as obstacles.
 function nodeAltAbsM(s, id, pos) {
-  return id === 'C2' ? C2_ANTENNA_M : s.altitudeM;
+  const agl = id === 'C2' ? C2_ANTENNA_M : s.altitudeM;
+  return terrainGroundAt(s.terrain, pos.x, pos.y) + agl;
 }
 
-// A hill's no-fly footprint at the swarm's altitude: the radius where the
-// dome pokes above flight level (plus a safety skirt). Zero if the swarm
-// flies clear over the top.
-function hillObstacleRadiusM(s, h) {
-  if (h.heightM <= s.altitudeM) return 0;
-  return h.radiusM * Math.sqrt(1 - s.altitudeM / h.heightM) + 20;
+// Buildings taller than the swarm's AGL can't be overflown — each one is a
+// no-fly cylinder (radius = half footprint diagonal plus a safety skirt).
+function buildingObstacleRadiusM(s, b) {
+  if (b.heightM <= s.altitudeM) return 0;
+  return Math.hypot(b.w, b.d) / 2 + 18;
 }
 
 // Live link margin between two nodes: 3D slant-range path loss plus the
@@ -221,7 +220,7 @@ function liveMarginDb(s, aId, bId) {
   const altA = nodeAltAbsM(s, aId, a), altB = nodeAltAbsM(s, bId, b);
   const ground = dist2d(a, b);
   if (ground > radioHorizonM(altA, altB)) return -Infinity;
-  if (losBlocked(s.hills, a.x, a.y, altA, b.x, b.y, altB)) return -Infinity;
+  if (losBlocked(s.terrain, a.x, a.y, altA, b.x, b.y, altB)) return -Infinity;
   const slant = Math.hypot(ground, altA - altB);
   return linkMarginDb(s.radio, s.envFactor, slant) + fadeDb(s, aId, bId);
 }
@@ -685,13 +684,13 @@ function stepDrone(s, d, dt) {
     }
   }
 
-  // Terrain avoidance: onboard terrain database, hills above flight level are
+  // Obstacle avoidance: onboard map, buildings above flight level are
   // no-fly cylinders. Radial push plus a tangential bias so a head-on
   // approach slides around the rim instead of stalling against it.
-  for (const h of s.hills) {
-    const rObst = hillObstacleRadiusM(s, h);
+  for (const b of s.terrain.buildings) {
+    const rObst = buildingObstacleRadiusM(s, b);
     if (!rObst) continue;
-    const dxh = d.x - h.x, dyh = d.y - h.y;
+    const dxh = d.x - b.x, dyh = d.y - b.y;
     const dh = Math.hypot(dxh, dyh);
     if (dh < rObst && dh > 0.01) {
       const push = ((rObst - dh) / rObst) * DRONE.accelMs2 * 3;

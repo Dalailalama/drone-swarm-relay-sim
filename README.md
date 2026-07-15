@@ -128,10 +128,22 @@ a 16 m/s gale blows a 14 m/s quad backwards.
 
 ## Terrain and the learned coverage map
 
-Hills (Mission setup → Terrain) block radio for real: a link needs line of
-sight, and a dome taller than the flight altitude is also a no-fly cylinder
+Terrain (Mission setup → Terrain) is a fractal-noise heightfield — endless
+seeded rolling hills and valleys, sampled analytically at any point — plus
+procedural city districts: street grids of low-rise blocks with a
+scattering of 60-140 m towers. Radio links need genuine line of sight over
+both (with a Fresnel clearance that tapers at the antennas). Drones fly
+terrain-following (AGL), so ridges between valleys cut links even though
+nobody crashes; buildings taller than the flight altitude are no-fly boxes
 the drones steer around (they carry a terrain database, like real
-autopilots — and so does C2, which never plans a relay slot inside rock).
+autopilots — and so does C2, which never plans a relay slot inside a
+tower). Try the urban preset at 50 m AGL, watch the swarm suffer in the
+street canyons, then raise the altitude slider over the low-rise — measured
+uptime goes from ~15% to 100%, which is exactly how real urban BVLOS works.
+
+The **3D view** button (header) switches to a FASTER-style perspective
+render — shaded terrain mesh, extruded buildings, drones on altitude stems,
+link lines colored by health. Drag to orbit, wheel to zoom.
 
 What no terrain database can predict is the *RF shadow* — the region where
 hops between valid positions still die because the hill cuts the ray. That

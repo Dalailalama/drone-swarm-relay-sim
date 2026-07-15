@@ -16,6 +16,7 @@
   const spacingRange = el('spacingRange'), spacingOut = el('spacingOut'), spacingInfo = el('spacingInfo');
   const corridorChk = el('corridorChk'), corridorOut = el('corridorOut');
   const terrainSel = el('terrainSel'), coverageChk = el('coverageChk');
+  const viewBtn = el('viewBtn');
   const speedBtns = Array.from(document.querySelectorAll('[data-speed]'));
   const statusPill = el('statusPill'), specCard = el('specCard');
   const hopsBody = el('hopsBody'), fleetBody = el('fleetBody'), eventLog = el('eventLog');
@@ -60,12 +61,12 @@
     const dist = +distRange.value / 100 * defaultTargetDist();
     missionSeq += 1;
     const tX = dist, tY = -dist * 0.25;
-    const hills = terrainPreset(terrainSel.value, {
+    const terrain = makeTerrain(terrainSel.value, {
       distM: Math.hypot(tX, tY), altM: +altRange.value,
       targetX: tX, targetY: tY, seed: 42 + missionSeq,
     });
     swarm = makeSwarm({
-      terrain: hills,
+      terrain,
       count: +countRange.value,
       airframe,
       altitudeM: +altRange.value,
@@ -80,6 +81,7 @@
     });
     selected = null;
     swarm.showCoverage = coverageChk.checked;
+    cam3D = view3D ? makeCamera3D(swarm) : null;
     fitView();
     logEvent(swarm, 'Swarm launched: ' + swarm.drones.length + ' drones on ' + radio.name, 'info');
   }
@@ -191,8 +193,17 @@
   resetBtn.addEventListener('click', resetSwarm);
 
   // --- Canvas interaction ---------------------------------------------------
-  let dragMode = null; // 'target' | 'pan'
+  let dragMode = null; // 'target' | 'pan' | 'orbit'
   let lastMouse = null;
+
+  // --- 3D view ----------------------------------------------------------------
+  let view3D = false;
+  let cam3D = null;
+  viewBtn.addEventListener('click', () => {
+    view3D = !view3D;
+    viewBtn.textContent = view3D ? '2D map' : '3D view';
+    if (view3D && !cam3D) cam3D = makeCamera3D(swarm);
+  });
 
   function canvasPos(e) {
     const r = cv.getBoundingClientRect();
@@ -201,6 +212,11 @@
 
   cv.addEventListener('pointerdown', e => {
     const p = canvasPos(e);
+    if (view3D) {
+      dragMode = 'orbit'; lastMouse = p;
+      cv.setPointerCapture(e.pointerId);
+      return;
+    }
     const w = screenToWorld(view, cv, p.x, p.y);
     const tScreen = worldToScreen(view, cv, swarm.target.x, swarm.target.y);
     if (Math.hypot(p.x - tScreen.x, p.y - tScreen.y) < 26) {
@@ -221,6 +237,11 @@
 
   cv.addEventListener('pointermove', e => {
     const p = canvasPos(e);
+    if (dragMode === 'orbit' && lastMouse) {
+      orbitCamera3D(cam3D, p.x - lastMouse.x, p.y - lastMouse.y);
+      lastMouse = p;
+      return;
+    }
     if (dragMode === 'target') {
       const w = screenToWorld(view, cv, p.x, p.y);
       swarm.target.x = w.x; swarm.target.y = w.y;
@@ -235,6 +256,10 @@
 
   cv.addEventListener('wheel', e => {
     e.preventDefault();
+    if (view3D) {
+      zoomCamera3D(cam3D, e.deltaY < 0 ? 1 / 1.15 : 1.15);
+      return;
+    }
     const p = canvasPos(e);
     const before = screenToWorld(view, cv, p.x, p.y);
     const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
@@ -338,7 +363,8 @@
     }
     if (!status) status = chainStatus(swarm);
 
-    render(ctx, cv, view, swarm, status, selected, usable());
+    if (view3D) renderView3D(ctx, cv, swarm, status, cam3D, selected);
+    else render(ctx, cv, view, swarm, status, selected, usable());
 
     panelAccum += realDt;
     if (panelAccum > 0.2) { updatePanels(status); panelAccum = 0; }

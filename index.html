@@ -12,6 +12,7 @@
 <header>
   <h1>Drone swarm relay sim</h1>
   <span class="sub">C2 mesh link planner &middot; real radio hardware specs</span>
+  <button id="viewBtn" style="width:auto; padding:4px 14px; margin-left:12px;">3D view</button>
   <span id="statusPill" class="pill ok">—</span>
 </header>
 
@@ -85,10 +86,10 @@
       <div class="ctl-row">
         <label for="terrainSel">Terrain</label>
         <select id="terrainSel" style="flex:1;">
-          <option value="none">Flat (no terrain)</option>
-          <option value="ridge">Ridge blocking the spine</option>
-          <option value="twin">Twin hills flanking</option>
-          <option value="random">Random hills (seeded)</option>
+          <option value="flat">Flat (no terrain)</option>
+          <option value="rolling">Rolling hills (fractal)</option>
+          <option value="urban">Urban district</option>
+          <option value="mixed">Hills + city</option>
         </select>
       </div>
       <div class="ctl-row">
@@ -146,6 +147,7 @@
 <script src="js/net.js"></script>
 <script src="js/swarm.js"></script>
 <script src="js/render.js"></script>
+<script src="js/view3d.js"></script>
 <script src="js/main.js"></script>
 
 </body>
