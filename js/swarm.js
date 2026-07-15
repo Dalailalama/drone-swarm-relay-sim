@@ -20,8 +20,8 @@ const DRONE = {
 };
 
 const RELAY = {
-  deployFrac: 0.80,
-  recallFrac: 0.95,
+  deployFrac: 0.80,     // default hop spacing as a fraction of usable range
+  recallHysteresis: 1.19, // recall span = deploy span × this (prevents flapping)
   minBatteryPct: 30,
 };
 
@@ -98,6 +98,7 @@ function makeSwarm(opts) {
     time: 0,
     airframe: opts.airframe,
     altitudeM: opts.altitudeM || 50,
+    deployFrac: opts.deployFrac || RELAY.deployFrac,
     wind: { x: opts.windX || 0, y: opts.windY || 0 },
     events: [],
     radio: opts.radio,
@@ -206,7 +207,7 @@ function c2Step(s) {
     radioHorizonM(C2_ANTENNA_M, s.altitudeM));
   const D = dist2d(s.base, s.target);
   const k = s.c2.relays.length;
-  const kNeeded = relaysRequired(D, usable * RELAY.deployFrac);
+  const kNeeded = relaysRequired(D, usable * s.deployFrac);
 
   // Operator warning: mission demands more relays than the fleet can supply.
   // Drones will still try (and their failsafes will bring them back) — but
@@ -237,7 +238,7 @@ function c2Step(s) {
       s.c2.relays.push(best);
       logEvent(s, 'C2 orders ' + best + ' to relay slot ' + s.c2.relays.length, 'relay');
     }
-  } else if (kNeeded < k && relaysRequired(D, usable * RELAY.recallFrac) < k && k > 0) {
+  } else if (kNeeded < k && relaysRequired(D, usable * Math.min(1.2, s.deployFrac * RELAY.recallHysteresis)) < k && k > 0) {
     // Release only when the deploy criterion won't immediately re-demand it
     const freed = s.c2.relays.pop();
     logEvent(s, 'C2 releases ' + freed + ' from relay duty', 'relay');
@@ -285,7 +286,7 @@ function c2Step(s) {
       const dd = dist2d(known[id], c);
       if (dd < aD) { aD = dd; anchor = known[id]; }
     }
-    const reach = Math.min(usable * RELAY.deployFrac, aD);
+    const reach = Math.min(usable * s.deployFrac, aD);
     rescueGoto = aD < 1 ? { x: c.x, y: c.y } : {
       x: anchor.x + (c.x - anchor.x) / aD * reach,
       y: anchor.y + (c.y - anchor.y) / aD * reach,

@@ -13,6 +13,7 @@
   const altRange = el('altRange'), altOut = el('altOut');
   const windSpdRange = el('windSpdRange'), windSpdOut = el('windSpdOut');
   const windDirRange = el('windDirRange'), windDirOut = el('windDirOut');
+  const spacingRange = el('spacingRange'), spacingOut = el('spacingOut'), spacingInfo = el('spacingInfo');
   const speedBtns = Array.from(document.querySelectorAll('[data-speed]'));
   const statusPill = el('statusPill'), specCard = el('specCard');
   const hopsBody = el('hopsBody'), fleetBody = el('fleetBody'), eventLog = el('eventLog');
@@ -60,6 +61,7 @@
       count: +countRange.value,
       airframe,
       altitudeM: +altRange.value,
+      deployFrac: +spacingRange.value / 100,
       windX: +windSpdRange.value * Math.cos(+windDirRange.value * Math.PI / 180),
       windY: +windSpdRange.value * Math.sin(+windDirRange.value * Math.PI / 180),
       targetX: dist, targetY: -dist * 0.25,
@@ -95,6 +97,7 @@
       '<div class="spec-row"><span>Usable here (' + env.name.split(' ')[0].toLowerCase() + ', ' + FADE_MARGIN_DB + ' dB fade)</span><b>' + fmtDist(u) + '</b></div>' +
       '<div class="spec-row"><span>Radio horizon (C2 &rarr; ' + (altRange ? altRange.value : 50) + ' m)</span><b>' + fmtDist(radioHorizonM(2, +altRange.value)) + '</b></div>' +
       '<p class="spec-note">' + radio.note + '</p>';
+    applySpacing(); // hop-margin readout depends on radio + environment
   }
 
   // --- Controls -------------------------------------------------------------
@@ -145,6 +148,19 @@
   }
   windSpdRange.addEventListener('input', applyWind);
   windDirRange.addEventListener('input', applyWind);
+
+  function applySpacing() {
+    const frac = +spacingRange.value / 100;
+    spacingOut.textContent = spacingRange.value + '%';
+    if (swarm) swarm.deployFrac = frac;
+    const hopM = usable() * frac;
+    const margin = linkMarginDb(radio, env.factor, hopM);
+    const loss = (1 - pktSuccessProb(margin)) * 100;
+    spacingInfo.innerHTML = 'Hops of ' + fmtDist(hopM) + ' &middot; nominal margin <b>' +
+      margin.toFixed(1) + ' dB</b> &middot; pkt loss ~' + (loss < 1 ? '<1' : loss.toFixed(0)) + '%' +
+      (margin < 3 ? ' — fragile: shadowing swings will break these links' : '');
+  }
+  spacingRange.addEventListener('input', applySpacing);
   speedBtns.forEach(b => b.addEventListener('click', () => {
     const v = b.dataset.speed;
     if (v === 'pause') { paused = !paused; b.textContent = paused ? 'Resume' : 'Pause'; }
@@ -325,6 +341,7 @@
   countOut.textContent = countRange.value;
   updateAirframeInfo();
   updateSpecCard();
+  applySpacing();
   resetSwarm();
   distOut.textContent = fmtDist(+distRange.value / 100 * defaultTargetDist());
   document.querySelector('[data-speed="5"]').classList.add('active');
