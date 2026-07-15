@@ -27,8 +27,15 @@ const RELAY = {
 
 const FAILSAFE = {
   holdSec: 8,          // silence before a drone freezes in place
-  rtlMissionSec: 30,   // silence before a mission drone flies home to regain link
+  rtlMissionSec: 30,   // silence before a mission drone retreats to regain link
   rtlRelaySec: 90,     // relays hold much longer — they ARE the link
+  relinkWaitSec: 45,   // how long to wait at the last-link point before full RTL
+  relinkArriveM: 40,   // "close enough" to the last-link point
+};
+
+const RESCUE = {
+  delaySec: 12,        // give the drones' own failsafes a moment first
+  memorySec: 180,      // how long C2 hunts for a silent drone before giving up
 };
 
 const C2 = {
@@ -67,9 +74,11 @@ function makeDrone(x, y, target, rng, airframe) {
     batteryPct: 100,
     // Onboard state — the drone's own little world
     order: { role: 'mission', slot: -1, k: 0, target: { x: target.x, y: target.y } }, // preflight upload
-    mode: 'ok',            // ok | hold | rtl | rtb | landed | dead
+    mode: 'ok',            // ok | hold | relink | rtl | rtb | landed | dead
     lastC2: 0,
     holdX: 0, holdY: 0,
+    lastLinkX: x, lastLinkY: y, // where the link last provably worked
+    relinkUntil: null,
     inbox: [],
     nextTlm: rng() * C2.tlmIntervalSec,
     orbitPhase: rng() * Math.PI * 2,
@@ -91,7 +100,7 @@ function makeSwarm(opts) {
     envFactor: opts.envFactor,
     shadowSigmaDb: opts.shadowSigmaDb || 0,
     net: makeNet(opts.seed || 42),
-    c2: { known: {}, relays: [], inbox: [], nextCmd: 0, wasFresh: {} },
+    c2: { known: {}, relays: [], inbox: [], nextCmd: 0, wasFresh: {}, lost: {}, rescuer: null },
   };
   for (let i = 0; i < opts.count; i++) {
     const a = (i / opts.count) * Math.PI * 2;
@@ -155,13 +164,26 @@ function c2Step(s) {
   const known = s.c2.known;
   const fresh = id => known[id] && (s.time - known[id].at) <= C2.staleSec;
 
-  // Operator display: log contact changes
+  // Operator display: log contact changes, and REMEMBER where the lost were
+  // last heard — that memory is what rescue dispatch works from.
   for (const id of Object.keys(known)) {
     const f = fresh(id);
-    if (s.c2.wasFresh[id] && !f) logEvent(s, 'C2 lost telemetry from ' + id, 'warn');
-    if (!s.c2.wasFresh[id] && f) logEvent(s, 'C2 regained telemetry from ' + id, 'info');
+    if (s.c2.wasFresh[id] && !f) {
+      logEvent(s, 'C2 lost telemetry from ' + id, 'warn');
+      s.c2.lost[id] = { x: known[id].x, y: known[id].y, at: s.time };
+    }
+    if (!s.c2.wasFresh[id] && f) {
+      logEvent(s, 'C2 regained telemetry from ' + id, 'info');
+      delete s.c2.lost[id];
+    }
     s.c2.wasFresh[id] = f;
     if (s.time - known[id].at > C2.forgetSec) { delete known[id]; delete s.c2.wasFresh[id]; }
+  }
+  for (const id of Object.keys(s.c2.lost)) {
+    if (s.time - s.c2.lost[id].at > RESCUE.memorySec) {
+      delete s.c2.lost[id]; // written off — dead, or long gone
+      logEvent(s, 'C2 gives up the search for ' + id, 'error');
+    }
   }
 
   // Roster hygiene: relays C2 can no longer account for are struck off
@@ -204,8 +226,65 @@ function c2Step(s) {
     logEvent(s, 'C2 releases ' + freed + ' from relay duty', 'relay');
   }
 
+  // --- Rescue dispatch (fallback engine, C2 side) ------------------------
+  const lostIds = Object.keys(s.c2.lost);
+  if (s.c2.rescuer) {
+    const kR = known[s.c2.rescuer];
+    const still = fresh(s.c2.rescuer) && kR && !['rtb', 'landed', 'dead'].includes(kR.role);
+    if (!still) {
+      logEvent(s, 'C2: rescue drone ' + s.c2.rescuer + ' unavailable — reassigning', 'warn');
+      s.c2.rescuer = null;
+    } else if (!lostIds.length) {
+      logEvent(s, 'C2: contact restored — ' + s.c2.rescuer + ' released from rescue', 'relay');
+      s.c2.rescuer = null;
+    }
+  }
+  if (!s.c2.rescuer && lostIds.length &&
+      lostIds.some(id => s.time - s.c2.lost[id].at > RESCUE.delaySec)) {
+    const candidates = Object.keys(known).filter(id =>
+      fresh(id) && known[id].role === 'mission' &&
+      known[id].battery >= RELAY.minBatteryPct && !s.c2.relays.includes(id));
+    if (candidates.length) {
+      const c = lostCentroid(s);
+      let best = null, bestD = Infinity;
+      for (const id of candidates) {
+        const dd = dist2d(known[id], c);
+        if (dd < bestD) { bestD = dd; best = id; }
+      }
+      s.c2.rescuer = best;
+      logEvent(s, 'C2 dispatches ' + best + ' toward last-known contact point', 'relay');
+    }
+  }
+  let rescueGoto = null;
+  if (s.c2.rescuer) {
+    // Tentacle rule: extend from the nearest fresh node toward the lost
+    // group's last-known centroid, one link-length at a time, so the rescuer
+    // stays connected while it hunts. As its own telemetry comes back from
+    // farther out, the reach point advances.
+    const c = lostCentroid(s);
+    let anchor = s.base, aD = dist2d(s.base, c);
+    for (const id of Object.keys(known)) {
+      if (!fresh(id) || id === s.c2.rescuer) continue; // can't anchor on itself
+      const dd = dist2d(known[id], c);
+      if (dd < aD) { aD = dd; anchor = known[id]; }
+    }
+    const reach = Math.min(usable * RELAY.deployFrac, aD);
+    rescueGoto = aD < 1 ? { x: c.x, y: c.y } : {
+      x: anchor.x + (c.x - anchor.x) / aD * reach,
+      y: anchor.y + (c.y - anchor.y) / aD * reach,
+    };
+  }
+
   // Dispatch orders — best effort; packets die if no route exists
   for (const id of Object.keys(known)) {
+    if (id === s.c2.rescuer && rescueGoto) {
+      sendPacket(s, 'cmd', 'C2', id, {
+        role: 'rescue', slot: -1, goto: rescueGoto,
+        k: s.c2.relays.length,
+        target: { x: s.target.x, y: s.target.y },
+      });
+      continue;
+    }
     const slot = s.c2.relays.indexOf(id);
     sendPacket(s, 'cmd', 'C2', id, {
       role: slot >= 0 ? 'relay' : 'mission',
@@ -216,6 +295,13 @@ function c2Step(s) {
   }
 }
 
+function lostCentroid(s) {
+  const ids = Object.keys(s.c2.lost);
+  let cx = 0, cy = 0;
+  for (const id of ids) { cx += s.c2.lost[id].x; cy += s.c2.lost[id].y; }
+  return { x: cx / ids.length, y: cy / ids.length };
+}
+
 // --- Drone onboard logic -------------------------------------------------------
 function droneComms(s, d) {
   for (const p of d.inbox) {
@@ -223,7 +309,9 @@ function droneComms(s, d) {
     const prevRole = d.order.role;
     d.order = p.payload;
     d.lastC2 = s.time;
-    if (d.mode === 'hold' || d.mode === 'rtl') {
+    d.lastLinkX = d.x; d.lastLinkY = d.y; // the link works HERE, remember it
+    d.relinkUntil = null;
+    if (d.mode === 'hold' || d.mode === 'relink' || d.mode === 'rtl') {
       d.mode = 'ok';
       logEvent(s, d.id + ' link restored — resuming orders', 'info');
     }
@@ -258,8 +346,20 @@ function droneComms(s, d) {
     logEvent(s, d.id + ' lost C2 link — holding position', 'warn');
   }
   if (d.mode === 'hold' && age > rtlAfter) {
-    d.mode = 'rtl';
-    logEvent(s, d.id + ' link timeout — flying home to regain contact', 'warn');
+    // Fallback engine, stage 1: don't abandon the mission for base yet —
+    // retreat to the last position where the link provably worked.
+    d.mode = 'relink'; d.relinkUntil = null;
+    logEvent(s, d.id + ' link timeout — retreating to last-link point', 'warn');
+  }
+  if (d.mode === 'relink') {
+    if (dist2d(d, { x: d.lastLinkX, y: d.lastLinkY }) < FAILSAFE.relinkArriveM) {
+      if (d.relinkUntil === null) d.relinkUntil = s.time + FAILSAFE.relinkWaitSec;
+      else if (s.time > d.relinkUntil) {
+        // Stage 2: the old link spot is dead too — go home for real.
+        d.mode = 'rtl';
+        logEvent(s, d.id + ' no contact at last-link point — RTL', 'warn');
+      }
+    }
   }
 }
 
@@ -268,7 +368,7 @@ function updateBattery(s, d, dt, vAirMs) {
   d.energyWh = Math.max(0, d.energyWh - flightPowerW(af, vAirMs) * dt / 3600);
   d.batteryPct = d.energyWh / usableWh(af) * 100;
 
-  if (d.mode === 'ok' || d.mode === 'hold') {
+  if (d.mode === 'ok' || d.mode === 'hold' || d.mode === 'relink') {
     // Onboard smart-RTH: energy to fly home at cruise, with pessimism + reserve.
     // Assumes the whole trip could be upwind — conservative, like real firmware.
     const windMs = Math.hypot(s.wind.x, s.wind.y);
@@ -300,6 +400,8 @@ function killDrone(s, d) {
 function goalFor(s, d) {
   if (d.mode === 'rtb' || d.mode === 'rtl') return { x: s.base.x, y: s.base.y };
   if (d.mode === 'hold') return { x: d.holdX, y: d.holdY };
+  if (d.mode === 'relink') return { x: d.lastLinkX, y: d.lastLinkY };
+  if (d.order.role === 'rescue' && d.order.goto) return d.order.goto;
   if (d.order.role === 'relay') return slotFromOrder(s, d.order);
   // Mission: loiter ring around the ORDERED target (which may be stale — that's the point)
   d.orbitPhase += 0.0004 * s.airframe.maxSpeedMs;

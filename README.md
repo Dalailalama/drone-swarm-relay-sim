@@ -30,9 +30,26 @@ chain with real per-hop airtime, gets lost to fading, and simply never
 arrives if no route exists. When you kill a mid-chain relay, C2 doesn't
 "know" — it notices the telemetry silence a few seconds later, strikes the
 drone off its roster, and re-plans with whatever it can still reach.
-Meanwhile the stranded far drones run their own onboard failsafe ladder:
-**hold position → fly toward home until contact returns → get re-tasked.**
 Chains heal end-to-end without any component having the full picture.
+
+### The fallback engine (link recovery, both sides)
+
+Link loss is recovered from **both ends**, using each side's memory of where
+the link last worked:
+
+- **Drone side** — every drone stamps the position where the last command
+  physically reached it. On link timeout it runs a ladder:
+  *hold → retreat to that last-link point and wait → only then RTL home.*
+  The mission position is abandoned as a last resort, not a first one.
+- **C2 side** — the ground station remembers where every lost drone was
+  last heard (rendered as dashed ghost markers). After a grace period it
+  dispatches a rescue drone toward that point — held one link-length from
+  the nearest connected node, so the searcher itself stays reachable. When
+  the lost drone's telemetry reappears through the extended coverage, both
+  are re-tasked and the mission resumes where it left off.
+
+Current limitation, stated plainly: the rescue tentacle extends one hop
+beyond the existing network. Multi-hop rescue chains are on the roadmap.
 
 ## The radio model (and its honesty)
 

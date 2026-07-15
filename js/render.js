@@ -16,6 +16,8 @@ const COLORS = {
   rtb: '#a78bfa',
   rtl: '#a78bfa',
   hold: '#f472b6',
+  relink: '#22d3ee',
+  rescue: '#60a5fa',
   landed: '#64748b',
   dead: '#ef4444',
   text: '#cbd5e1',
@@ -183,6 +185,22 @@ function drawDrone(ctx, cv, view, d, selected) {
   ctx.fillText(d.id, c.x, c.y + 24);
 }
 
+// C2's memory of where each lost drone was last heard — ghost markers the
+// operator (and the rescue logic) work from.
+function drawLostMarkers(ctx, cv, view, s) {
+  for (const [id, e] of Object.entries(s.c2.lost)) {
+    const c = worldToScreen(view, cv, e.x, e.y);
+    ctx.beginPath(); ctx.arc(c.x, c.y, 10, 0, Math.PI * 2);
+    ctx.strokeStyle = COLORS.lost; ctx.lineWidth = 1.5; ctx.setLineDash([3, 4]);
+    ctx.stroke(); ctx.setLineDash([]);
+    ctx.font = '11px "Segoe UI", sans-serif'; ctx.textAlign = 'center';
+    ctx.fillStyle = COLORS.lost;
+    ctx.fillText('?', c.x, c.y + 4);
+    ctx.fillStyle = COLORS.textDim;
+    ctx.fillText(id + ' last seen', c.x, c.y + 24);
+  }
+}
+
 function drawWind(ctx, cv, s) {
   const spd = Math.hypot(s.wind.x, s.wind.y);
   if (spd < 0.5) return;
@@ -221,6 +239,7 @@ function render(ctx, cv, view, s, status, selected, usable) {
 
   drawLinks(ctx, cv, view, status.hops, s.time, status.connected);
   drawPackets(ctx, cv, view, s);
+  drawLostMarkers(ctx, cv, view, s);
   drawBase(ctx, cv, view, s.base);
   drawTarget(ctx, cv, view, s.target);
   for (const d of s.drones) drawDrone(ctx, cv, view, d, d === selected);
