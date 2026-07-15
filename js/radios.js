@@ -51,15 +51,16 @@ const RADIOS = [
     note: 'RC-control link repurposed for C2. Astonishing range per milliwatt, but only a few kbps of telemetry fits through.',
   },
   {
-    id: 'lora915',
-    name: 'LoRa SX1276 (915 MHz, SF10)',
-    freqMHz: 915,
+    id: 'lora868',
+    name: 'LoRa SX1276 (EU868, SF10)',
+    freqMHz: 869,
     txDbm: 20,
     sensDbm: -132,        // SF10 / BW125
     antGainDbi: 2,
     airRateKbps: 1,       // ~980 bps at SF10/125
     rangeLosM: 5000,      // typical near-ground open-field result
-    note: 'Kilometres of range on coin-cell power, but ~1 kbps — enough for commands and heartbeats, never video.',
+    dutyCycle: 0.1,       // 869.4-869.65 MHz sub-band: 10% duty limit by law
+    note: 'Kilometres of range on milliwatts, but ~1 kbps and a legal duty-cycle cap — commands and heartbeats only, and not many of them.',
   },
   {
     id: 'xbee900',

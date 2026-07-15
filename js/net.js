@@ -27,7 +27,12 @@ function gaussian(rng) {
 }
 
 function makeNet(seed) {
-  return { packets: [], fades: new Map(), rng: mulberry32(seed), dropped: 0, delivered: 0 };
+  return {
+    packets: [], fades: new Map(), rng: mulberry32(seed),
+    dropped: 0, delivered: 0,
+    // shared-channel accounting: every transmission (and retry) occupies air
+    airtimeAccum: 0, utilSince: 0, utilization: 0,
+  };
 }
 
 // --- Shadowing --------------------------------------------------------------
@@ -148,6 +153,8 @@ function stepNet(s, dt) {
     while (s.time >= p.tArrive && !dead) {
       const from = p.path[p.hop], to = p.path[p.hop + 1];
       const retries = hopDelivered(s, from, to);
+      const txSec = (bytesOf(p) * 8) / (s.radio.airRateKbps * 1000);
+      s.net.airtimeAccum += txSec * (1 + (retries < 0 ? HOP_RETRIES : retries));
       if (retries < 0) { s.net.dropped++; dead = true; break; }
       p.hop++;
       if (p.hop >= p.path.length - 1) { deliverPacket(s, p); dead = true; break; }
@@ -158,6 +165,14 @@ function stepNet(s, dt) {
     if (!dead) keep.push(p);
   }
   s.net.packets = keep;
+
+  // Sliding channel-utilization estimate: what fraction of the last window
+  // was the single shared frequency actually busy?
+  if (s.time - s.net.utilSince >= 5) {
+    s.net.utilization = Math.min(1, s.net.airtimeAccum / (s.time - s.net.utilSince));
+    s.net.airtimeAccum = 0;
+    s.net.utilSince = s.time;
+  }
 }
 
 // Hop attempt: the link must still exist when the packet actually crosses it,

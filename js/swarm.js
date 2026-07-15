@@ -43,6 +43,19 @@ const BATTERY = {
   reserveFrac: 0.07,    // plus a fixed floor of usable energy
 };
 
+const GPS_SIGMA_M = 1.5; // typical GNSS horizontal error — C2 sees noisy positions
+
+// Regulatory duty cycle stretches how often a node may transmit at all.
+function tlmIntervalSec(s) {
+  const tx = (NET.tlmBytes * 8) / (s.radio.airRateKbps * 1000);
+  return Math.max(C2.tlmIntervalSec, s.radio.dutyCycle ? tx / s.radio.dutyCycle : 0);
+}
+
+function cmdIntervalSec(s, nDrones) {
+  const tx = (NET.cmdBytes * 8) / (s.radio.airRateKbps * 1000);
+  return Math.max(C2.cmdIntervalSec, s.radio.dutyCycle ? tx * nDrones / s.radio.dutyCycle : 0);
+}
+
 let droneSeq = 0;
 
 function makeDrone(x, y, target, rng, airframe) {
@@ -137,7 +150,7 @@ function c2Step(s) {
   s.c2.inbox = [];
 
   if (s.time < s.c2.nextCmd) return;
-  s.c2.nextCmd = s.time + C2.cmdIntervalSec;
+  s.c2.nextCmd = s.time + cmdIntervalSec(s, Object.keys(s.c2.known).length || 1);
 
   const known = s.c2.known;
   const fresh = id => known[id] && (s.time - known[id].at) <= C2.staleSec;
@@ -222,19 +235,28 @@ function droneComms(s, d) {
 
   if (!alive(d) || d.mode === 'rtb') return;
 
-  // Telemetry beacon
+  // Telemetry beacon — position as the GPS sees it, not as God sees it
   if (s.time >= d.nextTlm) {
-    d.nextTlm = s.time + C2.tlmIntervalSec;
-    sendPacket(s, 'tlm', d.id, 'C2', { x: d.x, y: d.y, battery: d.batteryPct, role: effRole(d) });
+    d.nextTlm = s.time + tlmIntervalSec(s);
+    sendPacket(s, 'tlm', d.id, 'C2', {
+      x: d.x + GPS_SIGMA_M * gaussian(s.net.rng),
+      y: d.y + GPS_SIGMA_M * gaussian(s.net.rng),
+      battery: d.batteryPct, role: effRole(d),
+    });
   }
 
-  // Link-loss failsafe ladder
+  // Link-loss failsafe ladder. Timeouts scale with the expected command rate
+  // (like PX4's COM_DL_LOSS_T) so a slow duty-limited link isn't mistaken for
+  // a dead one.
+  const holdAfter = Math.max(FAILSAFE.holdSec, 3 * cmdIntervalSec(s, s.drones.length));
+  const rtlAfter = d.order.role === 'relay'
+    ? Math.max(FAILSAFE.rtlRelaySec, 3 * holdAfter)
+    : Math.max(FAILSAFE.rtlMissionSec, 2 * holdAfter);
   const age = s.time - d.lastC2;
-  if (d.mode === 'ok' && age > FAILSAFE.holdSec) {
+  if (d.mode === 'ok' && age > holdAfter) {
     d.mode = 'hold'; d.holdX = d.x; d.holdY = d.y;
     logEvent(s, d.id + ' lost C2 link — holding position', 'warn');
   }
-  const rtlAfter = d.order.role === 'relay' ? FAILSAFE.rtlRelaySec : FAILSAFE.rtlMissionSec;
   if (d.mode === 'hold' && age > rtlAfter) {
     d.mode = 'rtl';
     logEvent(s, d.id + ' link timeout — flying home to regain contact', 'warn');

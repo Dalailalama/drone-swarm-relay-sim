@@ -16,6 +16,7 @@
   const speedBtns = Array.from(document.querySelectorAll('[data-speed]'));
   const statusPill = el('statusPill'), specCard = el('specCard');
   const hopsBody = el('hopsBody'), fleetBody = el('fleetBody'), eventLog = el('eventLog');
+  const chanLine = el('chanLine');
   const killBtn = el('killBtn'), resetBtn = el('resetBtn');
   const kpiRelays = el('kpiRelays'), kpiMission = el('kpiMission'), kpiThroughput = el('kpiThroughput'), kpiClock = el('kpiClock');
   const kpiContact = el('kpiContact'), kpiPackets = el('kpiPackets');
@@ -220,11 +221,16 @@
     kpiMission.textContent = status.missionCount;
     kpiContact.textContent = status.freshCount + '/' + status.aliveCount;
     kpiPackets.textContent = swarm.net.delivered.toLocaleString();
+    // Payload capacity: hop-divided air rate, minus what C2 traffic is already
+    // burning, capped by any legal duty cycle.
+    const effKbps = chainThroughputKbps(radio, status.hops.length)
+      * Math.max(0, 1 - swarm.net.utilization) * (radio.dutyCycle ?? 1);
     kpiThroughput.textContent = status.connected
-      ? (chainThroughputKbps(radio, status.hops.length) >= 1000
-        ? (chainThroughputKbps(radio, status.hops.length) / 1000).toFixed(1) + ' Mbps'
-        : chainThroughputKbps(radio, status.hops.length).toFixed(chainThroughputKbps(radio, status.hops.length) < 10 ? 1 : 0) + ' kbps')
+      ? (effKbps >= 1000 ? (effKbps / 1000).toFixed(1) + ' Mbps'
+        : effKbps.toFixed(effKbps < 10 ? 1 : 0) + ' kbps')
       : '—';
+    chanLine.textContent = 'Channel busy ' + (swarm.net.utilization * 100).toFixed(1) + '% with C2 traffic'
+      + (radio.dutyCycle ? ' · ' + (radio.dutyCycle * 100) + '% legal duty cycle' : '');
     kpiClock.textContent = fmtSimClock(swarm.time);
 
     if (!status.aliveCount) {
