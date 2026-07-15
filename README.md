@@ -1,5 +1,8 @@
 # Drone swarm relay simulator
 
+**[▶ Live demo](https://dalailalama.github.io/drone-swarm-relay-sim/)** — no
+install, runs in your browser.
+
 A browser-based simulation of a drone swarm that keeps itself connected to a
 ground station by **turning its own members into radio relays** — the way a
 flock of birds would solve a comms problem. Fly the mission far enough away
