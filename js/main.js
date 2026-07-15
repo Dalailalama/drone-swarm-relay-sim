@@ -7,8 +7,8 @@
   // --- UI elements ----------------------------------------------------------
   const el = id => document.getElementById(id);
   const radioSel = el('radioSel'), envSel = el('envSel');
+  const airframeSel = el('airframeSel'), airframeInfo = el('airframeInfo');
   const countRange = el('countRange'), countOut = el('countOut');
-  const endurRange = el('endurRange'), endurOut = el('endurOut');
   const distRange = el('distRange'), distOut = el('distOut');
   const speedBtns = Array.from(document.querySelectorAll('[data-speed]'));
   const statusPill = el('statusPill'), specCard = el('specCard');
@@ -27,10 +27,17 @@
     o.value = e.id; o.textContent = e.name;
     envSel.appendChild(o);
   });
+  AIRFRAMES.forEach(a => {
+    const o = document.createElement('option');
+    o.value = a.id; o.textContent = a.name;
+    airframeSel.appendChild(o);
+  });
 
   // --- State ----------------------------------------------------------------
   let radio = RADIOS[0];
   let env = ENVIRONMENTS[0];
+  let airframe = AIRFRAMES[1]; // 450-class default
+  airframeSel.value = airframe.id;
   let timeScale = 5;
   let paused = false;
   let swarm = null;
@@ -47,7 +54,7 @@
     missionSeq += 1;
     swarm = makeSwarm({
       count: +countRange.value,
-      enduranceMin: +endurRange.value,
+      airframe,
       targetX: dist, targetY: -dist * 0.25,
       radio, envFactor: env.factor,
       shadowSigmaDb: env.shadowSigmaDb,
@@ -98,10 +105,19 @@
   });
   countRange.addEventListener('input', () => { countOut.textContent = countRange.value; });
   countRange.addEventListener('change', resetSwarm);
-  endurRange.addEventListener('input', () => {
-    endurOut.textContent = endurRange.value + ' min';
-    if (swarm) swarm.enduranceMin = +endurRange.value;
+  airframeSel.addEventListener('change', () => {
+    airframe = AIRFRAMES.find(a => a.id === airframeSel.value);
+    updateAirframeInfo();
+    resetSwarm();
   });
+
+  function updateAirframeInfo() {
+    airframeInfo.innerHTML =
+      airframe.massKg + ' kg &middot; ' + airframe.batteryWh + ' Wh &middot; hover <b>' +
+      Math.round(hoverPowerW(airframe)) + ' W</b> &middot; endurance <b>~' +
+      Math.round(hoverEnduranceMin(airframe)) + ' min</b> &middot; ' + airframe.maxSpeedMs + ' m/s<br>' +
+      airframe.note;
+  }
   distRange.addEventListener('input', () => {
     const dist = +distRange.value / 100 * defaultTargetDist();
     distOut.textContent = fmtDist(dist);
@@ -280,7 +296,7 @@
   // --- Boot -------------------------------------------------------------------
   resize();
   countOut.textContent = countRange.value;
-  endurOut.textContent = endurRange.value + ' min';
+  updateAirframeInfo();
   updateSpecCard();
   resetSwarm();
   distOut.textContent = fmtDist(+distRange.value / 100 * defaultTargetDist());

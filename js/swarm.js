@@ -13,7 +13,6 @@
 // the behavior that lets a broken chain heal itself).
 
 const DRONE = {
-  maxSpeedMs: 14,
   accelMs2: 4,
   separationM: 25,
   orbitRadiusM: 60,
@@ -40,17 +39,18 @@ const C2 = {
 };
 
 const BATTERY = {
-  rtbReservePct: 12,
-  movingDrainMult: 1.15,
+  homeMargin: 1.3,      // plan the flight home with 30% pessimism
+  reserveFrac: 0.07,    // plus a fixed floor of usable energy
 };
 
 let droneSeq = 0;
 
-function makeDrone(x, y, target, rng) {
+function makeDrone(x, y, target, rng, airframe) {
   droneSeq += 1;
   return {
     id: 'DR-' + droneSeq,
     x, y, vx: 0, vy: 0,
+    energyWh: usableWh(airframe),
     batteryPct: 100,
     // Onboard state — the drone's own little world
     order: { role: 'mission', slot: -1, k: 0, target: { x: target.x, y: target.y } }, // preflight upload
@@ -70,7 +70,7 @@ function makeSwarm(opts) {
     target: { x: opts.targetX, y: opts.targetY },  // C2 operator intent
     drones: [],
     time: 0,
-    enduranceMin: opts.enduranceMin,
+    airframe: opts.airframe,
     events: [],
     radio: opts.radio,
     envFactor: opts.envFactor,
@@ -80,7 +80,7 @@ function makeSwarm(opts) {
   };
   for (let i = 0; i < opts.count; i++) {
     const a = (i / opts.count) * Math.PI * 2;
-    s.drones.push(makeDrone(s.base.x + 60 * Math.cos(a), s.base.y + 60 * Math.sin(a), s.target, s.net.rng));
+    s.drones.push(makeDrone(s.base.x + 60 * Math.cos(a), s.base.y + 60 * Math.sin(a), s.target, s.net.rng, opts.airframe));
   }
   return s;
 }
@@ -225,21 +225,23 @@ function droneComms(s, d) {
   }
 }
 
-function updateBattery(s, d, dt, moving) {
-  const drainPerSec = 100 / (s.enduranceMin * 60) * (moving ? BATTERY.movingDrainMult : 1);
-  d.batteryPct = Math.max(0, d.batteryPct - drainPerSec * dt);
+function updateBattery(s, d, dt, vAirMs) {
+  const af = s.airframe;
+  d.energyWh = Math.max(0, d.energyWh - flightPowerW(af, vAirMs) * dt / 3600);
+  d.batteryPct = d.energyWh / usableWh(af) * 100;
 
   if (d.mode === 'ok' || d.mode === 'hold') {
-    const secsHome = dist2d(d, s.base) / DRONE.maxSpeedMs;
-    const pctHome = (secsHome / (s.enduranceMin * 60)) * 100 * BATTERY.movingDrainMult;
-    if (d.batteryPct <= pctHome + BATTERY.rtbReservePct) {
+    // Onboard smart-RTH: energy to fly home at cruise, with pessimism + reserve
+    const secsHome = dist2d(d, s.base) / af.maxSpeedMs;
+    const whHome = flightPowerW(af, af.maxSpeedMs) * secsHome / 3600 * BATTERY.homeMargin;
+    if (d.energyWh <= whHome + usableWh(af) * BATTERY.reserveFrac) {
       d.mode = 'rtb';
-      logEvent(s, d.id + ' battery low — RTB', 'warn');
+      logEvent(s, d.id + ' battery low — RTB (' + d.batteryPct.toFixed(0) + '%)', 'warn');
       sendPacket(s, 'tlm', d.id, 'C2', { x: d.x, y: d.y, battery: d.batteryPct, role: 'rtb' });
     }
   }
 
-  if (d.batteryPct <= 0 && alive(d)) {
+  if (d.energyWh <= 0 && alive(d)) {
     d.mode = 'dead';
     d.vx = d.vy = 0;
     logEvent(s, d.id + ' battery exhausted — down', 'error');
@@ -259,7 +261,7 @@ function goalFor(s, d) {
   if (d.mode === 'hold') return { x: d.holdX, y: d.holdY };
   if (d.order.role === 'relay') return slotFromOrder(s, d.order);
   // Mission: loiter ring around the ORDERED target (which may be stale — that's the point)
-  d.orbitPhase += 0.0004 * DRONE.maxSpeedMs;
+  d.orbitPhase += 0.0004 * s.airframe.maxSpeedMs;
   const flock = s.drones.filter(x => alive(x) && x.mode === 'ok' && x.order.role === 'mission');
   const idx = Math.max(0, flock.indexOf(d));
   const a = d.orbitPhase + (idx / Math.max(1, flock.length)) * Math.PI * 2;
@@ -275,11 +277,12 @@ function stepDrone(s, d, dt) {
   droneComms(s, d);
 
   const goal = goalFor(s, d);
+  const maxV = s.airframe.maxSpeedMs;
   const dx = goal.x - d.x, dy = goal.y - d.y;
   const dGoal = Math.hypot(dx, dy);
 
-  const brake = (DRONE.maxSpeedMs * DRONE.maxSpeedMs) / (2 * DRONE.accelMs2);
-  const desiredSpeed = dGoal > brake ? DRONE.maxSpeedMs : DRONE.maxSpeedMs * (dGoal / brake);
+  const brake = (maxV * maxV) / (2 * DRONE.accelMs2);
+  const desiredSpeed = dGoal > brake ? maxV : maxV * (dGoal / brake);
   let ax = 0, ay = 0;
   if (dGoal > 0.5) {
     ax = (dx / dGoal) * desiredSpeed - d.vx;
@@ -302,10 +305,10 @@ function stepDrone(s, d, dt) {
   if (aMag > DRONE.accelMs2) { ax = ax / aMag * DRONE.accelMs2; ay = ay / aMag * DRONE.accelMs2; }
   d.vx += ax * dt; d.vy += ay * dt;
   const v = Math.hypot(d.vx, d.vy);
-  if (v > DRONE.maxSpeedMs) { d.vx = d.vx / v * DRONE.maxSpeedMs; d.vy = d.vy / v * DRONE.maxSpeedMs; }
+  if (v > maxV) { d.vx = d.vx / v * maxV; d.vy = d.vy / v * maxV; }
   d.x += d.vx * dt; d.y += d.vy * dt;
 
-  updateBattery(s, d, dt, v > 2);
+  updateBattery(s, d, dt, Math.min(v, maxV));
 
   if ((d.mode === 'rtb' || d.mode === 'rtl') && dist2d(d, s.base) < DRONE.landThresholdM) {
     if (d.mode === 'rtb') {
