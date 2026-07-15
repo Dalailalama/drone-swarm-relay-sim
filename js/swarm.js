@@ -46,7 +46,7 @@ const BATTERY = {
 
 let droneSeq = 0;
 
-function makeDrone(x, y, target) {
+function makeDrone(x, y, target, rng) {
   droneSeq += 1;
   return {
     id: 'DR-' + droneSeq,
@@ -58,8 +58,8 @@ function makeDrone(x, y, target) {
     lastC2: 0,
     holdX: 0, holdY: 0,
     inbox: [],
-    nextTlm: Math.random() * C2.tlmIntervalSec,
-    orbitPhase: Math.random() * Math.PI * 2,
+    nextTlm: rng() * C2.tlmIntervalSec,
+    orbitPhase: rng() * Math.PI * 2,
   };
 }
 
@@ -74,12 +74,13 @@ function makeSwarm(opts) {
     events: [],
     radio: opts.radio,
     envFactor: opts.envFactor,
+    shadowSigmaDb: opts.shadowSigmaDb || 0,
     net: makeNet(opts.seed || 42),
     c2: { known: {}, relays: [], inbox: [], nextCmd: 0, wasFresh: {} },
   };
   for (let i = 0; i < opts.count; i++) {
     const a = (i / opts.count) * Math.PI * 2;
-    s.drones.push(makeDrone(s.base.x + 60 * Math.cos(a), s.base.y + 60 * Math.sin(a), s.target));
+    s.drones.push(makeDrone(s.base.x + 60 * Math.cos(a), s.base.y + 60 * Math.sin(a), s.target, s.net.rng));
   }
   return s;
 }
@@ -93,12 +94,13 @@ function dist2d(a, b) { return Math.hypot(a.x - b.x, a.y - b.y); }
 function alive(d) { return d.mode !== 'dead' && d.mode !== 'landed'; }
 function effRole(d) { return d.mode === 'ok' ? d.order.role : d.mode; }
 
-// Live link margin between two nodes — pure physics for now; the stochastic
-// layer (shadowing/fading) hooks in here.
+// Live link margin between two nodes: deterministic path loss plus the
+// link's current shadowing offset. This is what routing, packet delivery,
+// and the hop display all consume — one consistent radio truth.
 function liveMarginDb(s, aId, bId) {
   const a = nodePos(s, aId), b = nodePos(s, bId);
   if (!a || !b) return -Infinity;
-  return linkMarginDb(s.radio, s.envFactor, dist2d(a, b));
+  return linkMarginDb(s.radio, s.envFactor, dist2d(a, b)) + fadeDb(s, aId, bId);
 }
 
 // Slot i of k relays: fraction (i+1)/(k+1) along base → ordered target.
@@ -335,7 +337,12 @@ function chainStatus(s) {
     const dM = dist2d(nodes[i], nodes[i + 1]);
     const margin = liveMarginDb(s, nodes[i].id, nodes[i + 1].id);
     const state = margin >= FADE_MARGIN_DB ? 'ok' : margin >= 0 ? 'degraded' : 'lost';
-    hops.push({ a: nodes[i], b: nodes[i + 1], distM: dM, marginDb: margin, rssiDbm: rssiAt(s.radio, s.envFactor, dM), state });
+    hops.push({
+      a: nodes[i], b: nodes[i + 1], distM: dM, marginDb: margin,
+      rssiDbm: rssiAt(s.radio, s.envFactor, dM) + fadeDb(s, nodes[i].id, nodes[i + 1].id),
+      lossPct: (1 - pktSuccessProb(margin)) * 100,
+      state,
+    });
   }
 
   // Ground truth connectivity: can a packet route from C2 to any mission drone?
@@ -354,6 +361,6 @@ function stepSwarm(s, dt) {
   s.time += dt;
   c2Step(s);
   for (const d of s.drones) stepDrone(s, d, dt);
-  stepNet(s);
+  stepNet(s, dt);
   return chainStatus(s);
 }

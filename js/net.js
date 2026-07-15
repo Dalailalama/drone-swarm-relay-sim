@@ -27,7 +27,29 @@ function gaussian(rng) {
 }
 
 function makeNet(seed) {
-  return { packets: [], rng: mulberry32(seed), dropped: 0, delivered: 0 };
+  return { packets: [], fades: new Map(), rng: mulberry32(seed), dropped: 0, delivered: 0 };
+}
+
+// --- Shadowing --------------------------------------------------------------
+// Each link carries a slowly-wandering dB offset (Ornstein-Uhlenbeck process):
+// terrain and obstruction effects that persist for seconds as drones move,
+// on top of deterministic path loss. Stationary std dev = environment sigma.
+const FADE = { tauSec: 10, pruneSec: 30 };
+
+function fadeDb(s, aId, bId) {
+  const key = aId < bId ? aId + '|' + bId : bId + '|' + aId;
+  let f = s.net.fades.get(key);
+  if (!f) { f = { db: 0, lastUsed: s.time }; s.net.fades.set(key, f); }
+  f.lastUsed = s.time;
+  return f.db;
+}
+
+function stepFades(s, dt) {
+  const sigma = s.shadowSigmaDb || 0;
+  for (const [key, f] of s.net.fades) {
+    if (s.time - f.lastUsed > FADE.pruneSec) { s.net.fades.delete(key); continue; }
+    f.db += (-f.db * dt / FADE.tauSec) + sigma * Math.sqrt(2 * dt / FADE.tauSec) * gaussian(s.net.rng);
+  }
 }
 
 function hopTimeSec(radio, bytes) {
@@ -49,17 +71,26 @@ function nodePos(s, id) {
   return s.drones.find(d => d.id === id) || null;
 }
 
-function linkUsable(s, aId, bId) {
+const ROUTE_MIN_MARGIN_DB = 3; // route selection avoids marginal links...
+const LINK_MIN_MARGIN_DB = 0;  // ...but an in-flight packet uses what's there
+
+function linkUsable(s, aId, bId, minMarginDb) {
   const a = nodePos(s, aId), b = nodePos(s, bId);
   if (!a || !b) return false;
   if (a !== s.base && !alive(a)) return false;
   if (b !== s.base && !alive(b)) return false;
-  return liveMarginDb(s, aId, bId) > 0;
+  return liveMarginDb(s, aId, bId) > (minMarginDb ?? LINK_MIN_MARGIN_DB);
 }
 
 // BFS shortest-hop route. Real mesh firmwares (DigiMesh, 802.11s) do roughly
-// this with routing tables; hop count is the standard metric.
+// this with routing tables; hop count is the metric, but link-quality gating
+// keeps traffic off barely-alive links. If no quality route exists, fall back
+// to anything with positive margin (desperation mode).
 function routePath(s, from, to) {
+  return bfsRoute(s, from, to, ROUTE_MIN_MARGIN_DB) || bfsRoute(s, from, to, LINK_MIN_MARGIN_DB);
+}
+
+function bfsRoute(s, from, to, minMarginDb) {
   if (from === to) return [from];
   const ids = nodeIds(s);
   if (!ids.includes(from) || !ids.includes(to)) return null;
@@ -69,7 +100,7 @@ function routePath(s, from, to) {
     const cur = queue.shift();
     for (const nxt of ids) {
       if (nxt in prev) continue;
-      if (!linkUsable(s, cur, nxt)) continue;
+      if (!linkUsable(s, cur, nxt, minMarginDb)) continue;
       prev[nxt] = cur;
       if (nxt === to) {
         const path = [to];
@@ -108,26 +139,37 @@ function deliverPacket(s, p) {
   }
 }
 
-function stepNet(s) {
+function stepNet(s, dt) {
+  stepFades(s, dt);
   const bytesOf = p => (p.kind === 'cmd' ? NET.cmdBytes : NET.tlmBytes);
   const keep = [];
   for (const p of s.net.packets) {
     let dead = false;
     while (s.time >= p.tArrive && !dead) {
       const from = p.path[p.hop], to = p.path[p.hop + 1];
-      if (!hopDelivered(s, from, to, bytesOf(p))) { s.net.dropped++; dead = true; break; }
+      const retries = hopDelivered(s, from, to);
+      if (retries < 0) { s.net.dropped++; dead = true; break; }
       p.hop++;
       if (p.hop >= p.path.length - 1) { deliverPacket(s, p); dead = true; break; }
       p.tHopStart = p.tArrive;
-      p.tArrive += hopTimeSec(s.radio, bytesOf(p));
+      // retransmissions cost extra airtime before the next hop can start
+      p.tArrive += hopTimeSec(s.radio, bytesOf(p)) * (1 + retries);
     }
     if (!dead) keep.push(p);
   }
   s.net.packets = keep;
 }
 
-// Hop attempt: link must still exist when the packet actually crosses it.
-// (Stochastic loss and retries are layered on in liveMarginDb / hopDelivered.)
-function hopDelivered(s, fromId, toId, bytes) {
-  return linkUsable(s, fromId, toId);
+// Hop attempt: the link must still exist when the packet actually crosses it,
+// then each transmission rolls against the packet-error curve. Returns number
+// of retries used (0 = first try), or -1 if all attempts failed.
+const HOP_RETRIES = 2; // SiK, DigiMesh etc. do link-layer retransmits like this
+
+function hopDelivered(s, fromId, toId) {
+  if (!linkUsable(s, fromId, toId)) return -1;
+  const p = pktSuccessProb(liveMarginDb(s, fromId, toId));
+  for (let t = 0; t <= HOP_RETRIES; t++) {
+    if (s.net.rng() < p) return t;
+  }
+  return -1;
 }

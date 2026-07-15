@@ -50,6 +50,7 @@
       enduranceMin: +endurRange.value,
       targetX: dist, targetY: -dist * 0.25,
       radio, envFactor: env.factor,
+      shadowSigmaDb: env.shadowSigmaDb,
       seed: 42 + missionSeq,
     });
     selected = null;
@@ -91,6 +92,7 @@
   envSel.addEventListener('change', () => {
     env = ENVIRONMENTS.find(e => e.id === envSel.value);
     swarm.envFactor = env.factor;
+    swarm.shadowSigmaDb = env.shadowSigmaDb;
     updateSpecCard();
     logEvent(swarm, 'Environment: ' + env.name + ' — usable range now ' + fmtDist(usable()), 'warn');
   });
@@ -204,7 +206,7 @@
 
     hopsBody.innerHTML = status.hops.map((h, i) =>
       '<tr class="' + h.state + '"><td>' + h.a.label + ' → ' + h.b.label + '</td><td>' + fmtDist(h.distM) +
-      '</td><td>' + h.rssiDbm.toFixed(0) + '</td><td>' + h.marginDb.toFixed(0) + '</td></tr>'
+      '</td><td>' + h.marginDb.toFixed(0) + ' dB</td><td>' + (h.lossPct < 1 ? '<1' : h.lossPct.toFixed(0)) + '%</td></tr>'
     ).join('') || '<tr><td colspan="4" class="dim">no links</td></tr>';
 
     fleetBody.innerHTML = swarm.drones.map(d => {

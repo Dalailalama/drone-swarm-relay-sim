@@ -76,10 +76,13 @@ const RADIOS = [
 
 // Environment multipliers applied to the calibrated range. LOS datasheet
 // figures assume clear line of sight; trees / buildings eat radio fast.
+// shadowSigmaDb: how wildly the signal wanders as drones move through the
+// environment (log-normal shadowing std dev — measured values run ~2-3 dB
+// rural to ~6-8 dB dense urban).
 const ENVIRONMENTS = [
-  { id: 'open',     name: 'Open field (clear LOS)', factor: 1.0 },
-  { id: 'suburban', name: 'Suburban / light trees', factor: 0.45 },
-  { id: 'urban',    name: 'Urban / dense obstacles', factor: 0.2 },
+  { id: 'open',     name: 'Open field (clear LOS)', factor: 1.0,  shadowSigmaDb: 2.5 },
+  { id: 'suburban', name: 'Suburban / light trees', factor: 0.45, shadowSigmaDb: 4.5 },
+  { id: 'urban',    name: 'Urban / dense obstacles', factor: 0.2, shadowSigmaDb: 6.5 },
 ];
 
 // --- Link physics -----------------------------------------------------------
@@ -124,4 +127,11 @@ function usableRangeM(radio, envFactor) {
 // hop on a single shared channel divides airtime, so capacity ~ rate / hops.
 function chainThroughputKbps(radio, hops) {
   return radio.airRateKbps / Math.max(1, hops);
+}
+
+// Probability a single packet transmission succeeds, given the link's mean
+// margin above sensitivity. Logistic curve: ~16% at 0 dB, 50% at 2 dB,
+// ~95% at 6 dB — the reason nobody plans a link at 0 dB margin.
+function pktSuccessProb(marginDb) {
+  return 1 / (1 + Math.exp(-(marginDb - 2) / 1.2));
 }
