@@ -221,6 +221,136 @@ function covAdjust(s, pos) {
 
 const C2_ANTENNA_M = 6; // ground station telemetry mast — BVLOS ops raise these
 
+// --- Chain path planning ------------------------------------------------------
+// C2 plans the relay chain along a PATH, not a straight line: A* over its
+// legitimate knowledge (terrain database + measured-bad coverage cells),
+// slots spaced along the path, then every adjacent hop LOS-validated against
+// the terrain model — a ridge between two slots gets an extra relay ON it
+// rather than a dead hop across it.
+const PLAN = { replanSec: 5, maxSlots: 12 };
+
+function planChain(s) {
+  const tKey = Math.round(s.target.x / 40) + ',' + Math.round(s.target.y / 40);
+  const cached = s.c2.chainPlan;
+  if (cached && cached.tKey === tKey && s.time - cached.at < PLAN.replanSec) return cached;
+
+  const usable = Math.min(usableRangeM(s.radio, s.envFactor), radioHorizonM(C2_ANTENNA_M, s.altitudeM));
+  const span = usable * s.deployFrac;
+  const cell = Math.max(40, usable * 0.25);
+  const pad = span * 1.5;
+  const minX = Math.min(s.base.x, s.target.x) - pad, maxX = Math.max(s.base.x, s.target.x) + pad;
+  const minY = Math.min(s.base.y, s.target.y) - pad, maxY = Math.max(s.base.y, s.target.y) + pad;
+  const nx = Math.max(2, Math.ceil((maxX - minX) / cell)), ny = Math.max(2, Math.ceil((maxY - minY) / cell));
+  const pos = (ix, iy) => ({ x: minX + (ix + 0.5) * cell, y: minY + (iy + 0.5) * cell });
+  const blocked = p => insideObstacle(s, p) || covState(s, p.x, p.y) === 'bad';
+  const idx = (ix, iy) => iy * nx + ix;
+
+  const sIx = Math.min(nx - 1, Math.max(0, Math.floor((s.base.x - minX) / cell)));
+  const sIy = Math.min(ny - 1, Math.max(0, Math.floor((s.base.y - minY) / cell)));
+  const gIx = Math.min(nx - 1, Math.max(0, Math.floor((s.target.x - minX) / cell)));
+  const gIy = Math.min(ny - 1, Math.max(0, Math.floor((s.target.y - minY) / cell)));
+
+  // A* (8-connected); measured-good cells slightly cheaper so proven space wins ties
+  const gCost = new Map(), from = new Map();
+  const open = [{ ix: sIx, iy: sIy, g: 0, f: 0 }];
+  gCost.set(idx(sIx, sIy), 0);
+  let found = false;
+  while (open.length) {
+    let bi = 0;
+    for (let i = 1; i < open.length; i++) if (open[i].f < open[bi].f) bi = i;
+    const cur = open.splice(bi, 1)[0];
+    if (cur.ix === gIx && cur.iy === gIy) { found = true; break; }
+    if (gCost.get(idx(cur.ix, cur.iy)) < cur.g) continue;
+    for (let dx = -1; dx <= 1; dx++) {
+      for (let dy = -1; dy <= 1; dy++) {
+        if (!dx && !dy) continue;
+        const ix = cur.ix + dx, iy = cur.iy + dy;
+        if (ix < 0 || iy < 0 || ix >= nx || iy >= ny) continue;
+        const p = pos(ix, iy);
+        if ((ix !== gIx || iy !== gIy) && blocked(p)) continue;
+        const stepCost = (dx && dy ? 1.4142 : 1) * (covState(s, p.x, p.y) === 'good' ? 0.9 : 1);
+        const g = cur.g + stepCost;
+        const key = idx(ix, iy);
+        if (gCost.has(key) && gCost.get(key) <= g) continue;
+        gCost.set(key, g);
+        from.set(key, idx(cur.ix, cur.iy));
+        const h = Math.hypot(ix - gIx, iy - gIy) * 0.9;
+        open.push({ ix, iy, g, f: g + h });
+      }
+    }
+  }
+
+  // Reconstruct → world points → greedy simplify (skip while straight
+  // segments stay clear of blocked cells)
+  let path = [{ x: s.base.x, y: s.base.y }, { x: s.target.x, y: s.target.y }];
+  if (found) {
+    const cellsRev = [];
+    let k = idx(gIx, gIy);
+    while (k !== undefined && k !== idx(sIx, sIy)) { cellsRev.push(k); k = from.get(k); }
+    const pts = cellsRev.reverse().map(kk => pos(kk % nx, Math.floor(kk / nx)));
+    pts.unshift({ x: s.base.x, y: s.base.y });
+    pts[pts.length - 1] = { x: s.target.x, y: s.target.y };
+    const clearRun = (a, b) => {
+      const n = Math.ceil(dist2d(a, b) / (cell / 2));
+      for (let i = 1; i < n; i++) {
+        const p = { x: a.x + (b.x - a.x) * i / n, y: a.y + (b.y - a.y) * i / n };
+        if (blocked(p)) return false;
+      }
+      return true;
+    };
+    path = [pts[0]];
+    let i = 0;
+    while (i < pts.length - 1) {
+      let j = pts.length - 1;
+      while (j > i + 1 && !clearRun(pts[i], pts[j])) j--;
+      path.push(pts[j]);
+      i = j;
+    }
+  }
+
+  // Slots at even arc-length along the path
+  const segs = [];
+  let pathLen = 0;
+  for (let i = 0; i < path.length - 1; i++) { const L = dist2d(path[i], path[i + 1]); segs.push(L); pathLen += L; }
+  const kSlots = Math.min(PLAN.maxSlots, Math.max(0, Math.ceil(pathLen / span) - 1));
+  const at = arc => {
+    let rem = arc;
+    for (let i = 0; i < segs.length; i++) {
+      if (rem <= segs[i] || i === segs.length - 1) {
+        const f = segs[i] ? rem / segs[i] : 0;
+        return { x: path[i].x + (path[i + 1].x - path[i].x) * f, y: path[i].y + (path[i + 1].y - path[i].y) * f };
+      }
+      rem -= segs[i];
+    }
+    return path[path.length - 1];
+  };
+  let slots = [];
+  for (let i = 0; i < kSlots; i++) slots.push(at(pathLen * (i + 1) / (kSlots + 1)));
+
+  // LOS-densify with the terrain model: a ridge between adjacent nodes gets
+  // a relay on it instead of a dead hop over it (two passes max)
+  const altOf = (p, isC2) => terrainGroundAt(s.terrain, p.x, p.y) + (isC2 ? C2_ANTENNA_M : s.altitudeM);
+  for (let pass = 0; pass < 2 && slots.length < PLAN.maxSlots; pass++) {
+    const nodesL = [s.base, ...slots, s.target];
+    let inserted = false;
+    for (let i = 0; i < nodesL.length - 1 && slots.length < PLAN.maxSlots; i++) {
+      const a = nodesL[i], b = nodesL[i + 1];
+      if (losBlocked(s.terrain, a.x, a.y, altOf(a, i === 0), b.x, b.y, altOf(b, false))) {
+        const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+        slots.splice(i === 0 ? 0 : i, 0, mid); // insert between a and b
+        inserted = true;
+        break; // re-walk with fresh node list
+      }
+    }
+    if (inserted) pass--; // keep passing until clean or capped
+    else break;
+  }
+
+  const plan = { slots, pathLen, tKey, at: s.time };
+  s.c2.chainPlan = plan;
+  return plan;
+}
+
 // Absolute antenna altitude. Drones terrain-follow: AGL above the ground
 // beneath them, like a real terrain-following mission. Ridges between two
 // valleys still cut line of sight; buildings are handled as obstacles.
@@ -382,15 +512,15 @@ function c2Step(s) {
     logEvent(s, 'C2: relay roster degraded (' + s.c2.relays.length + '/' + before + ') — re-planning', 'error');
   }
 
-  // Hysteresis on chain length, planned against operator intent.
-  // Hop span is capped by the radio horizon at operating altitude — a 40 km
-  // radio is still a ~30 km radio when the Earth gets in the way.
+  // Chain length comes from the PLANNED PATH (A* around known terrain and
+  // measured dead zones, LOS-densified over ridges) — not from straight-line
+  // distance. Hop span stays capped by the radio horizon at altitude.
   const usable = Math.min(
     usableRangeM(s.radio, s.envFactor),
     radioHorizonM(C2_ANTENNA_M, s.altitudeM));
-  const D = dist2d(s.base, s.target);
+  const plan = planChain(s);
   const k = s.c2.relays.length;
-  const kNeeded = relaysRequired(D, usable * s.deployFrac);
+  const kNeeded = plan.slots.length;
 
   // Operator warning: mission demands more relays than the fleet can supply.
   // Drones will still try (and their failsafes will bring them back) — but
@@ -411,8 +541,7 @@ function c2Step(s) {
       known[id].battery >= RELAY.minBatteryPct && !s.c2.relays.includes(id) &&
       !s.c2.rescuers.includes(id) && !(s.c2.unfit[id] > s.time));
     if (candidates.length) {
-      const slotF = (k + 1) / (k + 2);
-      const slot = { x: s.base.x + (s.target.x - s.base.x) * slotF, y: s.base.y + (s.target.y - s.base.y) * slotF };
+      const slot = plan.slots[k] || s.target;
       let best = null, bestScore = -Infinity;
       for (const id of candidates) {
         const score = 0.6 * (known[id].battery / 100)
@@ -422,8 +551,8 @@ function c2Step(s) {
       s.c2.relays.push(best);
       logEvent(s, 'C2 orders ' + best + ' to relay slot ' + s.c2.relays.length, 'relay');
     }
-  } else if (kNeeded < k && relaysRequired(D, usable * Math.min(1.2, s.deployFrac * RELAY.recallHysteresis)) < k && k > 0) {
-    // Release only when the deploy criterion won't immediately re-demand it
+  } else if (kNeeded < k - 1 && k > 0) {
+    // Plan wants a visibly shorter chain (>1 spare, so replan jitter can't flap)
     const freed = s.c2.relays.pop();
     logEvent(s, 'C2 releases ' + freed + ' from relay duty', 'relay');
   }
@@ -539,20 +668,13 @@ function c2Step(s) {
   }
 }
 
-// Nominal slot on the spine, shifted out of measured-bad coverage cells.
-// Cached per (slot, k, target) so the assignment doesn't wander every cycle
-// as measurement counts tick up — it only re-adjusts when its cell turns bad.
+// Slot positions come from the planned path; covAdjust still guards against
+// cells that turned measured-bad since the last replan.
 function adjustedSlotPos(s, slot, k) {
-  const nominal = slotFromOrder(s, { slot, k, target: s.target, role: 'relay' });
-  const key = slot + '/' + k + '/' + Math.round(s.target.x / 50) + ',' + Math.round(s.target.y / 50);
-  const cached = s.c2.slotCache[key];
-  if (cached && !badPlan(s, cached)) return cached;
-  const adj = covAdjust(s, nominal);
-  s.c2.slotCache[key] = adj;
-  if (dist2d(adj, nominal) > s.covCellM * 0.9) {
-    logEvent(s, 'C2: relay slot ' + (slot + 1) + ' moved off measured dead zone (' + Math.round(dist2d(adj, nominal)) + ' m sidestep)', 'relay');
-  }
-  return adj;
+  const plan = s.c2.chainPlan;
+  const nominal = (plan && plan.slots[slot])
+    || slotFromOrder(s, { slot, k, target: s.target, role: 'relay' });
+  return covAdjust(s, nominal);
 }
 
 function lostCentroid(s) {

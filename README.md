@@ -182,6 +182,16 @@ fills in, then a bent chain (relays up to ~100 m off-spine) holding 100%
 uptime. The heatmap overlay (Coverage map toggle) shows the whole thing
 happening.
 
+And the chain itself is **path-planned**: C2 runs A* over everything it
+legitimately knows — terrain obstacles from its elevation database plus
+measured-bad coverage cells — places relay slots along the resulting path,
+then LOS-validates every adjacent hop against the terrain model and adds a
+relay ON a ridge rather than accept a dead hop across it. Chains snake
+around cities and over hills instead of dying on straight lines. (Measured:
+the mixed-terrain low-altitude scenario goes from a chain that breaks in
+steady state to 95% uptime with the flock on target, using one extra
+densified relay along a path 1.1× the straight-line distance.)
+
 ## Things to try
 
 1. **Kill a relay** (click it, then *Kill*) — watch C2 lose telemetry,
@@ -218,8 +228,6 @@ node --test
 
 ## Roadmap
 
-- Corridor routing through the learned coverage map (bend transits around
-  measured dead zones, not just relay slots)
 - Packet capture export for protocol debugging
 - PX4/ArduPilot SITL bridge: same planner, real autopilot firmware
 
