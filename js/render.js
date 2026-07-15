@@ -69,6 +69,38 @@ function drawGrid(ctx, cv, view) {
   }
 }
 
+// Hills as flat contour domes — three nested rings at 100/66/33% radius.
+function drawHills(ctx, cv, view, s) {
+  for (const h of s.hills) {
+    const c = worldToScreen(view, cv, h.x, h.y);
+    for (const f of [1, 0.66, 0.33]) {
+      const r = h.radiusM * f * view.pxPerM;
+      if (r < 2) continue;
+      ctx.beginPath(); ctx.arc(c.x, c.y, r, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(148,163,184,0.07)'; ctx.fill();
+      ctx.strokeStyle = 'rgba(148,163,184,0.25)'; ctx.lineWidth = 1; ctx.stroke();
+    }
+    ctx.font = '11px "Segoe UI", sans-serif'; ctx.textAlign = 'center';
+    ctx.fillStyle = COLORS.textDim;
+    ctx.fillText('hill ' + Math.round(h.heightM) + ' m', c.x, c.y + 4);
+  }
+}
+
+// C2's learned coverage map: green where a packet provably arrived, red where
+// a drone sat in silence. Unknown cells stay unpainted — honesty by omission.
+function drawCoverage(ctx, cv, view, s) {
+  if (!s.showCoverage || !s.c2.cov.size) return;
+  const cell = s.covCellM, px = cell * view.pxPerM;
+  if (px < 1.5) return;
+  for (const [key, e] of s.c2.cov) {
+    const [i, j] = key.split(',').map(Number);
+    const p = worldToScreen(view, cv, i * cell, j * cell);
+    if (p.x < -px || p.y < -px || p.x > cv.width || p.y > cv.height) continue;
+    ctx.fillStyle = e.bad > e.good ? 'rgba(248,113,113,0.16)' : 'rgba(52,211,153,0.08)';
+    ctx.fillRect(p.x, p.y, px, px);
+  }
+}
+
 function drawRangeRing(ctx, cv, view, node, rangeM) {
   const c = worldToScreen(view, cv, node.x, node.y);
   const r = rangeM * view.pxPerM;
@@ -240,6 +272,8 @@ function drawScaleBar(ctx, cv, view) {
 function render(ctx, cv, view, s, status, selected, usable) {
   ctx.clearRect(0, 0, cv.width, cv.height);
   drawGrid(ctx, cv, view);
+  drawCoverage(ctx, cv, view, s);
+  drawHills(ctx, cv, view, s);
 
   // Coverage rings around every transmitting chain node
   for (const node of status.nodes) {

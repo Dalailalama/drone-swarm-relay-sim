@@ -15,6 +15,7 @@
   const windDirRange = el('windDirRange'), windDirOut = el('windDirOut');
   const spacingRange = el('spacingRange'), spacingOut = el('spacingOut'), spacingInfo = el('spacingInfo');
   const corridorChk = el('corridorChk'), corridorOut = el('corridorOut');
+  const terrainSel = el('terrainSel'), coverageChk = el('coverageChk');
   const speedBtns = Array.from(document.querySelectorAll('[data-speed]'));
   const statusPill = el('statusPill'), specCard = el('specCard');
   const hopsBody = el('hopsBody'), fleetBody = el('fleetBody'), eventLog = el('eventLog');
@@ -58,7 +59,13 @@
   function resetSwarm() {
     const dist = +distRange.value / 100 * defaultTargetDist();
     missionSeq += 1;
+    const tX = dist, tY = -dist * 0.25;
+    const hills = terrainPreset(terrainSel.value, {
+      distM: Math.hypot(tX, tY), altM: +altRange.value,
+      targetX: tX, targetY: tY, seed: 42 + missionSeq,
+    });
     swarm = makeSwarm({
+      terrain: hills,
       count: +countRange.value,
       airframe,
       altitudeM: +altRange.value,
@@ -72,6 +79,7 @@
       seed: 42 + missionSeq,
     });
     selected = null;
+    swarm.showCoverage = coverageChk.checked;
     fitView();
     logEvent(swarm, 'Swarm launched: ' + swarm.drones.length + ' drones on ' + radio.name, 'info');
   }
@@ -166,6 +174,10 @@
   corridorChk.addEventListener('change', () => {
     if (swarm) swarm.corridorRouting = corridorChk.checked;
     corridorOut.textContent = corridorChk.checked ? 'transits follow the chain' : 'straight-line transits';
+  });
+  terrainSel.addEventListener('change', resetSwarm);
+  coverageChk.addEventListener('change', () => {
+    if (swarm) swarm.showCoverage = coverageChk.checked;
   });
   speedBtns.forEach(b => b.addEventListener('click', () => {
     const v = b.dataset.speed;

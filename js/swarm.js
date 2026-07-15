@@ -54,6 +54,12 @@ const BATTERY = {
 
 const GPS_SIGMA_M = 1.5; // typical GNSS horizontal error — C2 sees noisy positions
 
+const COVERAGE = {
+  deadLogIntervalSec: 5,  // while disconnected, log a dead-zone sample this often
+  deadLogMax: 20,         // onboard black-box capacity
+  searchRadiusCells: 5,   // how far C2 will shift a relay slot out of a bad cell
+};
+
 // Regulatory duty cycle stretches how often a node may transmit at all.
 function tlmIntervalSec(s) {
   const tx = (NET.tlmBytes * 8) / (s.radio.airRateKbps * 1000);
@@ -84,6 +90,8 @@ function makeDrone(x, y, target, rng, airframe) {
     relinkAttempt: 0,
     relinkGoalX: 0, relinkGoalY: 0,
     rejectedRole: null, rejectedSig: null,
+    deadLog: [],          // onboard black box: positions where the link was dead
+    nextDeadLog: 0,
     inbox: [],
     nextTlm: rng() * C2.tlmIntervalSec,
     orbitPhase: rng() * Math.PI * 2,
@@ -106,8 +114,11 @@ function makeSwarm(opts) {
     radio: opts.radio,
     envFactor: opts.envFactor,
     shadowSigmaDb: opts.shadowSigmaDb || 0,
+    hills: opts.terrain || [],
+    covCellM: Math.max(20, usableRangeM(opts.radio, opts.envFactor) * 0.15),
+    showCoverage: true,
     net: makeNet(opts.seed || 42),
-    c2: { known: {}, relays: [], inbox: [], nextCmd: 0, wasFresh: {}, lost: {}, rescuer: null, unfit: {} },
+    c2: { known: {}, relays: [], inbox: [], nextCmd: 0, wasFresh: {}, lost: {}, rescuer: null, unfit: {}, cov: new Map(), slotCache: {} },
   };
   for (let i = 0; i < opts.count; i++) {
     const a = (i / opts.count) * Math.PI * 2;
@@ -125,22 +136,93 @@ function dist2d(a, b) { return Math.hypot(a.x - b.x, a.y - b.y); }
 function alive(d) { return d.mode !== 'dead' && d.mode !== 'landed'; }
 function effRole(d) { return d.mode === 'ok' ? d.order.role : d.mode; }
 
+// --- Learned RF coverage map --------------------------------------------------
+// FASTER's three kinds of space, in radio form: measured-good (a packet
+// provably arrived from here), measured-bad (a drone sat here in silence),
+// and unknown (the model has an opinion but nobody has checked).
+function covKey(s, x, y) {
+  return Math.floor(x / s.covCellM) + ',' + Math.floor(y / s.covCellM);
+}
+
+function covMark(s, x, y, kind, weight) {
+  const key = covKey(s, x, y);
+  let e = s.c2.cov.get(key);
+  if (!e) { e = { good: 0, bad: 0 }; s.c2.cov.set(key, e); }
+  e[kind] += weight || 1;
+}
+
+function covState(s, x, y) {
+  const e = s.c2.cov.get(covKey(s, x, y));
+  if (!e) return 'unknown';
+  return e.bad > e.good ? 'bad' : 'good';
+}
+
+// C2 carries the same terrain database the drones use for avoidance — a
+// planned position inside a hill's no-fly footprint is a bad plan without
+// needing to be flown first. Measured-bad cells cover what the terrain map
+// can't predict: the RF shadows.
+function insideHillObstacle(s, pos) {
+  return s.hills.some(h => dist2d(pos, h) < hillObstacleRadiusM(s, h) + 10);
+}
+
+function badPlan(s, pos) {
+  return covState(s, pos.x, pos.y) === 'bad' || insideHillObstacle(s, pos);
+}
+
+// If a planned position is a bad plan (measured-bad cell or known terrain),
+// spiral outward to the nearest position that isn't (perpendicular shifts
+// explored first, so chains sidestep shadows rather than shorten).
+function covAdjust(s, pos) {
+  if (!badPlan(s, pos)) return pos;
+  const cell = s.covCellM;
+  const B = s.base, T = s.target;
+  const L = Math.max(1, dist2d(B, T));
+  const px = -(T.y - B.y) / L, py = (T.x - B.x) / L; // perpendicular to spine
+  for (let r = 1; r <= COVERAGE.searchRadiusCells; r++) {
+    const candidates = [
+      { x: pos.x + px * r * cell, y: pos.y + py * r * cell },
+      { x: pos.x - px * r * cell, y: pos.y - py * r * cell },
+      { x: pos.x + (T.x - B.x) / L * r * cell, y: pos.y + (T.y - B.y) / L * r * cell },
+      { x: pos.x - (T.x - B.x) / L * r * cell, y: pos.y - (T.y - B.y) / L * r * cell },
+    ];
+    for (const c of candidates) {
+      if (!badPlan(s, c)) return c;
+    }
+  }
+  return pos; // everything nearby is known-bad — no better idea than the plan
+}
+
 const C2_ANTENNA_M = 2; // ground station mast height
 
-function nodeAltM(s, id) {
+// Absolute antenna altitude. Drones hold their set altitude and treat hills
+// that rise above it as obstacles (see hillAvoidance) rather than riding
+// over them — a smooth dome would otherwise act as a free radio tower and
+// no shadow would ever form.
+function nodeAltAbsM(s, id, pos) {
   return id === 'C2' ? C2_ANTENNA_M : s.altitudeM;
 }
 
+// A hill's no-fly footprint at the swarm's altitude: the radius where the
+// dome pokes above flight level (plus a safety skirt). Zero if the swarm
+// flies clear over the top.
+function hillObstacleRadiusM(s, h) {
+  if (h.heightM <= s.altitudeM) return 0;
+  return h.radiusM * Math.sqrt(1 - s.altitudeM / h.heightM) + 20;
+}
+
 // Live link margin between two nodes: 3D slant-range path loss plus the
-// link's current shadowing offset, hard-blocked beyond the radio horizon.
-// This is what routing, packet delivery, and the hop display all consume —
-// one consistent radio truth.
+// link's current shadowing offset, hard-blocked beyond the radio horizon
+// and hard-blocked when terrain cuts the line of sight. This is what
+// routing, packet delivery, and the hop display all consume — one
+// consistent radio truth.
 function liveMarginDb(s, aId, bId) {
   const a = nodePos(s, aId), b = nodePos(s, bId);
   if (!a || !b) return -Infinity;
+  const altA = nodeAltAbsM(s, aId, a), altB = nodeAltAbsM(s, bId, b);
   const ground = dist2d(a, b);
-  if (ground > radioHorizonM(nodeAltM(s, aId), nodeAltM(s, bId))) return -Infinity;
-  const slant = Math.hypot(ground, nodeAltM(s, aId) - nodeAltM(s, bId));
+  if (ground > radioHorizonM(altA, altB)) return -Infinity;
+  if (losBlocked(s.hills, a.x, a.y, altA, b.x, b.y, altB)) return -Infinity;
+  const slant = Math.hypot(ground, altA - altB);
   return linkMarginDb(s.radio, s.envFactor, slant) + fadeDb(s, aId, bId);
 }
 
@@ -190,7 +272,9 @@ function orderFeasible(s, d, order) {
 }
 
 // Slot i of k relays: fraction (i+1)/(k+1) along base → ordered target.
+// If C2 supplied an explicit (coverage-adjusted) position, that wins.
 function slotFromOrder(s, order) {
+  if (order.slotPos) return order.slotPos;
   const f = (order.slot + 1) / (order.k + 1);
   return {
     x: s.base.x + (order.target.x - s.base.x) * f,
@@ -204,9 +288,17 @@ function relaysRequired(D, span) {
 
 // --- C2 ground station -------------------------------------------------------
 function c2Step(s) {
-  // Ingest telemetry that physically arrived
+  // Ingest telemetry that physically arrived. Every received report is also
+  // a coverage measurement: the link provably worked at that position.
   for (const p of s.c2.inbox) {
     s.c2.known[p.src] = { ...p.payload, at: s.time };
+    covMark(s, p.payload.x, p.payload.y, 'good');
+    if (p.payload.deadLog) {
+      // Sitting somewhere in silence is much stronger evidence than one
+      // lucky packet — weight dead samples accordingly.
+      for (const pt of p.payload.deadLog) covMark(s, pt.x, pt.y, 'bad', 3);
+      logEvent(s, 'C2: ' + p.src + ' uploaded ' + p.payload.deadLog.length + ' dead-zone samples — coverage map updated', 'info');
+    }
   }
   s.c2.inbox = [];
 
@@ -223,6 +315,7 @@ function c2Step(s) {
     if (s.c2.wasFresh[id] && !f) {
       logEvent(s, 'C2 lost telemetry from ' + id, 'warn');
       s.c2.lost[id] = { x: known[id].x, y: known[id].y, at: s.time };
+      covMark(s, known[id].x, known[id].y, 'bad', 2); // weaker than a dead log, but evidence
     }
     if (!s.c2.wasFresh[id] && f) {
       logEvent(s, 'C2 regained telemetry from ' + id, 'info');
@@ -372,9 +465,26 @@ function c2Step(s) {
       role: slot >= 0 ? 'relay' : 'mission',
       slot,
       k: s.c2.relays.length,
+      slotPos: slot >= 0 ? adjustedSlotPos(s, slot, s.c2.relays.length) : null,
       target: { x: s.target.x, y: s.target.y },
     });
   }
+}
+
+// Nominal slot on the spine, shifted out of measured-bad coverage cells.
+// Cached per (slot, k, target) so the assignment doesn't wander every cycle
+// as measurement counts tick up — it only re-adjusts when its cell turns bad.
+function adjustedSlotPos(s, slot, k) {
+  const nominal = slotFromOrder(s, { slot, k, target: s.target, role: 'relay' });
+  const key = slot + '/' + k + '/' + Math.round(s.target.x / 50) + ',' + Math.round(s.target.y / 50);
+  const cached = s.c2.slotCache[key];
+  if (cached && !badPlan(s, cached)) return cached;
+  const adj = covAdjust(s, nominal);
+  s.c2.slotCache[key] = adj;
+  if (dist2d(adj, nominal) > s.covCellM * 0.9) {
+    logEvent(s, 'C2: relay slot ' + (slot + 1) + ' moved off measured dead zone (' + Math.round(dist2d(adj, nominal)) + ' m sidestep)', 'relay');
+  }
+  return adj;
 }
 
 function lostCentroid(s) {
@@ -423,7 +533,9 @@ function droneComms(s, d) {
 
   if (!alive(d) || d.mode === 'rtb') return;
 
-  // Telemetry beacon — position as the GPS sees it, not as God sees it
+  // Telemetry beacon — position as the GPS sees it, not as God sees it.
+  // Any dead-zone samples collected while disconnected ride along (black box
+  // upload) and are cleared once handed to the radio.
   if (s.time >= d.nextTlm) {
     d.nextTlm = s.time + tlmIntervalSec(s);
     sendPacket(s, 'tlm', d.id, 'C2', {
@@ -431,7 +543,20 @@ function droneComms(s, d) {
       y: d.y + GPS_SIGMA_M * gaussian(s.net.rng),
       battery: d.batteryPct, role: effRole(d),
       reject: d.rejectedRole || null,
+      deadLog: d.deadLog.length ? d.deadLog.splice(0) : null,
     });
+  }
+
+  // Black box: while the link is silent, remember where it was silent.
+  const silent = d.mode === 'hold' || d.mode === 'relink' || d.mode === 'rtl';
+  if (silent && s.time >= d.nextDeadLog) {
+    d.nextDeadLog = s.time + COVERAGE.deadLogIntervalSec;
+    if (d.deadLog.length < COVERAGE.deadLogMax) {
+      d.deadLog.push({
+        x: d.x + GPS_SIGMA_M * gaussian(s.net.rng),
+        y: d.y + GPS_SIGMA_M * gaussian(s.net.rng),
+      });
+    }
   }
 
   // Link-loss failsafe ladder. Timeouts scale with the expected command rate
@@ -557,6 +682,21 @@ function stepDrone(s, d, dt) {
       const push = (DRONE.separationM - sd) / DRONE.separationM * DRONE.accelMs2 * 2;
       ax += ((d.x - o.x) / sd) * push;
       ay += ((d.y - o.y) / sd) * push;
+    }
+  }
+
+  // Terrain avoidance: onboard terrain database, hills above flight level are
+  // no-fly cylinders. Radial push plus a tangential bias so a head-on
+  // approach slides around the rim instead of stalling against it.
+  for (const h of s.hills) {
+    const rObst = hillObstacleRadiusM(s, h);
+    if (!rObst) continue;
+    const dxh = d.x - h.x, dyh = d.y - h.y;
+    const dh = Math.hypot(dxh, dyh);
+    if (dh < rObst && dh > 0.01) {
+      const push = ((rObst - dh) / rObst) * DRONE.accelMs2 * 3;
+      ax += (dxh / dh) * push - (dyh / dh) * push * 0.4;
+      ay += (dyh / dh) * push + (dxh / dh) * push * 0.4;
     }
   }
 

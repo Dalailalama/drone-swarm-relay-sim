@@ -83,6 +83,20 @@
         <output id="corridorOut" style="flex:1; text-align:left; color:var(--dim);">transits follow the chain</output>
       </div>
       <div class="ctl-row">
+        <label for="terrainSel">Terrain</label>
+        <select id="terrainSel" style="flex:1;">
+          <option value="none">Flat (no terrain)</option>
+          <option value="ridge">Ridge blocking the spine</option>
+          <option value="twin">Twin hills flanking</option>
+          <option value="random">Random hills (seeded)</option>
+        </select>
+      </div>
+      <div class="ctl-row">
+        <label for="coverageChk">Coverage map</label>
+        <input type="checkbox" id="coverageChk" checked style="flex:0 0 auto; width:auto; accent-color:var(--accent);">
+        <output style="flex:1; text-align:left; color:var(--dim);">C2's measured RF map</output>
+      </div>
+      <div class="ctl-row">
         <label for="windSpdRange">Wind</label>
         <input type="range" id="windSpdRange" min="0" max="15" value="0" step="1">
         <output id="windSpdOut">0 m/s</output>
@@ -127,6 +141,7 @@
 </main>
 
 <script src="js/radios.js"></script>
+<script src="js/terrain.js"></script>
 <script src="js/airframes.js"></script>
 <script src="js/net.js"></script>
 <script src="js/swarm.js"></script>

@@ -126,6 +126,29 @@ Wind is a ground-frame/air-frame split: speed limits and power draw are paid
 in airspeed, so holding a relay slot in a 10 m/s wind costs real watts, and
 a 16 m/s gale blows a 14 m/s quad backwards.
 
+## Terrain and the learned coverage map
+
+Hills (Mission setup → Terrain) block radio for real: a link needs line of
+sight, and a dome taller than the flight altitude is also a no-fly cylinder
+the drones steer around (they carry a terrain database, like real
+autopilots — and so does C2, which never plans a relay slot inside rock).
+
+What no terrain database can predict is the *RF shadow* — the region where
+hops between valid positions still die because the hill cuts the ray. That
+part the swarm has to learn: while disconnected, every drone's black box
+logs where the silence happened; on reconnect the samples upload, and C2
+paints a coverage grid — green where packets provably arrived, red where
+drones sat in silence, unpainted where nobody has checked (FASTER's
+known-free / unknown / occupied space, in radio form). Relay slots that
+land in measured-bad cells get sidestepped to the nearest trusted cell —
+so after a few minutes of honest struggle, the chain physically bends
+around the hill and stays connected.
+
+Measured in the ridge scenario: ~8 sim-minutes of failures while the map
+fills in, then a bent chain (relays up to ~100 m off-spine) holding 100%
+uptime. The heatmap overlay (Coverage map toggle) shows the whole thing
+happening.
+
 ## Things to try
 
 1. **Kill a relay** (click it, then *Kill*) — watch C2 lose telemetry,
@@ -162,7 +185,8 @@ node --test
 
 ## Roadmap
 
-- Terrain / obstacle line-of-sight blocking
+- Corridor routing through the learned coverage map (bend transits around
+  measured dead zones, not just relay slots)
 - Broadcast C2 mode (one packet orders the whole swarm — what LoRa C2
   actually does)
 - Spare drones auto-launching to replace battery-RTB relays
