@@ -16,6 +16,7 @@ const RADIOS = [
     airRateKbps: 64,
     rangeLosM: 300,       // Holybro spec: ~300 m with stock antennas
     note: 'The default MAVLink telemetry radio. Cheap (~$40/pair), 300 m stock — antenna upgrades stretch it to a few km.',
+    source: 'https://docs.holybro.com/telemetry-radio/sik-telemetry-radio',
   },
   {
     id: 'rfd900x',
@@ -27,6 +28,7 @@ const RADIOS = [
     airRateKbps: 224,     // configurable 12–224 kbps
     rangeLosM: 40000,     // RFDesign datasheet: >40 km LOS with dipoles
     note: 'The serious option. 1 W, 40+ km line of sight. What long-range fixed-wing and BVLOS people actually fly.',
+    source: 'https://rfdesign.com.au/products/rfd900x-modem/',
   },
   {
     id: 'espnow',
@@ -38,6 +40,7 @@ const RADIOS = [
     airRateKbps: 1000,
     rangeLosM: 300,       // community open-field tests: ~200-480 m
     note: 'Hobby-swarm favorite: a $5 chip on every drone, connectionless broadcast, trivially meshes. Short legs though.',
+    source: 'https://www.espressif.com/en/solutions/low-power-solutions/esp-now',
   },
   {
     id: 'elrs24',
@@ -49,6 +52,7 @@ const RADIOS = [
     airRateKbps: 5,       // usable MAVLink telemetry throughput, not RF rate
     rangeLosM: 10000,     // routinely proven 10+ km at 100 mW / 150 Hz
     note: 'RC-control link repurposed for C2. Astonishing range per milliwatt, but only a few kbps of telemetry fits through.',
+    source: 'https://www.expresslrs.org/info/signal-health/',
   },
   {
     id: 'lora868',
@@ -61,6 +65,7 @@ const RADIOS = [
     rangeLosM: 5000,      // typical near-ground open-field result
     dutyCycle: 0.1,       // 869.4-869.65 MHz sub-band: 10% duty limit by law
     note: 'Kilometres of range on milliwatts, but ~1 kbps and a legal duty-cycle cap — commands and heartbeats only, and not many of them.',
+    source: 'https://www.semtech.com/products/wireless-rf/lora-connect/sx1276',
   },
   {
     id: 'xbee900',
@@ -72,6 +77,7 @@ const RADIOS = [
     airRateKbps: 200,
     rangeLosM: 6500,      // Digi datasheet: 4 mi LOS with 2.1 dBi dipoles
     note: 'Industrial mesh radio with DigiMesh built into the firmware — relaying is native, not something you write.',
+    source: 'https://www.digi.com/products/embedded-systems/digi-xbee/rf-modules/sub-1-ghz-rf-modules/xbee-pro-900hp',
   },
 ];
 
@@ -142,4 +148,13 @@ function radioHorizonM(h1M, h2M) {
 // ~95% at 6 dB — the reason nobody plans a link at 0 dB margin.
 function pktSuccessProb(marginDb) {
   return 1 / (1 + Math.exp(-(marginDb - 2) / 1.2));
+}
+
+// UMD-lite export so the physics is unit-testable under Node.
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = {
+    RADIOS, ENVIRONMENTS, FADE_MARGIN_DB,
+    pl1m, pathLossExponent, rssiAt, linkMarginDb, usableRangeM,
+    chainThroughputKbps, pktSuccessProb, radioHorizonM,
+  };
 }
