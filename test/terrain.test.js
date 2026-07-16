@@ -95,3 +95,28 @@ test('mixed preset has both ground relief and buildings', () => {
   assert.ok(t.groundAmpM > 0);
   assert.ok(t.buildings.length > 5);
 });
+
+test('LOS sampling scales with ray length — a narrow tower mid-link blocks (regression M4)', () => {
+  // 24 m tower centered on a 1000 m link. A fixed 28-sample scheme spaces
+  // samples ~34.5 m apart and would step right over it; length-scaled
+  // sampling must catch it.
+  const t = { seed: 1, groundAmpM: 0, groundScaleM: 1, buildings: [{ x: 500, y: 0, w: 24, d: 24, heightM: 100 }] };
+  assert.ok(T.losBlocked(t, 0, 0, 50, 1000, 0, 50), 'narrow mid-link tower must block LOS');
+  // and clearing it overhead is still clear
+  assert.ok(!T.losBlocked(t, 0, 0, 130, 1000, 0, 130), 'flying over the tower stays clear');
+});
+
+test('city keep-out honors footprint + jitter, not just grid center (regression m2)', () => {
+  const t = T.makeTerrain('urban', OPTS);
+  const keepOut = [{ x: 0, y: 0, rM: 130 }, { x: OPTS.targetX, y: OPTS.targetY, rM: 110 }];
+  for (const b of t.buildings) {
+    const hw = b.w / 2, hd = b.d / 2;
+    // nearest point of the footprint rectangle to each clearing center
+    for (const z of keepOut) {
+      const nx = Math.max(b.x - hw, Math.min(z.x, b.x + hw));
+      const ny = Math.max(b.y - hd, Math.min(z.y, b.y + hd));
+      assert.ok(Math.hypot(nx - z.x, ny - z.y) >= z.rM,
+        'building footprint intrudes into clearing at ' + b.x.toFixed(0) + ',' + b.y.toFixed(0));
+    }
+  }
+});

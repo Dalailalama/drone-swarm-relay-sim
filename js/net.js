@@ -36,6 +36,9 @@ function makeNet(seed) {
     airtimeAccum: 0, utilSince: 0, utilization: 0,
     // rolling capture log (like a Wireshark trace): last CAP_MAX events
     cap: [], capSeq: 0,
+    // packet id counter — always advances, independent of capture being on,
+    // so pids are unique in a trace even for packets that predate capture
+    pktSeq: 0,
   };
 }
 
@@ -194,7 +197,7 @@ function sendPacket(s, kind, src, dst, payload) {
   }
   const bytes = kind === 'cmd' ? NET.cmdBytes : NET.tlmBytes;
   const dt = hopTimeSec(s.radio, bytes);
-  const pid = 'p' + s.net.capSeq;
+  const pid = 'p' + s.net.pktSeq++;
   s.net.packets.push({
     kind, src, dst, payload, path,
     pid, hop: 0,
@@ -239,8 +242,11 @@ function stepNet(s, dt) {
         deliverPacket(s, p); dead = true; break;
       }
       p.tHopStart = p.tArrive;
-      // retransmissions cost extra airtime before the next hop can start
-      p.tArrive += hopTimeSec(s.radio, bytesOf(p)) * (1 + retries);
+      // Retransmissions cost extra AIRTIME (tx repeated), but the
+      // store-and-forward processing delay is paid once per hop — not once
+      // per retry — matching the airtime bill above.
+      const txSec2 = (bytesOf(p) * 8) / (s.radio.airRateKbps * 1000);
+      p.tArrive += txSec2 * (1 + retries) + NET.procDelaySec;
     }
     if (!dead) keep.push(p);
   }

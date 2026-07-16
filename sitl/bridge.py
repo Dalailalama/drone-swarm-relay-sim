@@ -49,6 +49,7 @@ import functools
 import json
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -125,6 +126,11 @@ class State:
     clients: set = field(default_factory=set)
     drain_tasks: list = field(default_factory=list)
     start_time: float = field(default_factory=time.monotonic)
+    # Executor for the blocking per-vehicle heartbeat waits. Sized to the
+    # vehicle count at init so all N waits truly run at once — the default
+    # pool (min(32, cpu+4) workers) would serialize them, and queued waits
+    # don't begin their timeout until a worker frees, ballooning init time.
+    hb_executor: Optional[ThreadPoolExecutor] = None
 
 
 STATE = State()
@@ -229,7 +235,7 @@ async def connect_vehicle(vehicle: Vehicle, websocket) -> None:
     await send_status(websocket, f"vehicle {vehicle.id}: waiting for heartbeat on udp:{vehicle.port} ...")
     try:
         hb = await loop.run_in_executor(
-            None, functools.partial(_blocking_wait_heartbeat, vehicle.conn, HEARTBEAT_WAIT_TIMEOUT_S)
+            STATE.hb_executor, functools.partial(_blocking_wait_heartbeat, vehicle.conn, HEARTBEAT_WAIT_TIMEOUT_S)
         )
     except Exception as exc:  # pragma: no cover - defensive, e.g. socket errors
         log.warning("vehicle %s: heartbeat wait raised %r", vehicle.id, exc)
@@ -330,8 +336,16 @@ async def handle_init(websocket, msg: dict, cli_count: Optional[int], base_port:
         STATE.vehicles[vid] = Vehicle(id=vid, index=i, port=base_port + 10 * i)
 
     # Connect + arm/takeoff all vehicles concurrently rather than one at a
-    # time, so a slow/missing vehicle doesn't stall the others' startup.
-    await asyncio.gather(*(connect_vehicle(v, websocket) for v in STATE.vehicles.values()))
+    # time, so a slow/missing vehicle doesn't stall the others' startup. The
+    # blocking heartbeat waits need a pool big enough to run all N at once.
+    if STATE.hb_executor is not None:
+        STATE.hb_executor.shutdown(wait=False)
+    STATE.hb_executor = ThreadPoolExecutor(max_workers=max(1, count), thread_name_prefix="hb")
+    try:
+        await asyncio.gather(*(connect_vehicle(v, websocket) for v in STATE.vehicles.values()))
+    finally:
+        STATE.hb_executor.shutdown(wait=False)
+        STATE.hb_executor = None
 
     # Start per-vehicle telemetry drain tasks now that connections exist.
     STATE.drain_tasks = [asyncio.create_task(drain_vehicle(v)) for v in STATE.vehicles.values()]

@@ -132,7 +132,12 @@
     logEvent(swarm, 'Environment: ' + env.name + ' — usable range now ' + fmtDist(usable()), 'warn');
   });
   countRange.addEventListener('input', () => { countOut.textContent = countRange.value; });
-  countRange.addEventListener('change', resetSwarm);
+  countRange.addEventListener('change', () => {
+    resetSwarm();
+    // If a bridge is flying the swarm, respawn its vehicles to the new count
+    // so DR-1..DR-N stays in lockstep with the sim's drones.
+    if (externalActive()) externalReinit(() => swarm, +countRange.value, +altRange.value);
+  });
   airframeSel.addEventListener('change', () => {
     airframe = AIRFRAMES.find(a => a.id === airframeSel.value);
     updateAirframeInfo();
@@ -218,7 +223,9 @@
     const v = b.dataset.speed;
     if (v === 'pause') { paused = !paused; b.textContent = paused ? 'Resume' : 'Pause'; }
     else { timeScale = +v; paused = false; document.querySelector('[data-speed="pause"]').textContent = 'Pause'; }
-    speedBtns.forEach(x => x.classList.toggle('active', x === b && v !== 'pause'));
+    // Highlight the button matching the current speed — pause/resume must not
+    // clear it, since timeScale is unchanged across a pause.
+    speedBtns.forEach(x => x.classList.toggle('active', x.dataset.speed === String(timeScale)));
   }));
   killBtn.addEventListener('click', () => {
     if (selected && alive(selected)) { killDrone(swarm, selected); }

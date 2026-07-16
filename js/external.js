@@ -19,6 +19,10 @@
 // Coordinate frame matches sitl/README.md: x = East, y = South, alt = metres.
 
 (function () {
+  // Sustained bridge-side heartbeat loss (seconds) before a frozen vehicle is
+  // declared down. A brief UDP/SITL gap must not permanently kill a drone.
+  const EXT_LOST_DEAD_SEC = 10;
+
   const ExternalMode = {
     ws: null,
     connected: false,
@@ -76,6 +80,21 @@
     };
   }
 
+  // Re-init the bridge to a new vehicle count (e.g. the count slider moved
+  // mid-flight). Without this the sim would rebuild DR-1..DR-M while the
+  // bridge still has DR-1..DR-N, so the extra drones get no telemetry and
+  // freeze. The bridge respawns to match and replies with a fresh 'ready'.
+  function externalReinit(getSwarm, count, altM) {
+    if (!ExternalMode.ws || !ExternalMode.connected) return;
+    ExternalMode.ready = false;
+    ExternalMode.ids = null;
+    ExternalMode.telem = {};
+    ExternalMode.prev = {};
+    ExternalMode.lastGoalSent = 0;
+    ExternalMode.ws.send(JSON.stringify({ type: 'init', count, alt: altM }));
+    setStatus(getSwarm(), 're-initializing ' + count + ' vehicles…');
+  }
+
   function externalDisconnect() {
     if (ExternalMode.ws) {
       try { ExternalMode.ws.close(); } catch (e) {}
@@ -100,6 +119,23 @@
     for (const d of s.drones) {
       const t = ExternalMode.telem[d.id];
       if (!t) continue;
+      if (!t.connected) {
+        // Bridge lost this vehicle's heartbeat. Freeze it in place but keep
+        // it recoverable — a brief gap must not permanently kill a drone
+        // that's still flying. Only a SUSTAINED loss escalates to 'dead'.
+        d.vx = d.vy = 0;
+        if (d.extLostSince == null) d.extLostSince = s.time;
+        else if (alive(d) && s.time - d.extLostSince > EXT_LOST_DEAD_SEC) {
+          d.mode = 'dead';
+          logEvent(s, d.id + ' vehicle link lost >' + EXT_LOST_DEAD_SEC + 's — marking down', 'error');
+        }
+        continue;
+      }
+      if (d.extLostSince != null) {
+        d.extLostSince = null;
+        // Vehicle heartbeat returned — revive a drone we'd given up on.
+        if (!alive(d)) { d.mode = 'ok'; d.lastC2 = s.time; }
+      }
       const p = ExternalMode.prev[d.id];
       if (p && t.t > p.t) {
         const dt = t.t - p.t;
@@ -108,8 +144,6 @@
       }
       d.x = t.x;
       d.y = t.y;
-      // A vehicle the bridge reports as disconnected is treated as lost.
-      if (!t.connected && alive(d)) { d.mode = 'dead'; d.vx = d.vy = 0; }
     }
   }
 
@@ -117,13 +151,19 @@
   // logic just decided (relay slot / mission loiter / rescue / RTL), throttled
   // to ~2 Hz. We recompute the same goal the motion integrator would have used.
   function externalPushGoals(s) {
+    // A relaunch/reset rebuilds the swarm with time 0. If sim time has gone
+    // backward relative to our last send, adopt the new clock immediately —
+    // otherwise the throttle below would suppress every goal for as many
+    // seconds as the previous flight lasted.
+    if (s.time < ExternalMode.lastGoalSent) ExternalMode.lastGoalSent = 0;
     if (s.time - ExternalMode.lastGoalSent < 0.5) return;
     ExternalMode.lastGoalSent = s.time;
     const goals = [];
     for (const d of s.drones) {
-      if (!alive(d)) continue;
-      const goal = tetherGoal(s, d, corridorGoal(s, d, goalFor(s, d)));
-      goals.push({ id: d.id, x: goal.x, y: goal.y, alt: s.altitudeM });
+      if (!alive(d) || d.goalX == null) continue;
+      // Ship the exact goal stepDrone vetted this tick (cached on the drone),
+      // not a fresh goalFor call — recomputing would double-advance orbitPhase.
+      goals.push({ id: d.id, x: d.goalX, y: d.goalY, alt: s.altitudeM });
     }
     if (ExternalMode.ws && ExternalMode.connected) {
       ExternalMode.ws.send(JSON.stringify({ type: 'goals', goals }));
@@ -135,6 +175,7 @@
   window.externalConnect = externalConnect;
   window.externalDisconnect = externalDisconnect;
   window.externalActive = externalActive;
+  window.externalReinit = externalReinit;
   window.externalPullPositions = externalPullPositions;
   window.externalPushGoals = externalPushGoals;
 })();

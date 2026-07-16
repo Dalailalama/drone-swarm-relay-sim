@@ -10,8 +10,16 @@
 // terrain-following missions. They can't follow a building — anything
 // built taller than their AGL is a no-fly box they steer around.
 
-const LOS_CLEARANCE_M = 5;   // Fresnel-ish breathing room over obstructions
-const LOS_SAMPLES = 28;
+const LOS_CLEARANCE_M = 5;      // Fresnel-ish breathing room over obstructions
+// LOS is sampled by distance, not a fixed count: spacing must stay below the
+// smallest obstacle or a ray can punch clean through a building that sits
+// between two samples. Buildings (~20 m footprints) need a fine step; open
+// terrain hills are hundreds of metres wide and tolerate a coarse one. A cap
+// bounds cost on very long links (which only occur in building-free terrain).
+const LOS_STEP_BUILDING_M = 8;
+const LOS_STEP_TERRAIN_M = 40;
+const LOS_SAMPLES_MIN = 12;
+const LOS_SAMPLES_MAX = 160;
 
 // --- Seeded value noise -------------------------------------------------------
 function hash2(ix, iy, seed) {
@@ -80,8 +88,11 @@ function terrainHeightAt(t, x, y) {
 // ground-level station.
 function losBlocked(t, ax, ay, aAltM, bx, by, bAltM) {
   if (!t || (!t.groundAmpM && (!t.buildings || !t.buildings.length))) return false;
-  for (let i = 1; i <= LOS_SAMPLES; i++) {
-    const f = i / (LOS_SAMPLES + 1);
+  const rayLen = Math.hypot(bx - ax, by - ay);
+  const stepM = (t.buildings && t.buildings.length) ? LOS_STEP_BUILDING_M : LOS_STEP_TERRAIN_M;
+  const n = Math.max(LOS_SAMPLES_MIN, Math.min(LOS_SAMPLES_MAX, Math.ceil(rayLen / stepM)));
+  for (let i = 1; i <= n; i++) {
+    const f = i / (n + 1);
     const x = ax + (bx - ax) * f;
     const y = ay + (by - ay) * f;
     const rayAlt = aAltM + (bAltM - aAltM) * f;
@@ -115,11 +126,15 @@ function makeCity(cx, cy, spanM, rng, keepOut) {
   const buildings = [];
   const pitch = Math.max(40, spanM / 22);        // block spacing incl. street
   const n = Math.max(5, Math.round(spanM / pitch));
+  // A cell's building can reach this far from its grid center: jitter
+  // (0.141*pitch) plus the footprint half-diagonal (up to 0.48*pitch). Test
+  // the clearing against that expanded radius so no footprint edge intrudes.
+  const clearMargin = 0.62 * pitch;
   for (let i = 0; i < n; i++) {
     for (let j = 0; j < n; j++) {
       const gx = cx + (i - (n - 1) / 2) * pitch;
       const gy = cy + (j - (n - 1) / 2) * pitch;
-      if (keepOut && keepOut.some(z => Math.hypot(gx - z.x, gy - z.y) < z.rM)) { rng(); continue; }
+      if (keepOut && keepOut.some(z => Math.hypot(gx - z.x, gy - z.y) < z.rM + clearMargin)) { rng(); continue; }
       const rCore = Math.hypot(gx - cx, gy - cy) / (spanM / 2); // 0 downtown → 1 edge
       if (rng() < 0.12 + rCore * 0.5) continue;  // density falls off from the core
       const bx = gx + (rng() - 0.5) * pitch * 0.2;

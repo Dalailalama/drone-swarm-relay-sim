@@ -190,7 +190,13 @@ function covState(s, x, y) {
 // without needing to be flown first. Measured-bad cells cover what the
 // terrain map can't predict: the RF shadows.
 function insideObstacle(s, pos) {
-  return s.terrain.buildings.some(b => dist2d(pos, b) < buildingObstacleRadiusM(s, b) + 10);
+  return s.terrain.buildings.some(b => {
+    const r = buildingObstacleRadiusM(s, b);
+    // Overflyable buildings (r === 0) are not obstacles — the flight-time
+    // avoidance skips them too, so the planner must not route around a phantom
+    // skirt the drones fly straight through.
+    return r > 0 && dist2d(pos, b) < r + 10;
+  });
 }
 
 function badPlan(s, pos) {
@@ -606,16 +612,27 @@ function c2Step(s) {
 
   // Per-rescuer goto: link i anchors on link i-1 (first on the nearest
   // fresh non-rescuer node), each stepping one reach toward the centroid.
+  // Slots are assigned base-side-first by each rescuer's projection onto the
+  // base->centroid axis, so the drone nearest the lost group fills the
+  // DEEPEST slot and the base-side drone fills the shallow one — otherwise
+  // the best-placed asset gets pinned to slot 0 and driven backward.
   const rescueOrders = {};
   if (s.c2.rescuers.length) {
     const c = lostCentroid(s);
+    const cvx = c.x - s.base.x, cvy = c.y - s.base.y;
+    const axisDenom = Math.max(1, cvx * cvx + cvy * cvy);
+    const projT = id => {
+      const p = known[id];
+      return p ? ((p.x - s.base.x) * cvx + (p.y - s.base.y) * cvy) / axisDenom : 0;
+    };
+    const ordered = [...s.c2.rescuers].sort((a, b) => projT(a) - projT(b));
     let anchor = s.base, anchorId = 'C2', aD = dist2d(s.base, c);
     for (const id of Object.keys(known)) {
       if (!fresh(id) || s.c2.rescuers.includes(id)) continue;
       const dd = dist2d(known[id], c);
       if (dd < aD) { aD = dd; anchor = known[id]; anchorId = id; }
     }
-    for (const rid of s.c2.rescuers) {
+    for (const rid of ordered) {
       const dHop = dist2d(anchor, c);
       const step = Math.min(reach, dHop);
       const goto = dHop < 1 ? { x: c.x, y: c.y } : {
@@ -702,10 +719,15 @@ function droneComms(s, d) {
 
     // Commitment rule: refuse a NEW tasking whose recovery plan doesn't
     // close; keep flying the current (previously vetted) order instead.
+    // The signature keys on the RESOLVED goal (relay slotPos / rescue goto /
+    // mission target), not just the role/slot label — otherwise a slot that
+    // migrates after a replan, or a rescue goto that steps deeper, keeps the
+    // same label and slips past the feasibility gate unvetted.
     const o = p.kind === 'bcast' ? p.payload.orders[d.id] : p.payload;
     if (!o) continue;
-    const sig = o.role + '/' + o.slot + '/' + Math.round(o.target.x) + ',' + Math.round(o.target.y);
-    const changed = sig !== (d.order.role + '/' + d.order.slot + '/' + Math.round(d.order.target.x) + ',' + Math.round(d.order.target.y));
+    const og = orderGoal(s, o), cg = orderGoal(s, d.order);
+    const sig = o.role + '/' + Math.round(og.x) + ',' + Math.round(og.y);
+    const changed = sig !== (d.order.role + '/' + Math.round(cg.x) + ',' + Math.round(cg.y));
     if (changed && !orderFeasible(s, d, o)) {
       d.rejectedRole = o.role;
       if (d.rejectedSig !== sig) {
@@ -892,16 +914,23 @@ function stepDrone(s, d, dt) {
   }
 
   const goal = tetherGoal(s, d, corridorGoal(s, d, goalFor(s, d)));
+  // Cache the vetted goal so external mode ships exactly this one instead of
+  // recomputing goalFor (which advances orbitPhase as a side effect — a
+  // second call would double-step the loiter and diverge from what we vet).
+  d.goalX = goal.x; d.goalY = goal.y;
   const maxV = s.airframe.maxSpeedMs;
 
   // External-vehicle mode: real autopilot firmware (or the mock) flies the
   // drone. Position and velocity were pulled from telemetry at the top of the
   // tick; the goal we just computed is shipped to the vehicle by
   // externalPushGoals. We skip our own physics integration entirely, but
-  // still bill battery against the telemetry-derived ground speed.
+  // still bill battery — against AIRSPEED (ground velocity minus wind), the
+  // same quantity the internal model bills, so a relay holding station in
+  // wind is charged for fighting it instead of reading as free hover.
   const external = typeof externalActive === 'function' && externalActive();
   if (external) {
-    updateBattery(s, d, dt, Math.min(Math.hypot(d.vx, d.vy), maxV));
+    const eva = Math.hypot(d.vx - s.wind.x, d.vy - s.wind.y);
+    updateBattery(s, d, dt, Math.min(eva, maxV));
   } else {
     const dx = goal.x - d.x, dy = goal.y - d.y;
     const dGoal = Math.hypot(dx, dy);
