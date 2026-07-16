@@ -106,6 +106,14 @@
         <output style="flex:1; text-align:left; color:var(--dim);">one flooded order packet</output>
       </div>
       <div class="ctl-row">
+        <label for="captureChk">Packet capture</label>
+        <input type="checkbox" id="captureChk" style="flex:0 0 auto; width:auto; accent-color:var(--accent);">
+        <output id="captureOut" style="flex:1; text-align:left; color:var(--dim);">off</output>
+      </div>
+      <div class="btn-row">
+        <button id="exportBtn" disabled>Export capture (.jsonl)</button>
+      </div>
+      <div class="ctl-row">
         <label for="windSpdRange">Wind</label>
         <input type="range" id="windSpdRange" min="0" max="15" value="0" step="1">
         <output id="windSpdOut">0 m/s</output>

@@ -228,9 +228,17 @@ RNG (same seed → bit-identical run, which is what makes the tests possible).
 node --test
 ```
 
+## Packet capture
+
+Tick the "Packet capture" box (Mission setup) to record every network event —
+sends, per-hop forwards with their retry count and link margin, deliveries,
+drops (no-route or link-fail), and broadcast receptions. "Export capture"
+downloads it as JSONL (one JSON event per line), a portable trace any tool
+can parse — think tcpdump for the mesh. Schema is documented at the top of
+[js/net.js](js/net.js) (`exportCaptureJSONL`).
+
 ## Roadmap
 
-- Packet capture export for protocol debugging
 - PX4/ArduPilot SITL bridge: same planner, real autopilot firmware
 
 ## License

@@ -34,7 +34,20 @@ function makeNet(seed) {
     dropped: 0, delivered: 0,
     // shared-channel accounting: every transmission (and retry) occupies air
     airtimeAccum: 0, utilSince: 0, utilization: 0,
+    // rolling capture log (like a Wireshark trace): last CAP_MAX events
+    cap: [], capSeq: 0,
   };
+}
+
+// Packet capture: append one event to the rolling trace. Kept lightweight so
+// it can run every tick; export writes JSONL (one event per line).
+const CAP_MAX = 4000;
+function capLog(s, ev) {
+  if (!s.captureOn) return;
+  ev.seq = s.net.capSeq++;
+  ev.t = +s.time.toFixed(3);
+  s.net.cap.push(ev);
+  if (s.net.cap.length > CAP_MAX) s.net.cap.shift();
 }
 
 // --- Broadcast flooding -------------------------------------------------------
@@ -69,6 +82,7 @@ function stepBcasts(s) {
       d.bcastSeen = b.payload.seq;
       d.inbox.push({ kind: 'bcast', src: 'C2', payload: b.payload });
       s.net.delivered++;
+      capLog(s, { ev: 'bcast', seqNo: b.payload.seq, from: b.srcId, to: id, marginDb: +m.toFixed(1) });
       // this node re-transmits the table once, after its own airtime
       list.push({ srcId: id, payload: b.payload, bytes: b.bytes, tFire: s.time + hopTimeSec(s.radio, b.bytes) });
     }
@@ -173,15 +187,21 @@ function routePath(s, from, to) {
 // --- Packets ------------------------------------------------------------------
 function sendPacket(s, kind, src, dst, payload) {
   const path = routePath(s, src, dst);
-  if (!path || path.length < 2) { s.net.dropped++; return false; } // no route — radio silence
+  if (!path || path.length < 2) {
+    s.net.dropped++;
+    capLog(s, { ev: 'drop', reason: 'no-route', kind, src, dst });
+    return false; // no route — radio silence
+  }
   const bytes = kind === 'cmd' ? NET.cmdBytes : NET.tlmBytes;
   const dt = hopTimeSec(s.radio, bytes);
+  const pid = 'p' + s.net.capSeq;
   s.net.packets.push({
     kind, src, dst, payload, path,
-    hop: 0,
+    pid, hop: 0,
     tHopStart: s.time,
     tArrive: s.time + dt,
   });
+  capLog(s, { ev: 'send', pid, kind, src, dst, hops: path.length - 1, path: path.join('>') });
   return true;
 }
 
@@ -207,9 +227,17 @@ function stepNet(s, dt) {
       const retries = hopDelivered(s, from, to);
       const txSec = (bytesOf(p) * 8) / (s.radio.airRateKbps * 1000);
       s.net.airtimeAccum += txSec * (1 + (retries < 0 ? HOP_RETRIES : retries));
-      if (retries < 0) { s.net.dropped++; dead = true; break; }
+      if (retries < 0) {
+        s.net.dropped++;
+        capLog(s, { ev: 'drop', reason: 'link-fail', pid: p.pid, kind: p.kind, from, to, marginDb: +liveMarginDb(s, from, to).toFixed(1) });
+        dead = true; break;
+      }
+      capLog(s, { ev: 'hop', pid: p.pid, kind: p.kind, from, to, retries, marginDb: +liveMarginDb(s, from, to).toFixed(1) });
       p.hop++;
-      if (p.hop >= p.path.length - 1) { deliverPacket(s, p); dead = true; break; }
+      if (p.hop >= p.path.length - 1) {
+        capLog(s, { ev: 'deliver', pid: p.pid, kind: p.kind, src: p.src, dst: p.dst });
+        deliverPacket(s, p); dead = true; break;
+      }
       p.tHopStart = p.tArrive;
       // retransmissions cost extra airtime before the next hop can start
       p.tArrive += hopTimeSec(s.radio, bytesOf(p)) * (1 + retries);
@@ -225,6 +253,19 @@ function stepNet(s, dt) {
     s.net.airtimeAccum = 0;
     s.net.utilSince = s.time;
   }
+}
+
+// Export the capture as JSONL (one JSON event per line) — a portable trace
+// any tool can parse. Schema per line:
+//   {seq, t, ev, ...}  where ev ∈ send|hop|deliver|drop|bcast
+//     send    {pid, kind, src, dst, hops, path}
+//     hop     {pid, kind, from, to, retries, marginDb}
+//     deliver {pid, kind, src, dst}
+//     drop    {pid?, kind, reason, from?, to?, marginDb?}  reason: no-route|link-fail
+//     bcast   {seqNo, from, to, marginDb}
+function exportCaptureJSONL(s) {
+  const header = { seq: -1, t: 0, ev: 'meta', radio: s.radio.id, broadcast: !!s.broadcastC2, events: s.net.cap.length };
+  return [header, ...s.net.cap].map(e => JSON.stringify(e)).join('\n');
 }
 
 // Hop attempt: the link must still exist when the packet actually crosses it,

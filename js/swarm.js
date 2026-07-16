@@ -144,6 +144,7 @@ function makeSwarm(opts) {
     covCellM: Math.max(20, usableRangeM(opts.radio, opts.envFactor) * 0.15),
     showCoverage: true,
     broadcastC2: opts.broadcastC2 !== false,
+    captureOn: !!opts.captureOn,
     net: makeNet(opts.seed || 42),
     c2: { known: {}, relays: [], inbox: [], nextCmd: 0, wasFresh: {}, lost: {}, rescuers: [], unfit: {}, cov: new Map(), slotCache: {}, bcastSeq: 0 },
   };

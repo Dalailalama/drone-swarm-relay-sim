@@ -17,6 +17,7 @@
   const corridorChk = el('corridorChk'), corridorOut = el('corridorOut');
   const terrainSel = el('terrainSel'), coverageChk = el('coverageChk');
   const bcastChk = el('bcastChk');
+  const captureChk = el('captureChk'), captureOut = el('captureOut'), exportBtn = el('exportBtn');
   const viewBtn = el('viewBtn');
   const speedBtns = Array.from(document.querySelectorAll('[data-speed]'));
   const statusPill = el('statusPill'), specCard = el('specCard');
@@ -74,6 +75,7 @@
       deployFrac: +spacingRange.value / 100,
       corridorRouting: corridorChk.checked,
       broadcastC2: bcastChk.checked,
+      captureOn: captureChk.checked,
       windX: +windSpdRange.value * Math.cos(+windDirRange.value * Math.PI / 180),
       windY: +windSpdRange.value * Math.sin(+windDirRange.value * Math.PI / 180),
       targetX: dist, targetY: -dist * 0.25,
@@ -185,6 +187,20 @@
   });
   bcastChk.addEventListener('change', () => {
     if (swarm) swarm.broadcastC2 = bcastChk.checked;
+  });
+  captureChk.addEventListener('change', () => {
+    if (swarm) swarm.captureOn = captureChk.checked;
+    captureOut.textContent = captureChk.checked ? 'recording…' : 'off';
+    exportBtn.disabled = !captureChk.checked;
+  });
+  exportBtn.addEventListener('click', () => {
+    if (!swarm) return;
+    const blob = new Blob([exportCaptureJSONL(swarm)], { type: 'application/x-ndjson' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'swarm-capture-' + Math.floor(swarm.time) + 's.jsonl';
+    a.click();
+    URL.revokeObjectURL(a.href);
   });
   speedBtns.forEach(b => b.addEventListener('click', () => {
     const v = b.dataset.speed;
