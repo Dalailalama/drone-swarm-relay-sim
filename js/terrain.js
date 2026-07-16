@@ -73,6 +73,26 @@ function buildingAt(t, x, y) {
   return null;
 }
 
+// Buildings whose grid cells fall within radiusM of (x, y) — for obstacle
+// queries at scale. Uses the spatial hash so a query stays cheap even with
+// thousands of buildings. May return a building more than once if its
+// footprint spans several cells; callers that accumulate must dedup.
+function buildingsNear(t, x, y, radiusM) {
+  if (!t || !t.buildings || !t.buildings.length) return [];
+  if (!t.bGrid) return t.buildings;
+  const c = BGRID_CELL_M;
+  const x0 = Math.floor((x - radiusM) / c), x1 = Math.floor((x + radiusM) / c);
+  const y0 = Math.floor((y - radiusM) / c), y1 = Math.floor((y + radiusM) / c);
+  const out = [];
+  for (let ix = x0; ix <= x1; ix++) {
+    for (let iy = y0; iy <= y1; iy++) {
+      const arr = t.bGrid.get(ix + ',' + iy);
+      if (arr) for (const b of arr) out.push(b); // may repeat a boundary-spanning building; callers tolerate it
+    }
+  }
+  return out;
+}
+
 // Surface height including structures: ground, plus the roof if (x,y) is
 // inside a building footprint.
 function terrainHeightAt(t, x, y) {
@@ -226,7 +246,7 @@ function makeTerrain(name, opts) {
 // UMD-lite export so terrain is unit-testable under Node.
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
-    terrainGroundAt, terrainHeightAt, buildingAt, losBlocked, makeTerrain,
+    terrainGroundAt, terrainHeightAt, buildingAt, buildingsNear, losBlocked, makeTerrain,
     fbm, valueNoise, LOS_CLEARANCE_M,
   };
 }

@@ -204,6 +204,7 @@
     altOut.textContent = altRange.value + ' m';
     if (swarm) swarm.altitudeM = +altRange.value;
     updateSpecCard();
+    if (typeof updateCityLabels === 'function') updateCityLabels();
   });
   function applyWind() {
     const spd = +windSpdRange.value;
@@ -238,10 +239,21 @@
   // metropolis without relaunching.
   const cityDensityRange = el('cityDensityRange'), cityDensityOut = el('cityDensityOut');
   const cityHeightRange = el('cityHeightRange'), cityHeightOut = el('cityHeightOut');
+  const cityNote = el('cityNote');
   function updateCityLabels() {
     const nB = swarm ? swarm.terrain.buildings.length : 0;
     cityDensityOut.textContent = nB ? nB.toLocaleString() : '0';
+    const maxBH = swarm && swarm.terrain.buildings.length
+      ? Math.round(Math.max.apply(null, swarm.terrain.buildings.map(b => b.heightM))) : 0;
     cityHeightOut.textContent = '≤' + Math.round(35 + (+cityHeightRange.value / 100) * 265) + ' m';
+    // Guide the user when towers rise above the flight altitude.
+    const alt = swarm ? swarm.altitudeM : +altRange.value;
+    if (maxBH > alt + 5) {
+      cityNote.style.display = 'block';
+      cityNote.innerHTML = 'Towers reach <b>' + maxBH + ' m</b>, above your <b>' + alt + ' m</b> altitude — the swarm must weave through the streets (a dense tall city can be impassable). Raise <b>Altitude AGL</b> above the towers to fly over it (use a longer-range radio, since the climb lengthens the link to the ground station).';
+    } else {
+      cityNote.style.display = 'none';
+    }
   }
   window.updateCityLabels = updateCityLabels;
   function regenerateCity() {

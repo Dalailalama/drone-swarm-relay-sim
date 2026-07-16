@@ -72,7 +72,7 @@
       </div>
       <div class="ctl-row">
         <label for="altRange">Altitude AGL</label>
-        <input type="range" id="altRange" min="20" max="120" value="50" step="5">
+        <input type="range" id="altRange" min="20" max="400" value="50" step="5">
         <output id="altOut">50 m</output>
       </div>
       <div class="ctl-row">
@@ -105,6 +105,7 @@
         <input type="range" id="cityHeightRange" min="0" max="100" value="40" step="1">
         <output id="cityHeightOut">—</output>
       </div>
+      <div id="cityNote" class="af-info" style="display:none;"></div>
       <div class="ctl-row">
         <label for="coverageChk">Coverage map</label>
         <input type="checkbox" id="coverageChk" checked style="flex:0 0 auto; width:auto; accent-color:var(--accent);">

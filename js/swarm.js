@@ -191,13 +191,18 @@ function covState(s, x, y) {
 // without needing to be flown first. Measured-bad cells cover what the
 // terrain map can't predict: the RF shadows.
 function insideObstacle(s, pos) {
-  return s.terrain.buildings.some(b => {
+  // Only buildings near the point can matter — query the spatial index so this
+  // stays cheap even in a city of thousands. 220 m covers the largest tower
+  // footprint's obstacle radius.
+  const near = buildingsNear(s.terrain, pos.x, pos.y, 220);
+  for (const b of near) {
     const r = buildingObstacleRadiusM(s, b);
     // Overflyable buildings (r === 0) are not obstacles — the flight-time
     // avoidance skips them too, so the planner must not route around a phantom
     // skirt the drones fly straight through.
-    return r > 0 && dist2d(pos, b) < r + 10;
-  });
+    if (r > 0 && dist2d(pos, b) < r + 10) return true;
+  }
+  return false;
 }
 
 function badPlan(s, pos) {
@@ -1040,15 +1045,22 @@ function stepDrone(s, d, dt) {
     // Obstacle avoidance: onboard map, buildings above flight level are
     // no-fly cylinders. Radial push plus a tangential bias so a head-on
     // approach slides around the rim instead of stalling against it.
-    for (const b of s.terrain.buildings) {
+    // Only buildings near the drone can push it — spatial-index query keeps
+    // this cheap in a dense city. The push is radial (away) PLUS a tangential
+    // slide chosen toward the goal, so the drone slides around a building
+    // instead of stalling head-on against it (which wedged it in dense cities).
+    for (const b of buildingsNear(s.terrain, d.x, d.y, 200)) {
       const rObst = buildingObstacleRadiusM(s, b);
       if (!rObst) continue;
       const dxh = d.x - b.x, dyh = d.y - b.y;
       const dh = Math.hypot(dxh, dyh);
       if (dh < rObst && dh > 0.01) {
-        const push = ((rObst - dh) / rObst) * DRONE.accelMs2 * 3;
-        ax += (dxh / dh) * push - (dyh / dh) * push * 0.4;
-        ay += (dyh / dh) * push + (dxh / dh) * push * 0.4;
+        const strength = ((rObst - dh) / rObst) * DRONE.accelMs2 * 3;
+        const nx = dxh / dh, ny = dyh / dh;      // radial, away from the building
+        let tx = -ny, ty = nx;                    // tangent; flip to point toward the goal
+        if ((goal.x - d.x) * tx + (goal.y - d.y) * ty < 0) { tx = -tx; ty = -ty; }
+        ax += nx * strength * 0.7 + tx * strength * 1.0;
+        ay += ny * strength * 0.7 + ty * strength * 1.0;
       }
     }
 
