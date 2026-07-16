@@ -82,7 +82,9 @@ function project3D(cam, cvW, cvH, x, y, z) {
 // Mouse-drag orbit: yaw spins freely, pitch is clamped so the camera can
 // never flip past looking straight down or dip below the horizon.
 function orbitCamera3D(cam, dxPx, dyPx) {
-  cam.yaw += dxPx * 0.008;
+  // Drag-to-grab feel: pushing the cursor right should swing the scene right
+  // (the camera orbits the other way), so negate the horizontal delta.
+  cam.yaw -= dxPx * 0.008;
   cam.pitch = Math.max(0.15, Math.min(1.45, cam.pitch + dyPx * 0.005));
   return cam;
 }
