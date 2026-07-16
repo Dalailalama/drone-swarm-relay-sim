@@ -36,6 +36,10 @@ function v3norm(a) {
 // and vertical walls split into a lit pair and a shadowed pair.
 const LIGHT_DIR = v3norm({ x: -0.5, y: -0.3, z: 0.8 });
 
+// Max buildings drawn in the 3D view at once (nearest-to-view are kept) so a
+// dense city of thousands stays smooth. The 2D map draws all of them.
+const BUILDING_RENDER_CAP = 420;
+
 // --- Camera ------------------------------------------------------------
 
 // Orbit camera aimed at the midpoint of base/target, framed to fit the whole
@@ -172,7 +176,9 @@ function renderView3D(ctx, cv, s, status, cam, selected) {
   const x0 = cxm - half, x1 = cxm + half, y0 = cym - half, y1 = cym + half;
   const spanX = x1 - x0, spanY = y1 - y0;
 
-  const gridN = 52;
+  // Flat/urban ground has no relief to resolve — a coarse mesh is enough and
+  // far cheaper; only terrain with actual hills gets the fine grid.
+  const gridN = s.terrain.groundAmpM > 0 ? 48 : 24;
   const stride = gridN + 1;
 
   // Sample every grid corner exactly once per call and cache it — each
@@ -212,7 +218,14 @@ function renderView3D(ctx, cv, s, status, cam, selected) {
   // Buildings — extruded boxes. Walls shade by fixed cardinal lambert (see
   // WALL_LAMBERT); anything that pokes above the swarm's flight altitude
   // gets a red edge so it reads as an obstacle, not just scenery.
-  for (const b of (s.terrain.buildings || [])) {
+  // A very dense city can have thousands of buildings; keep 3D smooth by
+  // rendering a uniformly-thinned subset (every k-th building) up to
+  // BUILDING_RENDER_CAP, so the whole box stays populated but bounded. No
+  // per-frame sort or allocation. The 2D map still draws every building.
+  const allB = s.terrain.buildings || [];
+  const bStride = allB.length > BUILDING_RENDER_CAP ? Math.ceil(allB.length / BUILDING_RENDER_CAP) : 1;
+  for (let bi = 0; bi < allB.length; bi += bStride) {
+    const b = allB[bi];
     if (b.x < x0 || b.x > x1 || b.y < y0 || b.y > y1) continue; // outside the rendered ground
     const base = terrainGroundAt(s.terrain, b.x, b.y);
     const top = base + b.heightM;

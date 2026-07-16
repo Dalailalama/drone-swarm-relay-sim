@@ -65,9 +65,11 @@
     const dist = +distRange.value / 100 * defaultTargetDist();
     missionSeq += 1;
     const tX = dist, tY = -dist * 0.25;
+    const terrainSeed = 42 + missionSeq;
     const terrain = makeTerrain(terrainSel.value, {
       distM: Math.hypot(tX, tY), altM: +altRange.value,
-      targetX: tX, targetY: tY, seed: 42 + missionSeq,
+      targetX: tX, targetY: tY, seed: terrainSeed,
+      density: +cityDensityRange.value / 100, heightScale: +cityHeightRange.value / 100,
     });
     swarm = makeSwarm({
       terrain,
@@ -86,9 +88,11 @@
       seed: 42 + missionSeq,
     });
     selected = null; selectedJammer = null;
+    swarm._terrainSeed = terrainSeed;
     swarm.showCoverage = coverageChk.checked;
     cam3D = view3D ? makeCamera3D(swarm) : null;
     if (typeof updateJammerPanel === 'function') updateJammerPanel();
+    if (typeof updateCityLabels === 'function') updateCityLabels();
     fitView();
     logEvent(swarm, 'Swarm launched: ' + swarm.drones.length + ' drones on ' + radio.name, 'info');
   }
@@ -102,6 +106,7 @@
       distancePct: +distRange.value, terrain: terrainSel.value,
       windSpd: +windSpdRange.value, windDir: +windDirRange.value,
       corridor: corridorChk.checked, broadcast: bcastChk.checked, coverage: coverageChk.checked,
+      cityDensity: +cityDensityRange.value, cityHeight: +cityHeightRange.value,
       target: { x: swarm.target.x, y: swarm.target.y },
       jammers: swarm.jammers.map(j => ({ x: j.x, y: j.y, erpDbm: j.erpDbm, band: j.band, altM: j.altM, on: j.on })),
     };
@@ -115,6 +120,8 @@
     if (sc.spacingPct != null) spacingRange.value = sc.spacingPct;
     if (sc.distancePct != null) distRange.value = sc.distancePct;
     if (sc.terrain) terrainSel.value = sc.terrain;
+    if (sc.cityDensity != null) cityDensityRange.value = sc.cityDensity;
+    if (sc.cityHeight != null) cityHeightRange.value = sc.cityHeight;
     if (sc.windSpd != null) windSpdRange.value = sc.windSpd;
     if (sc.windDir != null) windDirRange.value = sc.windDir;
     if (sc.corridor != null) corridorChk.checked = sc.corridor;
@@ -225,6 +232,31 @@
     corridorOut.textContent = corridorChk.checked ? 'transits follow the chain' : 'straight-line transits';
   });
   terrainSel.addEventListener('change', resetSwarm);
+
+  // --- City density / height sliders — regenerate the buildings live (same
+  // seed, same mission) so you can dial from a couple of buildings to a dense
+  // metropolis without relaunching.
+  const cityDensityRange = el('cityDensityRange'), cityDensityOut = el('cityDensityOut');
+  const cityHeightRange = el('cityHeightRange'), cityHeightOut = el('cityHeightOut');
+  function updateCityLabels() {
+    const nB = swarm ? swarm.terrain.buildings.length : 0;
+    cityDensityOut.textContent = nB ? nB.toLocaleString() : '0';
+    cityHeightOut.textContent = '≤' + Math.round(35 + (+cityHeightRange.value / 100) * 265) + ' m';
+  }
+  window.updateCityLabels = updateCityLabels;
+  function regenerateCity() {
+    if (!swarm) return;
+    const tX = swarm.target.x, tY = swarm.target.y;
+    swarm.terrain = makeTerrain(terrainSel.value, {
+      distM: Math.hypot(tX, tY), altM: swarm.altitudeM,
+      targetX: tX, targetY: tY, seed: swarm._terrainSeed || 42,
+      density: +cityDensityRange.value / 100, heightScale: +cityHeightRange.value / 100,
+    });
+    updateCityLabels();
+  }
+  cityDensityRange.addEventListener('input', regenerateCity);
+  cityHeightRange.addEventListener('input', regenerateCity);
+
   coverageChk.addEventListener('change', () => {
     if (swarm) swarm.showCoverage = coverageChk.checked;
   });

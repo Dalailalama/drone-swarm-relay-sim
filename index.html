@@ -96,6 +96,16 @@
         </select>
       </div>
       <div class="ctl-row">
+        <label for="cityDensityRange">Building density</label>
+        <input type="range" id="cityDensityRange" min="0" max="100" value="40" step="1">
+        <output id="cityDensityOut">—</output>
+      </div>
+      <div class="ctl-row">
+        <label for="cityHeightRange">Building height</label>
+        <input type="range" id="cityHeightRange" min="0" max="100" value="40" step="1">
+        <output id="cityHeightOut">—</output>
+      </div>
+      <div class="ctl-row">
         <label for="coverageChk">Coverage map</label>
         <input type="checkbox" id="coverageChk" checked style="flex:0 0 auto; width:auto; accent-color:var(--accent);">
         <output style="flex:1; text-align:left; color:var(--dim);">C2's measured RF map</output>

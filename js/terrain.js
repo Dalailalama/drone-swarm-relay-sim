@@ -122,31 +122,40 @@ function mulberry32(a) {
 // keepOut: [{x, y, rM}] — clearings where no block may be planted. The
 // ground station's staging area and the objective are always clearings;
 // nobody sites a GCS mast inside a random building cluster.
-function makeCity(cx, cy, spanM, rng, keepOut) {
+// opts.density (0..1): from a bare handful of buildings up to a dense grid of
+// thousands filling the footprint. opts.heightScale (0..1): from a low-rise
+// town to a skyscraper metropolis (raises both how many towers and how tall).
+function makeCity(cx, cy, spanM, rng, keepOut, opts) {
+  opts = opts || {};
+  const density = Math.max(0, Math.min(1, opts.density != null ? opts.density : 0.4));
+  const hscale = Math.max(0, Math.min(1, opts.heightScale != null ? opts.heightScale : 0.4));
   const buildings = [];
-  // Realistic block size (bounded), and a grid that GROWS with the footprint
-  // so a bigger city has more blocks, not bigger ones — capped so huge
-  // missions don't generate an unbounded building count.
-  const pitch = Math.min(130, Math.max(50, spanM / 28));
-  const n = Math.min(28, Math.max(6, Math.round(spanM / pitch)));
-  // A cell's building can reach this far from its grid center: jitter
-  // (0.141*pitch) plus the footprint half-diagonal (up to 0.48*pitch). Test
-  // the clearing against that expanded radius so no footprint edge intrudes.
+  // Denser slider -> smaller blocks -> a finer grid of them. Grid is capped so
+  // "max density" tops out at a few thousand, not an unbounded number.
+  const pitch = Math.max(22, 150 - density * 128);
+  const n = Math.min(64, Math.max(1, Math.round(spanM / pitch)));
   const clearMargin = 0.62 * pitch;
+  const baseFill = 0.02 + density * 0.96;        // ~2% of cells built -> ~98%
+  const towerFrac = 0.04 + hscale * 0.50;        // fraction that are tall towers
+  const towerMin = 18 + hscale * 40;
+  const towerMax = 35 + hscale * 265;            // tallest towers ~35 m -> ~300 m
   for (let i = 0; i < n; i++) {
     for (let j = 0; j < n; j++) {
       const gx = cx + (i - (n - 1) / 2) * pitch;
       const gy = cy + (j - (n - 1) / 2) * pitch;
       if (keepOut && keepOut.some(z => Math.hypot(gx - z.x, gy - z.y) < z.rM + clearMargin)) { rng(); continue; }
-      const rCore = Math.hypot(gx - cx, gy - cy) / (spanM / 2); // 0 downtown → 1 edge
-      if (rng() < 0.10 + rCore * 0.5) continue;  // density falls off from the core
+      const rCore = Math.hypot(gx - cx, gy - cy) / (spanM / 2); // 0 downtown -> 1 edge
+      // Edges thin out more at low density (a small town); a dense city fills
+      // uniformly out to its footprint.
+      const fill = baseFill * (1 - rCore * 0.45 * (1 - density));
+      if (rng() >= fill) continue;
       const bx = gx + (rng() - 0.5) * pitch * 0.2;
       const by = gy + (rng() - 0.5) * pitch * 0.2;
       const w = pitch * (0.42 + rng() * 0.26);
       const d = pitch * (0.42 + rng() * 0.26);
-      const towerP = 0.30 * Math.max(0, 1 - rCore * 1.3); // towers live downtown
+      const towerP = towerFrac * Math.max(0.25, 1 - rCore); // towers cluster downtown but appear throughout
       const heightM = rng() < towerP
-        ? 60 + rng() * 90
+        ? towerMin + rng() * (towerMax - towerMin)
         : 8 + rng() * 26;
       buildings.push({ x: bx, y: by, w, d, heightM });
     }
@@ -195,18 +204,19 @@ function makeTerrain(name, opts) {
     { x: 0, y: 0, rM: 130 },      // GCS staging clearing
     { x: tX, y: tY, rM: 110 },    // objective clearing (at generation time)
   ];
+  const cityOpts = { density: opts.density, heightScale: opts.heightScale };
   if (name === 'urban') {
     const c = along(0.5);
     return indexBuildings({
       seed, groundAmpM: 0, groundScaleM: 1,
-      buildings: makeCity(c.x, c.y, distM * 2.5, rng, keepOut),
+      buildings: makeCity(c.x, c.y, distM * 3.5, rng, keepOut, cityOpts),
     });
   }
   if (name === 'mixed') {
     const c = along(0.55);
     return indexBuildings({
       seed, groundAmpM: 2.0 * altM + 30, groundScaleM: distM * 0.45,
-      buildings: makeCity(c.x, c.y, distM * 1.6, rng, keepOut),
+      buildings: makeCity(c.x, c.y, distM * 2.2, rng, keepOut, cityOpts),
     });
   }
   // 'flat' and anything unknown
