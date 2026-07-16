@@ -350,6 +350,41 @@ function renderView3D(ctx, cv, s, status, cam, selected) {
       ctx.fillText('target', tp.x, tp.y + 32);
     }
   }
+
+  // Interference sources: a ground denial-zone ring (projected as a perspective
+  // ellipse) plus an emitter mast, matching the 2D view so the operator sees
+  // the same red zone in both.
+  for (const j of (s.jammers || [])) {
+    const g = terrainGroundAt(s.terrain, j.x, j.y);
+    const R = typeof jammerDenialRadiusM === 'function' ? jammerDenialRadiusM(s, j) : 0;
+    const col = j.on === false ? '#8a887a' : '#e06050';
+    if (j.on !== false && R > 3) {
+      const N = 48, ring = [];
+      for (let k = 0; k < N; k++) {
+        const a = k / N * Math.PI * 2;
+        const rx = j.x + Math.cos(a) * R, ry = j.y + Math.sin(a) * R;
+        const rp = project3D(cam, cv.width, cv.height, rx, ry, terrainGroundAt(s.terrain, rx, ry));
+        if (rp) ring.push(rp);
+      }
+      if (ring.length > 8) {
+        ctx.beginPath(); ctx.moveTo(ring[0].x, ring[0].y);
+        for (let k = 1; k < ring.length; k++) ctx.lineTo(ring[k].x, ring[k].y);
+        ctx.closePath();
+        ctx.fillStyle = 'rgba(224,96,80,0.10)'; ctx.fill();
+        ctx.strokeStyle = 'rgba(224,96,80,0.5)'; ctx.lineWidth = 1; ctx.setLineDash([4, 5]);
+        ctx.stroke(); ctx.setLineDash([]);
+      }
+    }
+    const base = project3D(cam, cv.width, cv.height, j.x, j.y, g);
+    const top = project3D(cam, cv.width, cv.height, j.x, j.y, g + (j.altM || 15) + 10);
+    if (base && top) {
+      ctx.strokeStyle = col; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(base.x, base.y); ctx.lineTo(top.x, top.y); ctx.stroke();
+      ctx.beginPath(); ctx.arc(top.x, top.y, 4, 0, Math.PI * 2); ctx.fillStyle = col; ctx.fill();
+      ctx.font = '11px "IBM Plex Mono", monospace'; ctx.textAlign = 'center'; ctx.fillStyle = col;
+      ctx.fillText((j.on === false ? 'off · ' : '') + j.erpDbm + ' dBm', top.x, top.y - 10);
+    }
+  }
 }
 
 // UMD-lite export so the camera math is unit-testable under Node.
