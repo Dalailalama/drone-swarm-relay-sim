@@ -137,6 +137,18 @@
     </section>
 
     <section>
+      <h2>External vehicles (SITL)</h2>
+      <div class="ctl-row">
+        <label for="wsUrl">Bridge URL</label>
+        <input type="text" id="wsUrl" value="ws://localhost:8765" style="flex:1; background:var(--bg); color:var(--text-2); border:1px solid var(--line); border-radius:2px; padding:6px 8px; font:12px var(--mono);">
+      </div>
+      <div class="btn-row">
+        <button id="extConnectBtn">Fly via bridge</button>
+      </div>
+      <div id="extStatus" class="af-info">off — drones flown by built-in physics</div>
+    </section>
+
+    <section>
       <h2>Link chain</h2>
       <table>
         <thead><tr><th>Hop</th><th>Dist</th><th>Margin</th><th>Pkt loss</th></tr></thead>
@@ -164,6 +176,7 @@
 <script src="js/swarm.js"></script>
 <script src="js/render.js"></script>
 <script src="js/view3d.js"></script>
+<script src="js/external.js"></script>
 <script src="js/main.js"></script>
 
 </body>

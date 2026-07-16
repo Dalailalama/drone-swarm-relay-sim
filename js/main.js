@@ -18,6 +18,7 @@
   const terrainSel = el('terrainSel'), coverageChk = el('coverageChk');
   const bcastChk = el('bcastChk');
   const captureChk = el('captureChk'), captureOut = el('captureOut'), exportBtn = el('exportBtn');
+  const wsUrl = el('wsUrl'), extConnectBtn = el('extConnectBtn'), extStatus = el('extStatus');
   const viewBtn = el('viewBtn');
   const speedBtns = Array.from(document.querySelectorAll('[data-speed]'));
   const statusPill = el('statusPill'), specCard = el('specCard');
@@ -192,6 +193,17 @@
     if (swarm) swarm.captureOn = captureChk.checked;
     captureOut.textContent = captureChk.checked ? 'recording…' : 'off';
     exportBtn.disabled = !captureChk.checked;
+  });
+  ExternalMode.onStatus = (text) => { extStatus.textContent = text; };
+  extConnectBtn.addEventListener('click', () => {
+    if (externalActive() || ExternalMode.ws) {
+      externalDisconnect();
+      extConnectBtn.textContent = 'Fly via bridge';
+      extStatus.textContent = 'off — drones flown by built-in physics';
+    } else {
+      externalConnect(() => swarm, wsUrl.value.trim(), +countRange.value, +altRange.value);
+      extConnectBtn.textContent = 'Disconnect bridge';
+    }
   });
   exportBtn.addEventListener('click', () => {
     if (!swarm) return;
@@ -373,7 +385,10 @@
 
     let status;
     if (!paused) {
-      let simDt = realDt * timeScale;
+      // Real vehicles fly in real time — no fast-forward when a bridge is
+      // driving the drones; force 1x so sim time tracks the wall clock.
+      const scale = (typeof externalActive === 'function' && externalActive()) ? 1 : timeScale;
+      let simDt = realDt * scale;
       // substep so physics stays stable at high time scales
       const maxStep = 0.25;
       while (simDt > 0) {

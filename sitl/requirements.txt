@@ -1,0 +1,2 @@
+websockets>=12
+pymavlink>=2.4

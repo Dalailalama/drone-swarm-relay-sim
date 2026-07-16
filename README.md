@@ -237,9 +237,28 @@ downloads it as JSONL (one JSON event per line), a portable trace any tool
 can parse — think tcpdump for the mesh. Schema is documented at the top of
 [js/net.js](js/net.js) (`exportCaptureJSONL`).
 
+## Flying real autopilots (SITL bridge)
+
+The swarm logic here can command actual autopilot firmware instead of the
+built-in physics. In "external vehicle" mode the browser keeps running every
+bit of its C2 logic — planning, ETX routing, the tether, coverage learning —
+but the drones are flown by ArduPilot/PX4 SITL (or a mock), reached over a
+WebSocket bridge:
+
+```
+browser sim  <--WebSocket-->  bridge.py  <--MAVLink/UDP-->  SITL
+```
+
+Positions come back from the vehicles; C2's relay goals go out as MAVLink
+guided-mode setpoints. It's the same code that runs the pure sim — only the
+motion is externalized. See [sitl/README.md](sitl/README.md). You can try the
+whole pipeline with **zero firmware** using the mock vehicle server
+(`python sitl/mock_vehicles.py`, then "Fly via bridge" in the sim).
+
 ## Roadmap
 
-- PX4/ArduPilot SITL bridge: same planner, real autopilot firmware
+- Per-vehicle wind and sensor noise injected from the sim into SITL
+- Hardware-in-the-loop: swap SITL for a real flight controller on the bench
 
 ## License
 

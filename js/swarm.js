@@ -893,60 +893,71 @@ function stepDrone(s, d, dt) {
 
   const goal = tetherGoal(s, d, corridorGoal(s, d, goalFor(s, d)));
   const maxV = s.airframe.maxSpeedMs;
-  const dx = goal.x - d.x, dy = goal.y - d.y;
-  const dGoal = Math.hypot(dx, dy);
 
-  const brake = (maxV * maxV) / (2 * DRONE.accelMs2);
-  const desiredSpeed = dGoal > brake ? maxV : maxV * (dGoal / brake);
-  let ax = 0, ay = 0;
-  if (dGoal > 0.5) {
-    ax = (dx / dGoal) * desiredSpeed - d.vx;
-    ay = (dy / dGoal) * desiredSpeed - d.vy;
+  // External-vehicle mode: real autopilot firmware (or the mock) flies the
+  // drone. Position and velocity were pulled from telemetry at the top of the
+  // tick; the goal we just computed is shipped to the vehicle by
+  // externalPushGoals. We skip our own physics integration entirely, but
+  // still bill battery against the telemetry-derived ground speed.
+  const external = typeof externalActive === 'function' && externalActive();
+  if (external) {
+    updateBattery(s, d, dt, Math.min(Math.hypot(d.vx, d.vy), maxV));
   } else {
-    ax = -d.vx; ay = -d.vy;
-  }
+    const dx = goal.x - d.x, dy = goal.y - d.y;
+    const dGoal = Math.hypot(dx, dy);
 
-  for (const o of s.drones) {
-    if (o === d || !alive(o)) continue;
-    const sd = dist2d(d, o);
-    if (sd < DRONE.separationM && sd > 0.01) {
-      const push = (DRONE.separationM - sd) / DRONE.separationM * DRONE.accelMs2 * 2;
-      ax += ((d.x - o.x) / sd) * push;
-      ay += ((d.y - o.y) / sd) * push;
+    const brake = (maxV * maxV) / (2 * DRONE.accelMs2);
+    const desiredSpeed = dGoal > brake ? maxV : maxV * (dGoal / brake);
+    let ax = 0, ay = 0;
+    if (dGoal > 0.5) {
+      ax = (dx / dGoal) * desiredSpeed - d.vx;
+      ay = (dy / dGoal) * desiredSpeed - d.vy;
+    } else {
+      ax = -d.vx; ay = -d.vy;
     }
-  }
 
-  // Obstacle avoidance: onboard map, buildings above flight level are
-  // no-fly cylinders. Radial push plus a tangential bias so a head-on
-  // approach slides around the rim instead of stalling against it.
-  for (const b of s.terrain.buildings) {
-    const rObst = buildingObstacleRadiusM(s, b);
-    if (!rObst) continue;
-    const dxh = d.x - b.x, dyh = d.y - b.y;
-    const dh = Math.hypot(dxh, dyh);
-    if (dh < rObst && dh > 0.01) {
-      const push = ((rObst - dh) / rObst) * DRONE.accelMs2 * 3;
-      ax += (dxh / dh) * push - (dyh / dh) * push * 0.4;
-      ay += (dyh / dh) * push + (dxh / dh) * push * 0.4;
+    for (const o of s.drones) {
+      if (o === d || !alive(o)) continue;
+      const sd = dist2d(d, o);
+      if (sd < DRONE.separationM && sd > 0.01) {
+        const push = (DRONE.separationM - sd) / DRONE.separationM * DRONE.accelMs2 * 2;
+        ax += ((d.x - o.x) / sd) * push;
+        ay += ((d.y - o.y) / sd) * push;
+      }
     }
+
+    // Obstacle avoidance: onboard map, buildings above flight level are
+    // no-fly cylinders. Radial push plus a tangential bias so a head-on
+    // approach slides around the rim instead of stalling against it.
+    for (const b of s.terrain.buildings) {
+      const rObst = buildingObstacleRadiusM(s, b);
+      if (!rObst) continue;
+      const dxh = d.x - b.x, dyh = d.y - b.y;
+      const dh = Math.hypot(dxh, dyh);
+      if (dh < rObst && dh > 0.01) {
+        const push = ((rObst - dh) / rObst) * DRONE.accelMs2 * 3;
+        ax += (dxh / dh) * push - (dyh / dh) * push * 0.4;
+        ay += (dyh / dh) * push + (dxh / dh) * push * 0.4;
+      }
+    }
+
+    const aMag = Math.hypot(ax, ay);
+    if (aMag > DRONE.accelMs2) { ax = ax / aMag * DRONE.accelMs2; ay = ay / aMag * DRONE.accelMs2; }
+    d.vx += ax * dt; d.vy += ay * dt;
+
+    // The speed limit and the power bill are paid in AIRSPEED. Wind shifts the
+    // ground-frame envelope: full tailwind adds, headwind subtracts, and a
+    // strong enough wind blows the drone backwards at full throttle.
+    let vax = d.vx - s.wind.x, vay = d.vy - s.wind.y;
+    const va = Math.hypot(vax, vay);
+    if (va > maxV) {
+      vax *= maxV / va; vay *= maxV / va;
+      d.vx = vax + s.wind.x; d.vy = vay + s.wind.y;
+    }
+    d.x += d.vx * dt; d.y += d.vy * dt;
+
+    updateBattery(s, d, dt, Math.min(va, maxV));
   }
-
-  const aMag = Math.hypot(ax, ay);
-  if (aMag > DRONE.accelMs2) { ax = ax / aMag * DRONE.accelMs2; ay = ay / aMag * DRONE.accelMs2; }
-  d.vx += ax * dt; d.vy += ay * dt;
-
-  // The speed limit and the power bill are paid in AIRSPEED. Wind shifts the
-  // ground-frame envelope: full tailwind adds, headwind subtracts, and a
-  // strong enough wind blows the drone backwards at full throttle.
-  let vax = d.vx - s.wind.x, vay = d.vy - s.wind.y;
-  const va = Math.hypot(vax, vay);
-  if (va > maxV) {
-    vax *= maxV / va; vay *= maxV / va;
-    d.vx = vax + s.wind.x; d.vy = vay + s.wind.y;
-  }
-  d.x += d.vx * dt; d.y += d.vy * dt;
-
-  updateBattery(s, d, dt, Math.min(va, maxV));
 
   if ((d.mode === 'rtb' || d.mode === 'rtl') && dist2d(d, s.base) < DRONE.landThresholdM) {
     if (d.mode === 'rtb') {
@@ -1026,6 +1037,13 @@ function chainStatus(s) {
 // --- Tick -------------------------------------------------------------------------
 function stepSwarm(s, dt) {
   s.time += dt;
+
+  // External-vehicle mode: adopt the vehicles' real positions BEFORE any
+  // logic runs, so C2 planning, routing, and the tether all reason about
+  // ground truth from the autopilots.
+  const external = typeof externalActive === 'function' && externalActive();
+  if (external) externalPullPositions(s);
+
   c2Step(s);
 
   // Ground crew: landed drones get a fresh pack and go back to work
@@ -1043,5 +1061,9 @@ function stepSwarm(s, dt) {
 
   for (const d of s.drones) stepDrone(s, d, dt);
   stepNet(s, dt);
+
+  // Ship the goals our logic just decided out to the vehicles.
+  if (external) externalPushGoals(s);
+
   return chainStatus(s);
 }
