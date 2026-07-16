@@ -3,11 +3,37 @@
 **[▶ Live demo](https://dalailalama.github.io/drone-swarm-relay-sim/)** — no
 install, runs in your browser.
 
-A browser-based simulation of a drone swarm that keeps itself connected to a
-ground station by **turning its own members into radio relays** — the way a
-flock of birds would solve a comms problem. Fly the mission far enough away
-and drones peel off to bridge the link; kill a relay and the swarm heals;
-run the battery down and drones excuse themselves and fly home.
+A browser-based simulation of a drone swarm that keeps itself connected to its
+operator by **turning its own members into a self-healing radio relay mesh** —
+the way a flock of birds would solve a comms problem. Fly the mission far
+enough away and drones peel off to bridge the link; kill a relay and the
+swarm heals; drop an interference source and the swarm maps the dead zone and
+routes around it; run a battery down and drones excuse themselves and fly home.
+
+## The real-world problem
+
+Whenever a team of drones has to work somewhere **without communications
+infrastructure** — and the distance, terrain, or radio interference keeps
+breaking the link to the operator — you have this project's problem. It shows
+up everywhere:
+
+- **Disaster response & search-and-rescue** — earthquakes, floods, wildfires,
+  avalanches: cell towers are down or mountains block the signal, and a
+  self-relaying swarm has to search while staying linked to the command post.
+- **Wildfire & infrastructure monitoring** — persistent overwatch across
+  ridgelines and valleys that shadow radio; relays keep the cameras connected.
+- **Long linear inspection** — power lines, pipelines, railways, borders,
+  coastlines: a moving relay chain keeps beyond-line-of-sight drones online.
+- **Conservation & anti-poaching** — vast parks with zero infrastructure.
+- **Mining, ports, large industrial sites** — exactly where "never-break" mesh
+  radios (Rajant, Silvus) are already deployed.
+- **Contested / degraded-comms operations** — the hardest version of the same
+  problem, where the interference is deliberate.
+
+The common thread: **keep the swarm connected across distance, terrain, and
+interference, using the drones themselves as the network.** This simulator
+lets you design and stress-test that — against real radio hardware specs,
+real terrain, and real interference — before spending a cent on drones.
 
 No build step, no dependencies. Open `index.html` from any static server.
 (UI typeface — IBM Plex Mono — loads from Google Fonts and degrades
@@ -228,6 +254,29 @@ RNG (same seed → bit-identical run, which is what makes the tests possible).
 node --test
 ```
 
+## Interference / RF denial
+
+Add an **interference source** (the Interference panel) and drag it onto the
+map. It raises the noise floor in an area — modelling anything from congested
+urban spectrum or a downed tower to deliberate jamming — propagating with the
+same path loss and terrain shadowing as any signal. Because it feeds straight
+into the link-margin model, everything else reacts on its own: the coverage
+map paints the dead zone red, the tether keeps drones from flying blind into
+it, and the routing bends the chain around it. Tune each source's power, or
+switch it off, to sweep the whole range from a mild noisy environment to a
+total denial. A localized source the swarm skirts and still completes the
+mission; a source blocking the only corridor is the honest failure — the
+swarm maps it, holds its connected frontier, and reports it.
+
+## Scenario save/load and after-action reports
+
+- **Save/Load scenario** serializes every setting plus placed interference
+  sources to a JSON file, so a study or demo is reproducible and shareable.
+- **After-action report** exports a Markdown mission summary — did the link
+  hold, how many relays and failsafes, what dead zones were mapped, packet
+  loss, interference survived — the artifact a planner or customer actually
+  wants out of a run (clearly marked as a simulation result, not flight data).
+
 ## Packet capture
 
 Tick the "Packet capture" box (Mission setup) to record every network event —
@@ -255,7 +304,19 @@ motion is externalized. See [sitl/README.md](sitl/README.md). You can try the
 whole pipeline with **zero firmware** using the mock vehicle server
 (`python sitl/mock_vehicles.py`, then "Fly via bridge" in the sim).
 
-## Roadmap
+## Where this is going
+
+This isn't just a toy — it's the working prototype of a real, globally useful
+capability: keeping drone teams connected without infrastructure. Two detailed
+two-year plans lay out the path:
+
+- **[Plan A — simulation-only](PLAN-A-SIMULATION-ONLY.md)** — grow the project
+  into a fundable, revenue-earning simulation product using only a laptop
+  (no hardware, ~$0). Start this today.
+- **[Plan B — with hardware](PLAN-B-WITH-HARDWARE.md)** — once funded, take it
+  to real drones and flight-validated pilots for real customers.
+
+Near-term simulation roadmap:
 
 - Per-vehicle wind and sensor noise injected from the sim into SITL
 - Hardware-in-the-loop: swap SITL for a real flight controller on the bench
