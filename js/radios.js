@@ -79,6 +79,45 @@ const RADIOS = [
     note: 'Industrial mesh radio with DigiMesh built into the firmware — relaying is native, not something you write.',
     source: 'https://www.digi.com/products/embedded-systems/digi-xbee/rf-modules/sub-1-ghz-rf-modules/xbee-pro-900hp',
   },
+  // --- Professional MANET / mesh radios: the ones fielded for public-safety,
+  // industrial, and defense multi-node networks. Datasheet figures; real
+  // deployments vary with antennas and terrain.
+  {
+    id: 'silvus-sc4400',
+    name: 'Silvus StreamCaster 4400E (MN-MIMO)',
+    freqMHz: 2200,
+    txDbm: 33,            // up to 2 W per channel
+    sensDbm: -98,
+    antGainDbi: 3,
+    airRateKbps: 40000,   // MIMO throughput, tens of Mbps
+    rangeLosM: 20000,     // multi-km MANET; long with elevation
+    note: 'Battlefield/industrial MANET flagship — 550+ nodes in one self-healing mesh, MIMO for non-line-of-sight. Motorola bought Silvus for $4.4B.',
+    source: 'https://silvustechnologies.com/products/streamcaster-4400/',
+  },
+  {
+    id: 'doodle-rm',
+    name: 'Doodle Labs Mesh Rider (2.4 GHz)',
+    freqMHz: 2450,
+    txDbm: 30,            // 1 W
+    sensDbm: -101,
+    antGainDbi: 3,
+    airRateKbps: 20000,
+    rangeLosM: 12000,     // long-range mesh, frequency-agile
+    note: 'Compact frequency-hopping mesh radio widely flown on small drones (incl. Ukraine). Built for jamming-resilient, self-forming links.',
+    source: 'https://doodlelabs.com/products/mesh-rider-radios/',
+  },
+  {
+    id: 'rajant-es1',
+    name: 'Rajant Kinetic Mesh (ES1)',
+    freqMHz: 2400,
+    txDbm: 27,
+    sensDbm: -96,
+    antGainDbi: 3,
+    airRateKbps: 30000,
+    rangeLosM: 8000,
+    note: 'Industrial "never-break" mesh used in mining, ports, and disaster response — every node routes for every other, no single point of failure.',
+    source: 'https://rajant.com/products/breadcrumb-es1/',
+  },
 ];
 
 // Environment multipliers applied to the calibrated range. LOS datasheet

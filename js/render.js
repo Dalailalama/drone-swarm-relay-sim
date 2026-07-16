@@ -140,6 +140,43 @@ function drawCoverage(ctx, cv, view, s) {
   }
 }
 
+// Interference / denied-RF sources: a pulsing emitter with its denial-zone
+// ring (where it raises the noise floor to the radio's sensitivity). Selected
+// source gets a dashed halo so the operator can drag/tune it.
+function drawJammers(ctx, cv, view, s, selected, timeSec) {
+  if (!s.jammers) return;
+  for (const j of s.jammers) {
+    const c = worldToScreen(view, cv, j.x, j.y);
+    const rM = jammerDenialRadiusM(s, j);
+    const r = rM * view.pxPerM;
+    if (j.on !== false && r > 3 && r < 8000) {
+      ctx.beginPath(); ctx.arc(c.x, c.y, r, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(224,96,80,0.10)'; ctx.fill();
+      ctx.strokeStyle = 'rgba(224,96,80,0.5)'; ctx.lineWidth = 1; ctx.setLineDash([4, 5]);
+      ctx.stroke(); ctx.setLineDash([]);
+    }
+    // expanding wave rings to signal an active emitter
+    if (j.on !== false) {
+      for (let k = 0; k < 3; k++) {
+        const ph = ((timeSec * 0.6 + k / 3) % 1);
+        ctx.beginPath(); ctx.arc(c.x, c.y, 6 + ph * 22, 0, Math.PI * 2);
+        ctx.strokeStyle = 'rgba(224,96,80,' + (0.5 * (1 - ph)).toFixed(2) + ')';
+        ctx.lineWidth = 1.5; ctx.stroke();
+      }
+    }
+    if (j === selected) {
+      ctx.beginPath(); ctx.arc(c.x, c.y, 15, 0, Math.PI * 2);
+      ctx.strokeStyle = '#e8e6da'; ctx.lineWidth = 1.5; ctx.setLineDash([3, 3]);
+      ctx.stroke(); ctx.setLineDash([]);
+    }
+    ctx.beginPath(); ctx.arc(c.x, c.y, 6, 0, Math.PI * 2);
+    ctx.fillStyle = j.on === false ? '#8a887a' : '#e06050'; ctx.fill();
+    ctx.font = '11px "IBM Plex Mono", monospace'; ctx.textAlign = 'center';
+    ctx.fillStyle = j.on === false ? '#8a887a' : '#e06050';
+    ctx.fillText((j.on === false ? 'off · ' : '') + j.erpDbm + ' dBm', c.x, c.y + 22);
+  }
+}
+
 function drawRangeRing(ctx, cv, view, node, rangeM) {
   const c = worldToScreen(view, cv, node.x, node.y);
   const r = rangeM * view.pxPerM;
@@ -313,6 +350,7 @@ function render(ctx, cv, view, s, status, selected, usable) {
   drawGrid(ctx, cv, view);
   drawTerrain(ctx, cv, view, s);
   drawCoverage(ctx, cv, view, s);
+  drawJammers(ctx, cv, view, s, selected, s.time);
 
   // Coverage rings around every transmitting chain node
   for (const node of status.nodes) {

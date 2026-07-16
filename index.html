@@ -137,6 +137,35 @@
     </section>
 
     <section>
+      <h2>Interference (RF denial)</h2>
+      <div class="btn-row">
+        <button id="addJammerBtn">Add interference source</button>
+      </div>
+      <div id="jammerPanel" class="af-info">Drop a source to deny radio in an area — congested spectrum, a downed tower, or jamming. The swarm learns the dead zone and routes around it.</div>
+      <div class="ctl-row" id="jammerPowerRow" style="display:none;">
+        <label for="jammerPowerRange">Source power</label>
+        <input type="range" id="jammerPowerRange" min="10" max="42" value="27" step="1">
+        <output id="jammerPowerOut">27 dBm</output>
+      </div>
+      <div class="btn-row" id="jammerBtnRow" style="display:none;">
+        <button id="jammerToggleBtn">Turn off</button>
+        <button id="jammerRemoveBtn" class="danger">Remove source</button>
+      </div>
+    </section>
+
+    <section>
+      <h2>Scenario</h2>
+      <div class="btn-row">
+        <button id="saveScenarioBtn">Save scenario (.json)</button>
+        <button id="loadScenarioBtn">Load scenario</button>
+      </div>
+      <div class="btn-row">
+        <button id="reportBtn">After-action report (.md)</button>
+      </div>
+      <input type="file" id="loadScenarioInput" accept="application/json,.json" style="display:none;">
+    </section>
+
+    <section>
       <h2>External vehicles (SITL)</h2>
       <div class="ctl-row">
         <label for="wsUrl">Bridge URL</label>

@@ -141,6 +141,7 @@ function makeSwarm(opts) {
     envFactor: opts.envFactor,
     shadowSigmaDb: opts.shadowSigmaDb || 0,
     terrain: opts.terrain || makeTerrain('flat'),
+    jammers: opts.jammers ? opts.jammers.map(j => ({ ...j })) : [],
     covCellM: Math.max(20, usableRangeM(opts.radio, opts.envFactor) * 0.15),
     showCoverage: true,
     broadcastC2: opts.broadcastC2 !== false,
@@ -378,6 +379,64 @@ function buildingObstacleRadiusM(s, b) {
 // and hard-blocked when terrain cuts the line of sight. This is what
 // routing, packet delivery, and the hop display all consume — one
 // consistent radio truth.
+// --- Interference / denied-RF sources ----------------------------------------
+// A generic RF interference source: raises the effective noise floor around it,
+// in a matching band, propagating with the same path loss and terrain shadowing
+// as any signal. This models congested urban spectrum, a broadcast tower, a
+// downed/rogue emitter, or deliberate jamming — one entity for every use case.
+// Because it feeds straight into liveMarginDb, the coverage map LEARNS the
+// denied zone, the tether keeps drones from flying into it, and ETX routing
+// bends the chain around it — no special-case logic anywhere else.
+const JAM_SNR_OFFSET_DB = 10; // gap between raw interference power and the usable-floor scale
+
+// Elevated noise floor (dBm, in sensitivity-equivalent terms) that all active
+// interference sources impose on a receiver at rxPos/rxAlt. -Infinity if none.
+function interferenceFloorDbm(s, rxPos, rxAlt) {
+  const jams = s.jammers;
+  if (!jams || !jams.length) return -Infinity;
+  const n = pathLossExponent(s.radio);
+  const pl1 = pl1m(s.radio.freqMHz);
+  let lin = 0;
+  for (const j of jams) {
+    if (j.on === false) continue;
+    if (j.band !== 'all' && Math.abs(j.band - s.radio.freqMHz) > 150) continue; // out of band
+    const ground = Math.hypot(rxPos.x - j.x, rxPos.y - j.y);
+    const jAlt = terrainGroundAt(s.terrain, j.x, j.y) + (j.altM || 15);
+    if (losBlocked(s.terrain, j.x, j.y, jAlt, rxPos.x, rxPos.y, rxAlt)) continue; // terrain shadows it
+    const slant = Math.hypot(ground, jAlt - rxAlt);
+    const pl = pl1 + 10 * n * Math.log10(Math.max(1, slant / s.envFactor));
+    lin += Math.pow(10, (j.erpDbm - pl) / 10);
+  }
+  return lin > 0 ? 10 * Math.log10(lin) + JAM_SNR_OFFSET_DB : -Infinity;
+}
+
+// How much interference degrades this link, in dB (>=0). The effective floor is
+// the worse of the receiver-end interference at either node vs the radio's own
+// sensitivity; the penalty is how far that floor rises above sensitivity.
+function interferencePenaltyDb(s, aPos, aAlt, bPos, bAlt) {
+  if (!s.jammers || !s.jammers.length) return 0;
+  const fa = interferenceFloorDbm(s, aPos, aAlt);
+  const fb = interferenceFloorDbm(s, bPos, bAlt);
+  const floor = Math.max(fa, fb);
+  return floor > s.radio.sensDbm ? floor - s.radio.sensDbm : 0;
+}
+
+// Radius at which a single source raises the floor to the radio's sensitivity
+// (flat-ground estimate) — the visible "denied zone" for the current radio.
+function jammerDenialRadiusM(s, j) {
+  if (j.on === false) return 0;
+  if (j.band !== 'all' && Math.abs(j.band - s.radio.freqMHz) > 150) return 0;
+  const n = pathLossExponent(s.radio);
+  const exp = (j.erpDbm - pl1m(s.radio.freqMHz) + JAM_SNR_OFFSET_DB - s.radio.sensDbm) / (10 * n);
+  return s.envFactor * Math.pow(10, exp);
+}
+
+let jammerSeq = 0;
+function makeJammer(x, y, erpDbm) {
+  jammerSeq += 1;
+  return { id: 'JX-' + jammerSeq, x, y, erpDbm: erpDbm || 27, band: 'all', altM: 15, on: true };
+}
+
 function liveMarginDb(s, aId, bId) {
   const a = nodePos(s, aId), b = nodePos(s, bId);
   if (!a || !b) return -Infinity;
@@ -386,7 +445,8 @@ function liveMarginDb(s, aId, bId) {
   if (ground > radioHorizonM(altA, altB)) return -Infinity;
   if (losBlocked(s.terrain, a.x, a.y, altA, b.x, b.y, altB)) return -Infinity;
   const slant = Math.hypot(ground, altA - altB);
-  return linkMarginDb(s.radio, s.envFactor, slant) + fadeDb(s, aId, bId);
+  return linkMarginDb(s.radio, s.envFactor, slant) + fadeDb(s, aId, bId)
+    - interferencePenaltyDb(s, a, altA, b, altB);
 }
 
 // Comms-corridor transit (methodology from FASTER's safe corridors: keep the
@@ -1095,4 +1155,53 @@ function stepSwarm(s, dt) {
   if (external) externalPushGoals(s);
 
   return chainStatus(s);
+}
+
+// --- After-action report -----------------------------------------------------
+// A human-readable mission summary (Markdown) — the artifact a planner or
+// customer actually wants out of a simulation run: did the swarm hold the
+// link, how hard did it work, and what did it learn about the RF environment.
+function afterActionReport(s) {
+  const st = chainStatus(s);
+  const mins = (s.time / 60).toFixed(1);
+  const cov = [...s.c2.cov.values()];
+  const badCells = cov.filter(e => e.bad > e.good).length;
+  const goodCells = cov.filter(e => e.good >= e.bad && (e.good + e.bad) > 0).length;
+  const deliv = s.net.delivered, drop = s.net.dropped;
+  const dropPct = (deliv + drop) ? (100 * drop / (deliv + drop)).toFixed(1) : '0';
+  const activeJam = (s.jammers || []).filter(j => j.on !== false).length;
+  const D = dist2d(s.base, s.target);
+  const relayEvents = s.events.filter(e => e.kind === 'relay').length;
+  const failsafes = s.events.filter(e => /lost C2 link|link timeout|retreating/.test(e.msg)).length;
+  const swaps = s.events.filter(e => e.msg.includes('swapped')).length;
+  const L = [];
+  L.push('# Mission after-action report');
+  L.push('');
+  L.push('_Generated by the drone swarm relay simulator at T+' + mins + ' min._');
+  L.push('');
+  L.push('## Setup');
+  L.push('- **Radio:** ' + s.radio.name + ' (' + s.radio.freqMHz + ' MHz, usable ~' + fmtDist(usableRangeM(s.radio, s.envFactor)) + ')');
+  L.push('- **Airframe:** ' + s.airframe.name + ' — ' + s.drones.length + ' drones');
+  L.push('- **Objective distance:** ' + fmtDist(D) + ' from the ground station');
+  L.push('- **Altitude:** ' + s.altitudeM + ' m AGL' + (Math.hypot(s.wind.x, s.wind.y) > 0.5 ? ' · wind ' + Math.hypot(s.wind.x, s.wind.y).toFixed(0) + ' m/s' : ''));
+  L.push('- **Interference sources:** ' + activeJam + (activeJam ? ' active (RF denial in play)' : ' (clean spectrum)'));
+  L.push('');
+  L.push('## Outcome');
+  L.push('- **Link to objective:** ' + (st.connected ? '**CONNECTED** end-to-end' : '**not connected** at report time'));
+  L.push('- **Chain:** ' + st.relayCount + ' relay drones bridging ' + st.missionCount + ' mission drones');
+  L.push('- **C2 contact:** ' + st.freshCount + ' of ' + st.aliveCount + ' airborne drones in fresh telemetry contact');
+  L.push('- **Relay re-plans:** ' + relayEvents + ' · **Failsafe events:** ' + failsafes + ' · **Battery swaps:** ' + swaps);
+  L.push('');
+  L.push('## RF environment learned');
+  L.push('- **Coverage cells mapped:** ' + cov.length + ' (' + goodCells + ' measured-good, ' + badCells + ' measured dead zones)');
+  L.push('- **Packets delivered:** ' + deliv.toLocaleString() + ' · **dropped:** ' + drop.toLocaleString() + ' (' + dropPct + '% loss)');
+  L.push('- **Channel utilization:** ' + (s.net.utilization * 100).toFixed(1) + '%' + (s.radio.dutyCycle ? ' (legal duty-cycle cap ' + (s.radio.dutyCycle * 100) + '%)' : ''));
+  L.push('');
+  L.push('## Timeline (last events)');
+  for (const e of s.events.slice(-14)) {
+    L.push('- `T+' + Math.floor(e.t / 60) + ':' + String(Math.floor(e.t % 60)).padStart(2, '0') + '` ' + e.msg);
+  }
+  L.push('');
+  L.push('_This is a simulation result, not a flight-tested outcome. Model calibration and assumptions are documented in the project README._');
+  return L.join('\n');
 }

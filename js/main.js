@@ -53,6 +53,7 @@
   let paused = false;
   let swarm = null;
   let selected = null;
+  let selectedJammer = null;
   const view = { cx: 0, cy: 0, pxPerM: 1 };
 
   function usable() { return usableRangeM(radio, env.factor); }
@@ -84,11 +85,46 @@
       shadowSigmaDb: env.shadowSigmaDb,
       seed: 42 + missionSeq,
     });
-    selected = null;
+    selected = null; selectedJammer = null;
     swarm.showCoverage = coverageChk.checked;
     cam3D = view3D ? makeCamera3D(swarm) : null;
     fitView();
     logEvent(swarm, 'Swarm launched: ' + swarm.drones.length + ' drones on ' + radio.name, 'info');
+  }
+
+  // Full scenario capture — every setting plus placed interference sources —
+  // so a demo/study is reproducible and shareable as one JSON file.
+  function currentScenario() {
+    return {
+      version: 1, radio: radio.id, env: env.id, airframe: airframe.id,
+      count: +countRange.value, altitudeM: +altRange.value, spacingPct: +spacingRange.value,
+      distancePct: +distRange.value, terrain: terrainSel.value,
+      windSpd: +windSpdRange.value, windDir: +windDirRange.value,
+      corridor: corridorChk.checked, broadcast: bcastChk.checked, coverage: coverageChk.checked,
+      target: { x: swarm.target.x, y: swarm.target.y },
+      jammers: swarm.jammers.map(j => ({ x: j.x, y: j.y, erpDbm: j.erpDbm, band: j.band, altM: j.altM, on: j.on })),
+    };
+  }
+  function applyScenario(sc) {
+    if (sc.radio) { radioSel.value = sc.radio; radio = RADIOS.find(r => r.id === sc.radio) || radio; }
+    if (sc.env) { envSel.value = sc.env; env = ENVIRONMENTS.find(e => e.id === sc.env) || env; }
+    if (sc.airframe) { airframeSel.value = sc.airframe; airframe = AIRFRAMES.find(a => a.id === sc.airframe) || airframe; }
+    if (sc.count != null) { countRange.value = sc.count; countOut.textContent = sc.count; }
+    if (sc.altitudeM != null) { altRange.value = sc.altitudeM; altOut.textContent = sc.altitudeM + ' m'; }
+    if (sc.spacingPct != null) spacingRange.value = sc.spacingPct;
+    if (sc.distancePct != null) distRange.value = sc.distancePct;
+    if (sc.terrain) terrainSel.value = sc.terrain;
+    if (sc.windSpd != null) windSpdRange.value = sc.windSpd;
+    if (sc.windDir != null) windDirRange.value = sc.windDir;
+    if (sc.corridor != null) corridorChk.checked = sc.corridor;
+    if (sc.broadcast != null) bcastChk.checked = sc.broadcast;
+    if (sc.coverage != null) coverageChk.checked = sc.coverage;
+    updateSpecCard(); updateAirframeInfo(); applySpacing();
+    resetSwarm();
+    if (sc.target) { swarm.target.x = sc.target.x; swarm.target.y = sc.target.y; }
+    if (sc.jammers) sc.jammers.forEach(j => swarm.jammers.push({ id: 'JX-load' + Math.round(j.x) + '_' + Math.round(j.y), ...j }));
+    fitView(); updateJammerPanel();
+    logEvent(swarm, 'Scenario loaded', 'info');
   }
 
   let viewFitted = false;
@@ -212,12 +248,71 @@
   });
   exportBtn.addEventListener('click', () => {
     if (!swarm) return;
-    const blob = new Blob([exportCaptureJSONL(swarm)], { type: 'application/x-ndjson' });
+    download(exportCaptureJSONL(swarm), 'swarm-capture-' + Math.floor(swarm.time) + 's.jsonl', 'application/x-ndjson');
+  });
+
+  // --- Interference sources ---------------------------------------------------
+  const addJammerBtn = el('addJammerBtn'), jammerPanel = el('jammerPanel');
+  const jammerPowerRow = el('jammerPowerRow'), jammerPowerRange = el('jammerPowerRange'), jammerPowerOut = el('jammerPowerOut');
+  const jammerBtnRow = el('jammerBtnRow'), jammerToggleBtn = el('jammerToggleBtn'), jammerRemoveBtn = el('jammerRemoveBtn');
+
+  function updateJammerPanel() {
+    const j = selectedJammer;
+    const on = j && j.on !== false;
+    jammerPowerRow.style.display = j ? 'flex' : 'none';
+    jammerBtnRow.style.display = j ? 'flex' : 'none';
+    if (j) {
+      jammerPowerRange.value = j.erpDbm;
+      jammerPowerOut.textContent = j.erpDbm + ' dBm';
+      jammerToggleBtn.textContent = on ? 'Turn off' : 'Turn on';
+      jammerPanel.innerHTML = 'Source <b>' + j.id + '</b> — ' + (on ? 'active, denial radius <b>' + fmtDist(jammerDenialRadiusM(swarm, j)) + '</b> for the current radio' : 'off') + '. Drag it on the map.';
+    } else {
+      jammerPanel.textContent = swarm.jammers.length + ' source' + (swarm.jammers.length === 1 ? '' : 's') + ' placed. Click one to tune it.';
+    }
+  }
+  window.updateJammerPanel = updateJammerPanel; // pointer handler calls it on select
+  addJammerBtn.addEventListener('click', () => {
+    const j = makeJammer(view.cx, view.cy, +jammerPowerRange.value);
+    swarm.jammers.push(j);
+    selectedJammer = j;
+    updateJammerPanel();
+  });
+  jammerPowerRange.addEventListener('input', () => {
+    jammerPowerOut.textContent = jammerPowerRange.value + ' dBm';
+    if (selectedJammer) { selectedJammer.erpDbm = +jammerPowerRange.value; updateJammerPanel(); }
+  });
+  jammerToggleBtn.addEventListener('click', () => {
+    if (!selectedJammer) return;
+    selectedJammer.on = selectedJammer.on === false;
+    updateJammerPanel();
+  });
+  jammerRemoveBtn.addEventListener('click', () => {
+    if (!selectedJammer) return;
+    swarm.jammers = swarm.jammers.filter(j => j !== selectedJammer);
+    selectedJammer = null;
+    updateJammerPanel();
+  });
+
+  // --- Scenario save/load + after-action report ------------------------------
+  function download(text, name, mime) {
     const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = 'swarm-capture-' + Math.floor(swarm.time) + 's.jsonl';
-    a.click();
+    a.href = URL.createObjectURL(new Blob([text], { type: mime || 'text/plain' }));
+    a.download = name; a.click();
     URL.revokeObjectURL(a.href);
+  }
+  el('saveScenarioBtn').addEventListener('click', () => {
+    download(JSON.stringify(currentScenario(), null, 1), 'scenario-' + terrainSel.value + '.json', 'application/json');
+  });
+  el('loadScenarioBtn').addEventListener('click', () => el('loadScenarioInput').click());
+  el('loadScenarioInput').addEventListener('change', ev => {
+    const file = ev.target.files[0]; if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => { try { applyScenario(JSON.parse(reader.result)); } catch (e) { alert('Bad scenario file: ' + e.message); } };
+    reader.readAsText(file);
+    ev.target.value = '';
+  });
+  el('reportBtn').addEventListener('click', () => {
+    download(afterActionReport(swarm), 'after-action-T' + Math.floor(swarm.time) + 's.md', 'text/markdown');
   });
   speedBtns.forEach(b => b.addEventListener('click', () => {
     const v = b.dataset.speed;
@@ -258,8 +353,16 @@
       return;
     }
     const w = screenToWorld(view, cv, p.x, p.y);
+    // Interference source hit test first (they're draggable, like the target)
+    let jHit = null;
+    for (const j of swarm.jammers) {
+      const js = worldToScreen(view, cv, j.x, j.y);
+      if (Math.hypot(p.x - js.x, p.y - js.y) < 16) { jHit = j; break; }
+    }
     const tScreen = worldToScreen(view, cv, swarm.target.x, swarm.target.y);
-    if (Math.hypot(p.x - tScreen.x, p.y - tScreen.y) < 26) {
+    if (jHit) {
+      selectedJammer = jHit; dragMode = 'jammer'; updateJammerPanel();
+    } else if (Math.hypot(p.x - tScreen.x, p.y - tScreen.y) < 26) {
       dragMode = 'target';
     } else {
       // Drone hit test (screen space)
@@ -285,6 +388,9 @@
     if (dragMode === 'target') {
       const w = screenToWorld(view, cv, p.x, p.y);
       swarm.target.x = w.x; swarm.target.y = w.y;
+    } else if (dragMode === 'jammer' && selectedJammer) {
+      const w = screenToWorld(view, cv, p.x, p.y);
+      selectedJammer.x = w.x; selectedJammer.y = w.y;
     } else if (dragMode === 'pan' && lastMouse) {
       view.cx -= (p.x - lastMouse.x) / view.pxPerM;
       view.cy -= (p.y - lastMouse.y) / view.pxPerM;
