@@ -201,7 +201,7 @@ function insideObstacle(s, pos) {
 }
 
 function badPlan(s, pos) {
-  return covState(s, pos.x, pos.y) === 'bad' || insideObstacle(s, pos);
+  return covState(s, pos.x, pos.y) === 'bad' || insideObstacle(s, pos) || inDenialZone(s, pos);
 }
 
 // If a planned position is a bad plan (measured-bad cell or known terrain),
@@ -245,12 +245,14 @@ function planChain(s) {
   const usable = Math.min(usableRangeM(s.radio, s.envFactor), radioHorizonM(C2_ANTENNA_M, s.altitudeM));
   const span = usable * s.deployFrac;
   const cell = Math.max(40, usable * 0.25);
-  const pad = span * 1.5;
+  // The search box must be wide enough to route AROUND the widest denial zone,
+  // otherwise A* can't find a detour and the chain fails through it.
+  const pad = Math.max(span * 1.5, maxDenialRadiusM(s) * 1.35 + span);
   const minX = Math.min(s.base.x, s.target.x) - pad, maxX = Math.max(s.base.x, s.target.x) + pad;
   const minY = Math.min(s.base.y, s.target.y) - pad, maxY = Math.max(s.base.y, s.target.y) + pad;
   const nx = Math.max(2, Math.ceil((maxX - minX) / cell)), ny = Math.max(2, Math.ceil((maxY - minY) / cell));
   const pos = (ix, iy) => ({ x: minX + (ix + 0.5) * cell, y: minY + (iy + 0.5) * cell });
-  const blocked = p => insideObstacle(s, p) || covState(s, p.x, p.y) === 'bad';
+  const blocked = p => insideObstacle(s, p) || covState(s, p.x, p.y) === 'bad' || inDenialZone(s, p);
   const idx = (ix, iy) => iy * nx + ix;
 
   const sIx = Math.min(nx - 1, Math.max(0, Math.floor((s.base.x - minX) / cell)));
@@ -421,6 +423,26 @@ function interferencePenaltyDb(s, aPos, aAlt, bPos, bAlt) {
   return floor > s.radio.sensDbm ? floor - s.radio.sensDbm : 0;
 }
 
+// Is a position inside a denial zone — i.e. would a relay's receiver there be
+// jammed below usable? C2 uses this in path planning to route the chain AROUND
+// interference (a relay placed inside the red zone has a jammed receiver and
+// breaks the chain, so the swarm gets stuck). Framed as C2's spectrum survey:
+// a ground station can sense where strong emitters deny its band, the same way
+// it already uses its terrain database. Terrain shadowing is respected, so a
+// hill that blocks the emitter also shrinks the avoided area.
+function inDenialZone(s, pos) {
+  if (!s.jammers || !s.jammers.length) return false;
+  const alt = terrainGroundAt(s.terrain, pos.x, pos.y) + s.altitudeM;
+  return interferenceFloorDbm(s, pos, alt) > s.radio.sensDbm;
+}
+
+// Widest active denial radius — used to give the path planner room to detour.
+function maxDenialRadiusM(s) {
+  let r = 0;
+  for (const j of (s.jammers || [])) r = Math.max(r, jammerDenialRadiusM(s, j));
+  return r;
+}
+
 // Radius at which a single source raises the floor to the radio's sensitivity
 // (flat-ground estimate) — the visible "denied zone" for the current radio.
 function jammerDenialRadiusM(s, j) {
@@ -434,7 +456,7 @@ function jammerDenialRadiusM(s, j) {
 let jammerSeq = 0;
 function makeJammer(x, y, erpDbm) {
   jammerSeq += 1;
-  return { id: 'JX-' + jammerSeq, x, y, erpDbm: erpDbm != null ? erpDbm : 15, band: 'all', altM: 15, on: true };
+  return { id: 'JX-' + jammerSeq, x, y, erpDbm: erpDbm != null ? erpDbm : 10, band: 'all', altM: 15, on: true };
 }
 
 function liveMarginDb(s, aId, bId) {
