@@ -61,11 +61,12 @@
   function defaultTargetDist() { return usable() * 2.4; } // far enough to need 2 relays
 
   let missionSeq = 0;
+  let forcedSeed = null; // set by applyScenario so a loaded scenario is exact
   function resetSwarm() {
     const dist = +distRange.value / 100 * defaultTargetDist();
     missionSeq += 1;
     const tX = dist, tY = -dist * 0.25;
-    const terrainSeed = 42 + missionSeq;
+    const terrainSeed = forcedSeed != null ? forcedSeed : 42 + missionSeq;
     const terrain = makeTerrain(terrainSel.value, {
       distM: Math.hypot(tX, tY), altM: +altRange.value,
       targetX: tX, targetY: tY, seed: terrainSeed,
@@ -85,7 +86,7 @@
       targetX: dist, targetY: -dist * 0.25,
       radio, envFactor: env.factor,
       shadowSigmaDb: env.shadowSigmaDb,
-      seed: 42 + missionSeq,
+      seed: terrainSeed,
     });
     selected = null; selectedJammer = null;
     swarm._terrainSeed = terrainSeed;
@@ -107,6 +108,7 @@
       windSpd: +windSpdRange.value, windDir: +windDirRange.value,
       corridor: corridorChk.checked, broadcast: bcastChk.checked, coverage: coverageChk.checked,
       cityDensity: +cityDensityRange.value, cityHeight: +cityHeightRange.value,
+      seed: swarm._terrainSeed,
       target: { x: swarm.target.x, y: swarm.target.y },
       jammers: swarm.jammers.map(j => ({ x: j.x, y: j.y, erpDbm: j.erpDbm, band: j.band, altM: j.altM, on: j.on })),
     };
@@ -128,10 +130,12 @@
     if (sc.broadcast != null) bcastChk.checked = sc.broadcast;
     if (sc.coverage != null) coverageChk.checked = sc.coverage;
     updateSpecCard(); updateAirframeInfo(); applySpacing();
+    forcedSeed = sc.seed != null ? sc.seed : null; // exact same map if the file has a seed
     resetSwarm();
+    forcedSeed = null;
     if (sc.target) { swarm.target.x = sc.target.x; swarm.target.y = sc.target.y; }
     if (sc.jammers) sc.jammers.forEach(j => swarm.jammers.push({ id: 'JX-load' + Math.round(j.x) + '_' + Math.round(j.y), ...j }));
-    fitView(); updateJammerPanel();
+    fitView(); updateJammerPanel(); if (typeof updateCityLabels === 'function') updateCityLabels();
     logEvent(swarm, 'Scenario loaded', 'info');
   }
 
