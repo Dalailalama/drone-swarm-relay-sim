@@ -88,6 +88,7 @@
     selected = null; selectedJammer = null;
     swarm.showCoverage = coverageChk.checked;
     cam3D = view3D ? makeCamera3D(swarm) : null;
+    if (typeof updateJammerPanel === 'function') updateJammerPanel();
     fitView();
     logEvent(swarm, 'Swarm launched: ' + swarm.drones.length + ' drones on ' + radio.name, 'info');
   }
@@ -252,30 +253,51 @@
   });
 
   // --- Interference sources ---------------------------------------------------
-  const addJammerBtn = el('addJammerBtn'), jammerPanel = el('jammerPanel');
+  const addJammerBtn = el('addJammerBtn'), clearJammersBtn = el('clearJammersBtn');
+  const jammerIntro = el('jammerIntro'), jammerPanel = el('jammerPanel');
   const jammerPowerRow = el('jammerPowerRow'), jammerPowerRange = el('jammerPowerRange'), jammerPowerOut = el('jammerPowerOut');
   const jammerBtnRow = el('jammerBtnRow'), jammerToggleBtn = el('jammerToggleBtn'), jammerRemoveBtn = el('jammerRemoveBtn');
 
   function updateJammerPanel() {
     const j = selectedJammer;
     const on = j && j.on !== false;
+    const count = swarm.jammers.length;
+    clearJammersBtn.style.display = count ? 'inline-block' : 'none';
     jammerPowerRow.style.display = j ? 'flex' : 'none';
     jammerBtnRow.style.display = j ? 'flex' : 'none';
+    jammerPanel.style.display = count ? 'block' : 'none';
     if (j) {
       jammerPowerRange.value = j.erpDbm;
       jammerPowerOut.textContent = j.erpDbm + ' dBm';
       jammerToggleBtn.textContent = on ? 'Turn off' : 'Turn on';
-      jammerPanel.innerHTML = 'Source <b>' + j.id + '</b> — ' + (on ? 'active, denial radius <b>' + fmtDist(jammerDenialRadiusM(swarm, j)) + '</b> for the current radio' : 'off') + '. Drag it on the map.';
-    } else {
-      jammerPanel.textContent = swarm.jammers.length + ' source' + (swarm.jammers.length === 1 ? '' : 's') + ' placed. Click one to tune it.';
+      jammerPanel.innerHTML = '<b>' + count + '</b> source' + (count === 1 ? '' : 's') + ' placed · editing <b>' + j.id + '</b>: ' +
+        (on ? 'red zone radius <b>' + fmtDist(jammerDenialRadiusM(swarm, j)) + '</b>' : 'off') +
+        '. Drag it on the map; raise Strength for a bigger zone.';
+    } else if (count) {
+      jammerPanel.innerHTML = '<b>' + count + '</b> source' + (count === 1 ? '' : 's') + ' placed. Click one on the map to move or tune it.';
     }
   }
   window.updateJammerPanel = updateJammerPanel; // pointer handler calls it on select
+
   addJammerBtn.addEventListener('click', () => {
-    const j = makeJammer(view.cx, view.cy, +jammerPowerRange.value);
+    // Spread new sources along the mission corridor so they don't pile up on
+    // one spot, and place the first just BESIDE the chain (zone edge grazing
+    // it) so you see the swarm route around rather than a total blackout.
+    const erp = +jammerPowerRange.value;
+    const R = jammerDenialRadiusM(swarm, { erpDbm: erp, on: true, band: 'all' }) || usable() * 0.4;
+    const n = swarm.jammers.length;
+    const B = swarm.base, T = swarm.target;
+    const L = Math.hypot(T.x - B.x, T.y - B.y) || 1;
+    const ux = (T.x - B.x) / L, uy = (T.y - B.y) / L, px = -uy, py = ux;
+    const alongF = 0.5 + ((n % 3) - 1) * 0.14;              // 0.36 / 0.5 / 0.64 along the corridor
+    const off = (R * 0.9 + Math.floor(n / 2) * R * 0.6) * ((n % 2) ? -1 : 1); // beside it, alternating, spreading out
+    const j = makeJammer(B.x + ux * L * alongF + px * off, B.y + uy * L * alongF + py * off, erp);
     swarm.jammers.push(j);
     selectedJammer = j;
     updateJammerPanel();
+  });
+  clearJammersBtn.addEventListener('click', () => {
+    swarm.jammers = []; selectedJammer = null; updateJammerPanel();
   });
   jammerPowerRange.addEventListener('input', () => {
     jammerPowerOut.textContent = jammerPowerRange.value + ' dBm';
@@ -289,7 +311,9 @@
   jammerRemoveBtn.addEventListener('click', () => {
     if (!selectedJammer) return;
     swarm.jammers = swarm.jammers.filter(j => j !== selectedJammer);
-    selectedJammer = null;
+    // Keep the panel useful: fall to the next remaining source instead of
+    // hiding all controls (which looked like the whole thing vanished).
+    selectedJammer = swarm.jammers[swarm.jammers.length - 1] || null;
     updateJammerPanel();
   });
 

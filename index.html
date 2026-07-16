@@ -138,18 +138,20 @@
 
     <section>
       <h2>Interference (RF denial)</h2>
+      <div id="jammerIntro" class="af-info">An interference source jams the radio inside a <b>red circle</b> around it — a jammer, a crowded city, or a broken transmitter. Drones can't hold a link in the red zone, so the swarm avoids or routes around it. Add one, then <b>drag it</b> onto or beside the chain to see what happens.</div>
       <div class="btn-row">
-        <button id="addJammerBtn">Add interference source</button>
+        <button id="addJammerBtn">Add source</button>
+        <button id="clearJammersBtn" class="danger" style="display:none;">Clear all</button>
       </div>
-      <div id="jammerPanel" class="af-info">Drop a source to deny radio in an area — congested spectrum, a downed tower, or jamming. The swarm learns the dead zone and routes around it.</div>
+      <div id="jammerPanel" class="af-info" style="display:none;"></div>
       <div class="ctl-row" id="jammerPowerRow" style="display:none;">
-        <label for="jammerPowerRange">Source power</label>
-        <input type="range" id="jammerPowerRange" min="10" max="42" value="27" step="1">
-        <output id="jammerPowerOut">27 dBm</output>
+        <label for="jammerPowerRange">Strength</label>
+        <input type="range" id="jammerPowerRange" min="0" max="42" value="15" step="1">
+        <output id="jammerPowerOut">15 dBm</output>
       </div>
       <div class="btn-row" id="jammerBtnRow" style="display:none;">
         <button id="jammerToggleBtn">Turn off</button>
-        <button id="jammerRemoveBtn" class="danger">Remove source</button>
+        <button id="jammerRemoveBtn" class="danger">Remove this source</button>
       </div>
     </section>
 

@@ -434,7 +434,7 @@ function jammerDenialRadiusM(s, j) {
 let jammerSeq = 0;
 function makeJammer(x, y, erpDbm) {
   jammerSeq += 1;
-  return { id: 'JX-' + jammerSeq, x, y, erpDbm: erpDbm || 27, band: 'all', altM: 15, on: true };
+  return { id: 'JX-' + jammerSeq, x, y, erpDbm: erpDbm != null ? erpDbm : 15, band: 'all', altM: 15, on: true };
 }
 
 function liveMarginDb(s, aId, bId) {
