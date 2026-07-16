@@ -163,16 +163,16 @@ const ROLE_COLOR_3D = {
 function renderView3D(ctx, cv, s, status, cam, selected) {
   ctx.clearRect(0, 0, cv.width, cv.height); // transparent — host page supplies the bg
 
-  // Terrain rectangle: base/target bounding box, padded 45% on every side so
-  // the corridor doesn't run flush to the edge of the mesh.
-  const minX = Math.min(s.base.x, s.target.x), maxX = Math.max(s.base.x, s.target.x);
-  const minY = Math.min(s.base.y, s.target.y), maxY = Math.max(s.base.y, s.target.y);
-  const spanX0 = maxX - minX || 500, spanY0 = maxY - minY || 500;
-  const x0 = minX - spanX0 * 0.45, x1 = maxX + spanX0 * 0.45;
-  const y0 = minY - spanY0 * 0.45, y1 = maxY + spanY0 * 0.45;
+  // Terrain: a large SQUARE centered on the scene, so the ground fills the
+  // view in every direction (a real landscape surrounds you) rather than a
+  // thin strip along the path. Sized to roughly the camera's reach.
+  const cxm = (s.base.x + s.target.x) / 2, cym = (s.base.y + s.target.y) / 2;
+  const scspan = Math.hypot(s.target.x - s.base.x, s.target.y - s.base.y);
+  const half = Math.max(scspan * 1.9 + 400, 800);
+  const x0 = cxm - half, x1 = cxm + half, y0 = cym - half, y1 = cym + half;
   const spanX = x1 - x0, spanY = y1 - y0;
 
-  const gridN = 44;
+  const gridN = 52;
   const stride = gridN + 1;
 
   // Sample every grid corner exactly once per call and cache it — each
@@ -213,6 +213,7 @@ function renderView3D(ctx, cv, s, status, cam, selected) {
   // WALL_LAMBERT); anything that pokes above the swarm's flight altitude
   // gets a red edge so it reads as an obstacle, not just scenery.
   for (const b of (s.terrain.buildings || [])) {
+    if (b.x < x0 || b.x > x1 || b.y < y0 || b.y > y1) continue; // outside the rendered ground
     const base = terrainGroundAt(s.terrain, b.x, b.y);
     const top = base + b.heightM;
     const hw = b.w / 2, hd = b.d / 2;
