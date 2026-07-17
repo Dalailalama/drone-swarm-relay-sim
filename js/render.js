@@ -53,10 +53,11 @@ function niceStep(target) {
 }
 
 function drawGrid(ctx, cv, view) {
+  const U = window.uiScale || 1;
   const step = niceStep(120 / view.pxPerM); // ~gridline every 120px
   const tl = screenToWorld(view, cv, 0, 0);
   const br = screenToWorld(view, cv, cv.width, cv.height);
-  ctx.lineWidth = 1;
+  ctx.lineWidth = 1 * U;
   for (let x = Math.floor(tl.x / step) * step; x <= br.x; x += step) {
     const s = worldToScreen(view, cv, x, 0);
     ctx.strokeStyle = Math.round(x / step) % 5 === 0 ? COLORS.gridMajor : COLORS.grid;
@@ -76,6 +77,7 @@ function drawGrid(ctx, cv, view) {
 let terrainLayer = { key: '', canvas: null };
 
 function drawTerrain(ctx, cv, view, s) {
+  const U = window.uiScale || 1;
   const t = s.terrain;
   const hasGround = t.groundAmpM > 0;
   if (!hasGround && !t.buildings.length) return;
@@ -119,7 +121,7 @@ function drawTerrain(ctx, cv, view, s) {
     ctx.fillStyle = tall ? 'rgba(122,74,66,0.55)' : 'rgba(138,136,122,0.28)';
     ctx.fillRect(p.x, p.y, wpx, dpx);
     if (tall) {
-      ctx.strokeStyle = 'rgba(224,96,80,0.55)'; ctx.lineWidth = 1;
+      ctx.strokeStyle = 'rgba(224,96,80,0.55)'; ctx.lineWidth = 1 * U;
       ctx.strokeRect(p.x, p.y, wpx, dpx);
     }
   }
@@ -145,6 +147,7 @@ function drawCoverage(ctx, cv, view, s) {
 // source gets a dashed halo so the operator can drag/tune it.
 function drawJammers(ctx, cv, view, s, selected, timeSec) {
   if (!s.jammers) return;
+  const U = window.uiScale || 1;
   for (const j of s.jammers) {
     const c = worldToScreen(view, cv, j.x, j.y);
     const rM = jammerDenialRadiusM(s, j);
@@ -152,64 +155,67 @@ function drawJammers(ctx, cv, view, s, selected, timeSec) {
     if (j.on !== false && r > 3 && r < 8000) {
       ctx.beginPath(); ctx.arc(c.x, c.y, r, 0, Math.PI * 2);
       ctx.fillStyle = 'rgba(224,96,80,0.10)'; ctx.fill();
-      ctx.strokeStyle = 'rgba(224,96,80,0.5)'; ctx.lineWidth = 1; ctx.setLineDash([4, 5]);
+      ctx.strokeStyle = 'rgba(224,96,80,0.5)'; ctx.lineWidth = 1 * U; ctx.setLineDash([4 * U, 5 * U]);
       ctx.stroke(); ctx.setLineDash([]);
     }
     // expanding wave rings to signal an active emitter
     if (j.on !== false) {
       for (let k = 0; k < 3; k++) {
         const ph = ((timeSec * 0.6 + k / 3) % 1);
-        ctx.beginPath(); ctx.arc(c.x, c.y, 6 + ph * 22, 0, Math.PI * 2);
+        ctx.beginPath(); ctx.arc(c.x, c.y, (6 + ph * 22) * U, 0, Math.PI * 2);
         ctx.strokeStyle = 'rgba(224,96,80,' + (0.5 * (1 - ph)).toFixed(2) + ')';
-        ctx.lineWidth = 1.5; ctx.stroke();
+        ctx.lineWidth = 1.5 * U; ctx.stroke();
       }
     }
     if (j === selected) {
-      ctx.beginPath(); ctx.arc(c.x, c.y, 15, 0, Math.PI * 2);
-      ctx.strokeStyle = '#e8e6da'; ctx.lineWidth = 1.5; ctx.setLineDash([3, 3]);
+      ctx.beginPath(); ctx.arc(c.x, c.y, 15 * U, 0, Math.PI * 2);
+      ctx.strokeStyle = '#e8e6da'; ctx.lineWidth = 1.5 * U; ctx.setLineDash([3 * U, 3 * U]);
       ctx.stroke(); ctx.setLineDash([]);
     }
-    ctx.beginPath(); ctx.arc(c.x, c.y, 6, 0, Math.PI * 2);
+    ctx.beginPath(); ctx.arc(c.x, c.y, 6 * U, 0, Math.PI * 2);
     ctx.fillStyle = j.on === false ? '#8a887a' : '#e06050'; ctx.fill();
-    ctx.font = '11px "IBM Plex Mono", monospace'; ctx.textAlign = 'center';
+    ctx.font = (11 * U) + 'px "IBM Plex Mono", monospace'; ctx.textAlign = 'center';
     ctx.fillStyle = j.on === false ? '#8a887a' : '#e06050';
-    ctx.fillText((j.on === false ? 'off · ' : '') + j.erpDbm + ' dBm', c.x, c.y + 22);
+    ctx.fillText((j.on === false ? 'off · ' : '') + j.erpDbm + ' dBm', c.x, c.y + 22 * U);
   }
 }
 
 function drawRangeRing(ctx, cv, view, node, rangeM) {
+  const U = window.uiScale || 1;
   const c = worldToScreen(view, cv, node.x, node.y);
   const r = rangeM * view.pxPerM;
   if (r < 4 || r > 6000) return;
   ctx.beginPath(); ctx.arc(c.x, c.y, r, 0, Math.PI * 2);
   ctx.fillStyle = COLORS.ring; ctx.fill();
-  ctx.strokeStyle = COLORS.ringEdge; ctx.lineWidth = 1; ctx.setLineDash([5, 6]);
+  ctx.strokeStyle = COLORS.ringEdge; ctx.lineWidth = 1 * U; ctx.setLineDash([5 * U, 6 * U]);
   ctx.stroke(); ctx.setLineDash([]);
 }
 
 function drawLinks(ctx, cv, view, hops, timeSec, connected) {
+  const U = window.uiScale || 1;
   for (const hop of hops) {
     const a = worldToScreen(view, cv, hop.a.x, hop.a.y);
     const b = worldToScreen(view, cv, hop.b.x, hop.b.y);
     ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y);
     if (hop.state === 'ok') { ctx.strokeStyle = COLORS.linkOk; ctx.setLineDash([]); }
-    else if (hop.state === 'degraded') { ctx.strokeStyle = COLORS.linkDegraded; ctx.setLineDash([8, 5]); }
-    else { ctx.strokeStyle = COLORS.linkLost; ctx.setLineDash([3, 6]); }
-    ctx.lineWidth = 2;
+    else if (hop.state === 'degraded') { ctx.strokeStyle = COLORS.linkDegraded; ctx.setLineDash([8 * U, 5 * U]); }
+    else { ctx.strokeStyle = COLORS.linkLost; ctx.setLineDash([3 * U, 6 * U]); }
+    ctx.lineWidth = 2 * U;
     ctx.stroke(); ctx.setLineDash([]);
 
     // Hop label: distance + margin
     const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
-    ctx.font = '11px "Segoe UI", sans-serif';
+    ctx.font = (11 * U) + 'px "Segoe UI", sans-serif';
     ctx.fillStyle = hop.state === 'ok' ? COLORS.linkOk : hop.state === 'degraded' ? COLORS.linkDegraded : COLORS.linkLost;
     ctx.textAlign = 'center';
-    ctx.fillText(fmtDist(hop.distM) + '  ' + hop.marginDb.toFixed(0) + ' dB', mx, my - 6);
+    ctx.fillText(fmtDist(hop.distM) + '  ' + hop.marginDb.toFixed(0) + ' dB', mx, my - 6 * U);
   }
 
 }
 
 // Real packets from the network layer, drawn mid-flight on their current hop.
 function drawPackets(ctx, cv, view, s) {
+  const U = window.uiScale || 1;
   for (const p of s.net.packets) {
     const a = nodePos(s, p.path[p.hop]);
     const b = nodePos(s, p.path[p.hop + 1]);
@@ -219,35 +225,37 @@ function drawPackets(ctx, cv, view, s) {
     const sa = worldToScreen(view, cv, a.x, a.y);
     const sb = worldToScreen(view, cv, b.x, b.y);
     ctx.beginPath();
-    ctx.arc(sa.x + (sb.x - sa.x) * frac, sa.y + (sb.y - sa.y) * frac, 2.5, 0, Math.PI * 2);
+    ctx.arc(sa.x + (sb.x - sa.x) * frac, sa.y + (sb.y - sa.y) * frac, 2.5 * U, 0, Math.PI * 2);
     ctx.fillStyle = p.kind === 'cmd' ? COLORS.packetCmd : COLORS.packetTlm;
     ctx.fill();
   }
 }
 
 function drawBase(ctx, cv, view, base) {
+  const U = window.uiScale || 1;
   const c = worldToScreen(view, cv, base.x, base.y);
   ctx.fillStyle = COLORS.base;
-  ctx.fillRect(c.x - 10, c.y - 6, 20, 12);
-  ctx.beginPath(); ctx.moveTo(c.x, c.y - 6); ctx.lineTo(c.x, c.y - 20);
-  ctx.strokeStyle = COLORS.base; ctx.lineWidth = 2; ctx.stroke();
-  ctx.beginPath(); ctx.arc(c.x, c.y - 22, 3, 0, Math.PI * 2); ctx.fill();
-  ctx.font = '12px "Segoe UI", sans-serif'; ctx.textAlign = 'center';
+  ctx.fillRect(c.x - 10 * U, c.y - 6 * U, 20 * U, 12 * U);
+  ctx.beginPath(); ctx.moveTo(c.x, c.y - 6 * U); ctx.lineTo(c.x, c.y - 20 * U);
+  ctx.strokeStyle = COLORS.base; ctx.lineWidth = 2 * U; ctx.stroke();
+  ctx.beginPath(); ctx.arc(c.x, c.y - 22 * U, 3 * U, 0, Math.PI * 2); ctx.fill();
+  ctx.font = (12 * U) + 'px "Segoe UI", sans-serif'; ctx.textAlign = 'center';
   ctx.fillStyle = COLORS.text;
-  ctx.fillText('C2 ground station', c.x, c.y + 26);
+  ctx.fillText('C2 ground station', c.x, c.y + 26 * U);
 }
 
 function drawTarget(ctx, cv, view, target) {
+  const U = window.uiScale || 1;
   const c = worldToScreen(view, cv, target.x, target.y);
-  ctx.strokeStyle = COLORS.target; ctx.lineWidth = 2;
-  ctx.beginPath(); ctx.arc(c.x, c.y, 12, 0, Math.PI * 2); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(c.x - 18, c.y); ctx.lineTo(c.x - 6, c.y); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(c.x + 6, c.y); ctx.lineTo(c.x + 18, c.y); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(c.x, c.y - 18); ctx.lineTo(c.x, c.y - 6); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(c.x, c.y + 6); ctx.lineTo(c.x, c.y + 18); ctx.stroke();
-  ctx.font = '12px "Segoe UI", sans-serif'; ctx.textAlign = 'center';
+  ctx.strokeStyle = COLORS.target; ctx.lineWidth = 2 * U;
+  ctx.beginPath(); ctx.arc(c.x, c.y, 12 * U, 0, Math.PI * 2); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(c.x - 18 * U, c.y); ctx.lineTo(c.x - 6 * U, c.y); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(c.x + 6 * U, c.y); ctx.lineTo(c.x + 18 * U, c.y); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(c.x, c.y - 18 * U); ctx.lineTo(c.x, c.y - 6 * U); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(c.x, c.y + 6 * U); ctx.lineTo(c.x, c.y + 18 * U); ctx.stroke();
+  ctx.font = (12 * U) + 'px "Segoe UI", sans-serif'; ctx.textAlign = 'center';
   ctx.fillStyle = COLORS.target;
-  ctx.fillText('mission target', c.x, c.y + 32);
+  ctx.fillText('mission target', c.x, c.y + 32 * U);
 }
 
 function droneColor(d) {
@@ -256,26 +264,27 @@ function droneColor(d) {
 }
 
 function drawDrone(ctx, cv, view, d, selected) {
+  const U = window.uiScale || 1;
   const c = worldToScreen(view, cv, d.x, d.y);
   const a = Math.atan2(d.vy, d.vx || 0.001);
   const col = droneColor(d);
 
   if (selected) {
-    ctx.beginPath(); ctx.arc(c.x, c.y, 14, 0, Math.PI * 2);
-    ctx.strokeStyle = '#e8e6da'; ctx.lineWidth = 1.5; ctx.setLineDash([3, 3]);
+    ctx.beginPath(); ctx.arc(c.x, c.y, 14 * U, 0, Math.PI * 2);
+    ctx.strokeStyle = '#e8e6da'; ctx.lineWidth = 1.5 * U; ctx.setLineDash([3 * U, 3 * U]);
     ctx.stroke(); ctx.setLineDash([]);
   }
 
   ctx.save(); ctx.translate(c.x, c.y);
   if (d.mode === 'dead') {
-    ctx.strokeStyle = col; ctx.lineWidth = 2;
-    ctx.beginPath(); ctx.moveTo(-5, -5); ctx.lineTo(5, 5); ctx.moveTo(5, -5); ctx.lineTo(-5, 5); ctx.stroke();
+    ctx.strokeStyle = col; ctx.lineWidth = 2 * U;
+    ctx.beginPath(); ctx.moveTo(-5 * U, -5 * U); ctx.lineTo(5 * U, 5 * U); ctx.moveTo(5 * U, -5 * U); ctx.lineTo(-5 * U, 5 * U); ctx.stroke();
   } else if (d.mode === 'landed') {
     ctx.fillStyle = col;
-    ctx.beginPath(); ctx.arc(0, 0, 4, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(0, 0, 4 * U, 0, Math.PI * 2); ctx.fill();
   } else {
     ctx.rotate(a);
-    ctx.beginPath(); ctx.moveTo(9, 0); ctx.lineTo(-7, 5.5); ctx.lineTo(-4, 0); ctx.lineTo(-7, -5.5); ctx.closePath();
+    ctx.beginPath(); ctx.moveTo(9 * U, 0); ctx.lineTo(-7 * U, 5.5 * U); ctx.lineTo(-4 * U, 0); ctx.lineTo(-7 * U, -5.5 * U); ctx.closePath();
     ctx.fillStyle = col; ctx.fill();
   }
   ctx.restore();
@@ -283,14 +292,14 @@ function drawDrone(ctx, cv, view, d, selected) {
   // Battery arc
   if (alive(d)) {
     ctx.beginPath();
-    ctx.arc(c.x, c.y, 11, -Math.PI / 2, -Math.PI / 2 + (d.batteryPct / 100) * Math.PI * 2);
+    ctx.arc(c.x, c.y, 11 * U, -Math.PI / 2, -Math.PI / 2 + (d.batteryPct / 100) * Math.PI * 2);
     ctx.strokeStyle = d.batteryPct > 40 ? 'rgba(127,201,94,0.5)' : d.batteryPct > 20 ? 'rgba(230,179,69,0.6)' : 'rgba(224,96,80,0.7)';
-    ctx.lineWidth = 2; ctx.stroke();
+    ctx.lineWidth = 2 * U; ctx.stroke();
   }
 
-  ctx.font = '10px "Segoe UI", sans-serif'; ctx.textAlign = 'center';
+  ctx.font = (10 * U) + 'px "Segoe UI", sans-serif'; ctx.textAlign = 'center';
   ctx.fillStyle = COLORS.textDim;
-  ctx.fillText(d.id, c.x, c.y + 24);
+  ctx.fillText(d.id, c.x, c.y + 24 * U);
 }
 
 // C2's memory of where each lost drone was last heard — ghost markers the
@@ -298,6 +307,7 @@ function drawDrone(ctx, cv, view, d, selected) {
 // on its own ghost (the common case: it froze right where it went dark), the
 // text label is dropped so it doesn't collide with the drone's ID label.
 function drawLostMarkers(ctx, cv, view, s) {
+  const U = window.uiScale || 1;
   for (const [id, e] of Object.entries(s.c2.lost)) {
     const c = worldToScreen(view, cv, e.x, e.y);
     let droneNearby = false;
@@ -305,44 +315,46 @@ function drawLostMarkers(ctx, cv, view, s) {
       const p = worldToScreen(view, cv, d.x, d.y);
       if (Math.hypot(p.x - c.x, p.y - c.y) < 26) { droneNearby = true; break; }
     }
-    ctx.beginPath(); ctx.arc(c.x, c.y, 10, 0, Math.PI * 2);
-    ctx.strokeStyle = COLORS.lost; ctx.lineWidth = 1.5; ctx.setLineDash([3, 4]);
+    ctx.beginPath(); ctx.arc(c.x, c.y, 10 * U, 0, Math.PI * 2);
+    ctx.strokeStyle = COLORS.lost; ctx.lineWidth = 1.5 * U; ctx.setLineDash([3 * U, 4 * U]);
     ctx.stroke(); ctx.setLineDash([]);
     if (!droneNearby) {
-      ctx.font = '11px "Segoe UI", sans-serif'; ctx.textAlign = 'center';
+      ctx.font = (11 * U) + 'px "Segoe UI", sans-serif'; ctx.textAlign = 'center';
       ctx.fillStyle = COLORS.lost;
-      ctx.fillText('?', c.x, c.y + 4);
+      ctx.fillText('?', c.x, c.y + 4 * U);
       ctx.fillStyle = COLORS.textDim;
-      ctx.fillText(id + ' last seen', c.x, c.y - 16);
+      ctx.fillText(id + ' last seen', c.x, c.y - 16 * U);
     }
   }
 }
 
 function drawWind(ctx, cv, s) {
+  const U = window.uiScale || 1;
   const spd = Math.hypot(s.wind.x, s.wind.y);
   if (spd < 0.5) return;
-  const cx = cv.width - 52, cy = 46, ang = Math.atan2(s.wind.y, s.wind.x);
+  const cx = cv.width - 52 * U, cy = 46 * U, ang = Math.atan2(s.wind.y, s.wind.x);
   ctx.save(); ctx.translate(cx, cy); ctx.rotate(ang);
-  ctx.strokeStyle = COLORS.text; ctx.lineWidth = 2;
-  ctx.beginPath(); ctx.moveTo(-14, 0); ctx.lineTo(12, 0); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(12, 0); ctx.lineTo(5, -5); ctx.moveTo(12, 0); ctx.lineTo(5, 5); ctx.stroke();
+  ctx.strokeStyle = COLORS.text; ctx.lineWidth = 2 * U;
+  ctx.beginPath(); ctx.moveTo(-14 * U, 0); ctx.lineTo(12 * U, 0); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(12 * U, 0); ctx.lineTo(5 * U, -5 * U); ctx.moveTo(12 * U, 0); ctx.lineTo(5 * U, 5 * U); ctx.stroke();
   ctx.restore();
-  ctx.font = '11px "Segoe UI", sans-serif'; ctx.textAlign = 'center';
+  ctx.font = (11 * U) + 'px "Segoe UI", sans-serif'; ctx.textAlign = 'center';
   ctx.fillStyle = COLORS.text;
-  ctx.fillText(spd.toFixed(0) + ' m/s wind', cx, cy + 22);
+  ctx.fillText(spd.toFixed(0) + ' m/s wind', cx, cy + 22 * U);
 }
 
 function drawScaleBar(ctx, cv, view) {
+  const U = window.uiScale || 1;
   const step = niceStep(90 / view.pxPerM);
   const px = step * view.pxPerM;
-  const x0 = 18, y0 = cv.height - 22;
-  ctx.strokeStyle = COLORS.text; ctx.lineWidth = 2;
+  const x0 = 18 * U, y0 = cv.height - 22 * U;
+  ctx.strokeStyle = COLORS.text; ctx.lineWidth = 2 * U;
   ctx.beginPath();
-  ctx.moveTo(x0, y0 - 5); ctx.lineTo(x0, y0); ctx.lineTo(x0 + px, y0); ctx.lineTo(x0 + px, y0 - 5);
+  ctx.moveTo(x0, y0 - 5 * U); ctx.lineTo(x0, y0); ctx.lineTo(x0 + px, y0); ctx.lineTo(x0 + px, y0 - 5 * U);
   ctx.stroke();
-  ctx.font = '11px "Segoe UI", sans-serif'; ctx.textAlign = 'center';
+  ctx.font = (11 * U) + 'px "Segoe UI", sans-serif'; ctx.textAlign = 'center';
   ctx.fillStyle = COLORS.text;
-  ctx.fillText(fmtDist(step), x0 + px / 2, y0 - 8);
+  ctx.fillText(fmtDist(step), x0 + px / 2, y0 - 8 * U);
 }
 
 function render(ctx, cv, view, s, status, selected, usable) {

@@ -165,6 +165,7 @@ const ROLE_COLOR_3D = {
 // --- Main render -----------------------------------------------------------
 
 function renderView3D(ctx, cv, s, status, cam, selected) {
+  const U = window.uiScale || 1;
   ctx.clearRect(0, 0, cv.width, cv.height); // transparent — host page supplies the bg
 
   // Terrain: a large SQUARE centered on the scene, so the ground fills the
@@ -279,9 +280,9 @@ function renderView3D(ctx, cv, s, status, cam, selected) {
     if (!pa || !pb) continue;
     ctx.beginPath(); ctx.moveTo(pa.x, pa.y); ctx.lineTo(pb.x, pb.y);
     if (hop.state === 'ok') { ctx.strokeStyle = '#7fc95e'; ctx.setLineDash([]); }
-    else if (hop.state === 'degraded') { ctx.strokeStyle = '#e6b345'; ctx.setLineDash([8, 5]); }
-    else { ctx.strokeStyle = '#e06050'; ctx.setLineDash([3, 6]); }
-    ctx.lineWidth = 1.5;
+    else if (hop.state === 'degraded') { ctx.strokeStyle = '#e6b345'; ctx.setLineDash([8 * U, 5 * U]); }
+    else { ctx.strokeStyle = '#e06050'; ctx.setLineDash([3 * U, 6 * U]); }
+    ctx.lineWidth = 1.5 * U;
     ctx.stroke(); ctx.setLineDash([]);
   }
 
@@ -293,10 +294,10 @@ function renderView3D(ctx, cv, s, status, cam, selected) {
       const groundAlt = terrainGroundAt(s.terrain, d.x, d.y);
       const gp = project3D(cam, cv.width, cv.height, d.x, d.y, groundAlt);
       if (!gp) continue;
-      ctx.strokeStyle = '#e06050'; ctx.lineWidth = 2;
+      ctx.strokeStyle = '#e06050'; ctx.lineWidth = 2 * U;
       ctx.beginPath();
-      ctx.moveTo(gp.x - 5, gp.y - 5); ctx.lineTo(gp.x + 5, gp.y + 5);
-      ctx.moveTo(gp.x + 5, gp.y - 5); ctx.lineTo(gp.x - 5, gp.y + 5);
+      ctx.moveTo(gp.x - 5 * U, gp.y - 5 * U); ctx.lineTo(gp.x + 5 * U, gp.y + 5 * U);
+      ctx.moveTo(gp.x + 5 * U, gp.y - 5 * U); ctx.lineTo(gp.x - 5 * U, gp.y + 5 * U);
       ctx.stroke();
       continue;
     }
@@ -308,27 +309,27 @@ function renderView3D(ctx, cv, s, status, cam, selected) {
     const dp = project3D(cam, cv.width, cv.height, d.x, d.y, altitude);
     if (!gp || !dp) continue;
 
-    ctx.strokeStyle = 'rgba(138,136,122,0.4)'; ctx.lineWidth = 1;
+    ctx.strokeStyle = 'rgba(138,136,122,0.4)'; ctx.lineWidth = 1 * U;
     ctx.beginPath(); ctx.moveTo(gp.x, gp.y); ctx.lineTo(dp.x, dp.y); ctx.stroke();
 
-    ctx.beginPath(); ctx.arc(gp.x, gp.y, 2, 0, Math.PI * 2);
+    ctx.beginPath(); ctx.arc(gp.x, gp.y, 2 * U, 0, Math.PI * 2);
     ctx.fillStyle = 'rgba(138,136,122,0.5)'; ctx.fill();
 
     const role = effRole(d);
     const col = ROLE_COLOR_3D[role] || '#a48fe0';
 
     if (d === selected) {
-      ctx.beginPath(); ctx.arc(dp.x, dp.y, 9, 0, Math.PI * 2);
-      ctx.strokeStyle = '#e8e6da'; ctx.lineWidth = 1.5; ctx.setLineDash([3, 3]);
+      ctx.beginPath(); ctx.arc(dp.x, dp.y, 9 * U, 0, Math.PI * 2);
+      ctx.strokeStyle = '#e8e6da'; ctx.lineWidth = 1.5 * U; ctx.setLineDash([3 * U, 3 * U]);
       ctx.stroke(); ctx.setLineDash([]);
     }
 
-    ctx.beginPath(); ctx.arc(dp.x, dp.y, 4.5, 0, Math.PI * 2);
+    ctx.beginPath(); ctx.arc(dp.x, dp.y, 4.5 * U, 0, Math.PI * 2);
     ctx.fillStyle = col; ctx.fill();
 
-    ctx.font = '10px "Segoe UI", sans-serif'; ctx.textAlign = 'center';
+    ctx.font = (10 * U) + 'px "Segoe UI", sans-serif'; ctx.textAlign = 'center';
     ctx.fillStyle = 'rgba(120,118,103,1)';
-    ctx.fillText(d.id, dp.x, dp.y + 14);
+    ctx.fillText(d.id, dp.x, dp.y + 14 * U);
   }
 
   // C2 mast — a tall marker (12 m, well above real gear) purely so it reads
@@ -338,13 +339,13 @@ function renderView3D(ctx, cv, s, status, cam, selected) {
     const gp = project3D(cam, cv.width, cv.height, s.base.x, s.base.y, groundAlt);
     const tp = project3D(cam, cv.width, cv.height, s.base.x, s.base.y, groundAlt + 12);
     if (gp && tp) {
-      ctx.strokeStyle = '#a5a293'; ctx.lineWidth = 2;
+      ctx.strokeStyle = '#a5a293'; ctx.lineWidth = 2 * U;
       ctx.beginPath(); ctx.moveTo(gp.x, gp.y); ctx.lineTo(tp.x, tp.y); ctx.stroke();
-      ctx.beginPath(); ctx.arc(tp.x, tp.y, 3, 0, Math.PI * 2);
+      ctx.beginPath(); ctx.arc(tp.x, tp.y, 3 * U, 0, Math.PI * 2);
       ctx.fillStyle = '#a5a293'; ctx.fill();
-      ctx.font = '12px "Segoe UI", sans-serif'; ctx.textAlign = 'center';
+      ctx.font = (12 * U) + 'px "Segoe UI", sans-serif'; ctx.textAlign = 'center';
       ctx.fillStyle = '#a5a293';
-      ctx.fillText('C2', tp.x, tp.y - 10);
+      ctx.fillText('C2', tp.x, tp.y - 10 * U);
     }
   }
 
@@ -353,15 +354,15 @@ function renderView3D(ctx, cv, s, status, cam, selected) {
     const groundAlt = terrainGroundAt(s.terrain, s.target.x, s.target.y);
     const tp = project3D(cam, cv.width, cv.height, s.target.x, s.target.y, groundAlt);
     if (tp) {
-      ctx.strokeStyle = '#6f9fe6'; ctx.lineWidth = 2;
-      ctx.beginPath(); ctx.arc(tp.x, tp.y, 12, 0, Math.PI * 2); ctx.stroke();
-      ctx.beginPath(); ctx.moveTo(tp.x - 18, tp.y); ctx.lineTo(tp.x - 6, tp.y); ctx.stroke();
-      ctx.beginPath(); ctx.moveTo(tp.x + 6, tp.y); ctx.lineTo(tp.x + 18, tp.y); ctx.stroke();
-      ctx.beginPath(); ctx.moveTo(tp.x, tp.y - 18); ctx.lineTo(tp.x, tp.y - 6); ctx.stroke();
-      ctx.beginPath(); ctx.moveTo(tp.x, tp.y + 6); ctx.lineTo(tp.x, tp.y + 18); ctx.stroke();
-      ctx.font = '12px "Segoe UI", sans-serif'; ctx.textAlign = 'center';
+      ctx.strokeStyle = '#6f9fe6'; ctx.lineWidth = 2 * U;
+      ctx.beginPath(); ctx.arc(tp.x, tp.y, 12 * U, 0, Math.PI * 2); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(tp.x - 18 * U, tp.y); ctx.lineTo(tp.x - 6 * U, tp.y); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(tp.x + 6 * U, tp.y); ctx.lineTo(tp.x + 18 * U, tp.y); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(tp.x, tp.y - 18 * U); ctx.lineTo(tp.x, tp.y - 6 * U); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(tp.x, tp.y + 6 * U); ctx.lineTo(tp.x, tp.y + 18 * U); ctx.stroke();
+      ctx.font = (12 * U) + 'px "Segoe UI", sans-serif'; ctx.textAlign = 'center';
       ctx.fillStyle = '#6f9fe6';
-      ctx.fillText('target', tp.x, tp.y + 32);
+      ctx.fillText('target', tp.x, tp.y + 32 * U);
     }
   }
 
@@ -385,18 +386,18 @@ function renderView3D(ctx, cv, s, status, cam, selected) {
         for (let k = 1; k < ring.length; k++) ctx.lineTo(ring[k].x, ring[k].y);
         ctx.closePath();
         ctx.fillStyle = 'rgba(224,96,80,0.10)'; ctx.fill();
-        ctx.strokeStyle = 'rgba(224,96,80,0.5)'; ctx.lineWidth = 1; ctx.setLineDash([4, 5]);
+        ctx.strokeStyle = 'rgba(224,96,80,0.5)'; ctx.lineWidth = 1 * U; ctx.setLineDash([4 * U, 5 * U]);
         ctx.stroke(); ctx.setLineDash([]);
       }
     }
     const base = project3D(cam, cv.width, cv.height, j.x, j.y, g);
     const top = project3D(cam, cv.width, cv.height, j.x, j.y, g + (j.altM || 15) + 10);
     if (base && top) {
-      ctx.strokeStyle = col; ctx.lineWidth = 2;
+      ctx.strokeStyle = col; ctx.lineWidth = 2 * U;
       ctx.beginPath(); ctx.moveTo(base.x, base.y); ctx.lineTo(top.x, top.y); ctx.stroke();
-      ctx.beginPath(); ctx.arc(top.x, top.y, 4, 0, Math.PI * 2); ctx.fillStyle = col; ctx.fill();
-      ctx.font = '11px "IBM Plex Mono", monospace'; ctx.textAlign = 'center'; ctx.fillStyle = col;
-      ctx.fillText((j.on === false ? 'off · ' : '') + j.erpDbm + ' dBm', top.x, top.y - 10);
+      ctx.beginPath(); ctx.arc(top.x, top.y, 4 * U, 0, Math.PI * 2); ctx.fillStyle = col; ctx.fill();
+      ctx.font = (11 * U) + 'px "IBM Plex Mono", monospace'; ctx.textAlign = 'center'; ctx.fillStyle = col;
+      ctx.fillText((j.on === false ? 'off · ' : '') + j.erpDbm + ' dBm', top.x, top.y - 10 * U);
     }
   }
 }

@@ -400,8 +400,10 @@
   resetBtn.addEventListener('click', resetSwarm);
 
   // --- Canvas interaction ---------------------------------------------------
-  let dragMode = null; // 'target' | 'pan' | 'orbit'
+  let dragMode = null; // 'target' | 'pan' | 'orbit' | 'jammer' | 'pinch'
   let lastMouse = null;
+  const pointers = new Map(); // active pointers on the canvas — 2 fingers = pinch zoom
+  let lastPinch = null;       // { dist, mid } of the previous pinch frame
 
   // --- 3D view ----------------------------------------------------------------
   let view3D = false;
@@ -419,6 +421,15 @@
 
   cv.addEventListener('pointerdown', e => {
     const p = canvasPos(e);
+    pointers.set(e.pointerId, p);
+    // Second finger down → pinch zoom takes over whatever drag was happening.
+    if (pointers.size === 2) {
+      dragMode = 'pinch'; lastPinch = null; lastMouse = null;
+      cv.setPointerCapture(e.pointerId);
+      return;
+    }
+    // Hit radii are in canvas px: scale with DPR, and widen for fingers.
+    const hitU = (window.uiScale || 1) * (e.pointerType === 'touch' ? 1.6 : 1);
     if (view3D) {
       dragMode = 'orbit'; lastMouse = p;
       cv.setPointerCapture(e.pointerId);
@@ -429,19 +440,19 @@
     let jHit = null;
     for (const j of swarm.jammers) {
       const js = worldToScreen(view, cv, j.x, j.y);
-      if (Math.hypot(p.x - js.x, p.y - js.y) < 16) { jHit = j; break; }
+      if (Math.hypot(p.x - js.x, p.y - js.y) < 16 * hitU) { jHit = j; break; }
     }
     const tScreen = worldToScreen(view, cv, swarm.target.x, swarm.target.y);
     if (jHit) {
       selectedJammer = jHit; dragMode = 'jammer'; updateJammerPanel();
-    } else if (Math.hypot(p.x - tScreen.x, p.y - tScreen.y) < 26) {
+    } else if (Math.hypot(p.x - tScreen.x, p.y - tScreen.y) < 26 * hitU) {
       dragMode = 'target';
     } else {
       // Drone hit test (screen space)
       let hit = null;
       for (const d of swarm.drones) {
         const s = worldToScreen(view, cv, d.x, d.y);
-        if (Math.hypot(p.x - s.x, p.y - s.y) < 14) { hit = d; break; }
+        if (Math.hypot(p.x - s.x, p.y - s.y) < 14 * hitU) { hit = d; break; }
       }
       if (hit) { selected = hit; dragMode = null; }
       else dragMode = 'pan';
@@ -452,6 +463,31 @@
 
   cv.addEventListener('pointermove', e => {
     const p = canvasPos(e);
+    if (pointers.has(e.pointerId)) pointers.set(e.pointerId, p);
+    if (dragMode === 'pinch') {
+      if (pointers.size < 2) return;
+      const [a, b] = [...pointers.values()];
+      const dist = Math.hypot(a.x - b.x, a.y - b.y);
+      const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+      if (lastPinch && dist > 0 && lastPinch.dist > 0) {
+        const factor = dist / lastPinch.dist;
+        if (view3D) {
+          zoomCamera3D(cam3D, 1 / factor);
+        } else {
+          // Zoom about the pinch midpoint (same math as the wheel handler)…
+          const before = screenToWorld(view, cv, mid.x, mid.y);
+          view.pxPerM = Math.min(20, Math.max(0.001, view.pxPerM * factor));
+          const after = screenToWorld(view, cv, mid.x, mid.y);
+          view.cx += before.x - after.x;
+          view.cy += before.y - after.y;
+          // …and let two fingers pan with the midpoint drift.
+          view.cx -= (mid.x - lastPinch.mid.x) / view.pxPerM;
+          view.cy -= (mid.y - lastPinch.mid.y) / view.pxPerM;
+        }
+      }
+      lastPinch = { dist, mid };
+      return;
+    }
     if (dragMode === 'orbit' && lastMouse) {
       orbitCamera3D(cam3D, p.x - lastMouse.x, p.y - lastMouse.y);
       lastMouse = p;
@@ -470,7 +506,21 @@
     lastMouse = p;
   });
 
-  cv.addEventListener('pointerup', () => { dragMode = null; lastMouse = null; });
+  cv.addEventListener('pointerup', e => {
+    pointers.delete(e.pointerId);
+    if (dragMode === 'pinch') {
+      // Keep pinching only while two fingers remain; one finger left ends it
+      // cleanly rather than falling back into a surprise pan.
+      if (pointers.size < 2) { dragMode = null; lastPinch = null; }
+    } else {
+      dragMode = null;
+    }
+    lastMouse = null;
+  });
+  cv.addEventListener('pointercancel', e => {
+    pointers.delete(e.pointerId);
+    dragMode = null; lastPinch = null; lastMouse = null;
+  });
 
   cv.addEventListener('wheel', e => {
     e.preventDefault();
@@ -555,8 +605,14 @@
   // --- Loop -------------------------------------------------------------------
   function resize() {
     const r = cv.parentElement.getBoundingClientRect();
-    cv.width = Math.floor(r.width);
-    cv.height = Math.floor(r.height);
+    // Back the canvas at native device resolution (capped at 3×) so phones get
+    // a crisp image instead of an upscaled blur. All fixed screen-px drawing
+    // (fonts, line widths, markers) multiplies by window.uiScale to stay the
+    // same physical size; world content scales through fitView/pxPerM.
+    const dpr = Math.min(3, Math.max(1, window.devicePixelRatio || 1));
+    window.uiScale = dpr;
+    cv.width = Math.floor(r.width * dpr);
+    cv.height = Math.floor(r.height * dpr);
     if (swarm && !viewFitted) fitView(); // first real layout after a hidden/zero-size load
   }
   window.addEventListener('resize', resize);
