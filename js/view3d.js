@@ -36,9 +36,11 @@ function v3norm(a) {
 // and vertical walls split into a lit pair and a shadowed pair.
 const LIGHT_DIR = v3norm({ x: -0.5, y: -0.3, z: 0.8 });
 
-// Max buildings drawn in the 3D view at once (nearest-to-view are kept) so a
-// dense city of thousands stays smooth. The 2D map draws all of them.
-const BUILDING_RENDER_CAP = 420;
+// Max buildings drawn in the 3D view at once so a dense city of thousands
+// stays smooth. Selection is by prominence-over-distance (below), not a
+// blind stride — a real city must keep its recognizable fabric and skyline.
+// The 2D map draws all of them.
+const BUILDING_RENDER_CAP = 900;
 
 // --- Camera ------------------------------------------------------------
 
@@ -80,6 +82,16 @@ function project3D(cam, cvW, cvH, x, y, z) {
     x: cvW / 2 + (v3dot(v, right) * f) / depth,
     y: cvH / 2 - (v3dot(v, upv) * f) / depth,
     depth,
+  };
+}
+
+// Where the orbit rig's eye sits in world space — must mirror project3D.
+function cameraEye(cam) {
+  const cp = Math.cos(cam.pitch);
+  return {
+    x: cam.cx + cam.dist * cp * Math.cos(cam.yaw),
+    y: cam.cy + cam.dist * cp * Math.sin(cam.yaw),
+    z: cam.dist * Math.sin(cam.pitch),
   };
 }
 
@@ -134,6 +146,84 @@ function wallAlpha(lambert) {
   return Math.max(0.35, Math.min(0.92, 0.72 + lambert * 0.22));
 }
 
+// --- Real-map ground texture (OSM mode) --------------------------------------
+// The flat ground under a georeferenced mission is drawn as the actual map:
+// tiles composited once into an offscreen texture (reusing tiles.js's cache),
+// then perspective-mapped quad-by-quad in the painter pass. Rebuilds only
+// when the scene square changes, or briefly re-tries while tiles stream in.
+const GROUND_TEX_PX = 1280;
+let groundTex = { key: '', canvas: null, complete: false, builtAt: 0 };
+
+function buildGroundTexture(anchor, x0, y0, x1, y1, nowMs) {
+  if (typeof tileGet !== 'function' || typeof document === 'undefined') return null;
+  const spanX = x1 - x0, spanY = y1 - y0;
+  const key = [Math.round(x0), Math.round(y0), Math.round(x1), anchor.lat.toFixed(5), anchor.lon.toFixed(5)].join('|');
+  if (groundTex.key === key && (groundTex.complete || nowMs - groundTex.builtAt < 600)) return groundTex.canvas;
+  const pxPerM = GROUND_TEX_PX / spanX;
+  const z = tileZoomFor(anchor.lat, pxPerM);
+  const tTL = (ll => tileFromLatLon(ll.lat, ll.lon, z))(tileLocalToLatLon(anchor, x0, y0));
+  const tBR = (ll => tileFromLatLon(ll.lat, ll.lon, z))(tileLocalToLatLon(anchor, x1, y1));
+  if (Math.floor(tBR.x) - Math.floor(tTL.x) > 20 || Math.floor(tBR.y) - Math.floor(tTL.y) > 20) return null;
+  const cvs = groundTex.key === key && groundTex.canvas ? groundTex.canvas : document.createElement('canvas');
+  cvs.width = GROUND_TEX_PX; cvs.height = Math.round(GROUND_TEX_PX * spanY / spanX);
+  const g = cvs.getContext('2d');
+  g.fillStyle = '#131410'; g.fillRect(0, 0, cvs.width, cvs.height);
+  let complete = true;
+  for (let tx = Math.floor(tTL.x); tx <= Math.floor(tBR.x); tx++) {
+    for (let ty = Math.floor(tTL.y); ty <= Math.floor(tBR.y); ty++) {
+      const e = tileGet(z, tx, ty);
+      if (!e || !e.ok) { if (e && !e.failed) complete = false; continue; }
+      const nw = tileToLatLon(tx, ty, z), se = tileToLatLon(tx + 1, ty + 1, z);
+      const lNW = tileLatLonToLocal(anchor, nw.lat, nw.lon);
+      const lSE = tileLatLonToLocal(anchor, se.lat, se.lon);
+      g.drawImage(e.img, (lNW.x - x0) * pxPerM, (lNW.y - y0) * pxPerM,
+        (lSE.x - lNW.x) * pxPerM, (lSE.y - lNW.y) * pxPerM);
+    }
+  }
+  g.fillStyle = 'rgba(19,20,16,0.30)'; g.fillRect(0, 0, cvs.width, cvs.height); // same veil as the 2D map
+  groundTex = { key, canvas: cvs, complete, builtAt: nowMs };
+  return cvs;
+}
+
+// Affine-textured triangle: maps texture points (u0..2, v0..2) onto screen
+// points (x0..2, y0..2). Canvas has no perspective transform, but per-quad
+// affine on an already-subdivided ground is visually indistinguishable at
+// our camera pitches. The clip is grown a hair so seams don't show.
+function texTri(ctx, img, x0, y0, x1, y1, x2, y2, u0, v0, u1, v1, u2, v2) {
+  const den = (u1 - u0) * (v2 - v0) - (u2 - u0) * (v1 - v0);
+  if (!den) return;
+  const a = ((x1 - x0) * (v2 - v0) - (x2 - x0) * (v1 - v0)) / den;
+  const b = ((x2 - x0) * (u1 - u0) - (x1 - x0) * (u2 - u0)) / den;
+  const c = ((y1 - y0) * (v2 - v0) - (y2 - y0) * (v1 - v0)) / den;
+  const e = ((y2 - y0) * (u1 - u0) - (y1 - y0) * (u2 - u0)) / den;
+  const cx = (x0 + x1 + x2) / 3, cy = (y0 + y1 + y2) / 3;
+  const grow = 1 + 1.5 / Math.max(8, Math.hypot(x1 - x0, y1 - y0));
+  ctx.save();
+  ctx.beginPath();
+  ctx.moveTo(cx + (x0 - cx) * grow, cy + (y0 - cy) * grow);
+  ctx.lineTo(cx + (x1 - cx) * grow, cy + (y1 - cy) * grow);
+  ctx.lineTo(cx + (x2 - cx) * grow, cy + (y2 - cy) * grow);
+  ctx.closePath();
+  ctx.clip();
+  ctx.transform(a, c, b, e, x0 - a * u0 - b * v0, y0 - c * u0 - e * v0);
+  ctx.drawImage(img, 0, 0);
+  ctx.restore();
+}
+
+// Textured ground quad: same projection/depth rules as addQuad, but carries
+// its texture rect through the painter sort instead of a flat fill.
+function addTexQuad(items, cam, cv, p1, p2, p3, p4, img, u0, v0, u1, v1) {
+  const ctr = { x: (p1.x + p2.x + p3.x + p4.x) / 4, y: (p1.y + p2.y + p3.y + p4.y) / 4, z: (p1.z + p2.z + p3.z + p4.z) / 4 };
+  const cd = project3D(cam, cv.width, cv.height, ctr.x, ctr.y, ctr.z);
+  if (!cd) return;
+  const s1 = project3D(cam, cv.width, cv.height, p1.x, p1.y, p1.z);
+  const s2 = project3D(cam, cv.width, cv.height, p2.x, p2.y, p2.z);
+  const s3 = project3D(cam, cv.width, cv.height, p3.x, p3.y, p3.z);
+  const s4 = project3D(cam, cv.width, cv.height, p4.x, p4.y, p4.z);
+  if (!s1 || !s2 || !s3 || !s4) return;
+  items.push({ pts: [s1, s2, s3, s4], depth: cd.depth, tex: { img, u0, v0, u1, v1 } });
+}
+
 // Projects a quad's centroid (for depth-sort) and all 4 corners (for the
 // actual polygon). Drops the whole quad if any of those five projections
 // fails — a partially-behind-camera quad isn't worth drawing wrong.
@@ -177,9 +267,16 @@ function renderView3D(ctx, cv, s, status, cam, selected) {
   const x0 = cxm - half, x1 = cxm + half, y0 = cym - half, y1 = cym + half;
   const spanX = x1 - x0, spanY = y1 - y0;
 
+  // Georeferenced flat ground renders as the real map (tile texture); the
+  // texture itself carries the detail, so its mesh only needs to be fine
+  // enough that per-quad affine mapping approximates the perspective.
+  const gTex = (s.terrain.geoAnchor && !s.terrain.groundAmpM)
+    ? buildGroundTexture(s.terrain.geoAnchor, x0, y0, x1, y1, performance.now()) : null;
+  const texPxPerM = gTex ? gTex.width / spanX : 0;
+
   // Flat/urban ground has no relief to resolve — a coarse mesh is enough and
   // far cheaper; only terrain with actual hills gets the fine grid.
-  const gridN = s.terrain.groundAmpM > 0 ? 48 : 24;
+  const gridN = s.terrain.groundAmpM > 0 ? 48 : (gTex ? 18 : 24);
   const stride = gridN + 1;
 
   // Sample every grid corner exactly once per call and cache it — each
@@ -209,6 +306,11 @@ function renderView3D(ctx, cv, s, status, cam, selected) {
       const p3 = { x: xR, y: yB, z: h11 };
       const p4 = { x: xL, y: yB, z: h01 };
 
+      if (gTex) {
+        addTexQuad(items, cam, cv, p1, p2, p3, p4, gTex,
+          (xL - x0) * texPxPerM, (yT - y0) * texPxPerM, (xR - x0) * texPxPerM, (yB - y0) * texPxPerM);
+        continue;
+      }
       const normal = v3norm(v3cross(v3sub(p2, p1), v3sub(p4, p1)));
       const lambert = v3dot(normal, LIGHT_DIR);
       const avgH = (h00 + h10 + h01 + h11) / 4;
@@ -224,9 +326,23 @@ function renderView3D(ctx, cv, s, status, cam, selected) {
   // BUILDING_RENDER_CAP, so the whole box stays populated but bounded. No
   // per-frame sort or allocation. The 2D map still draws every building.
   const allB = s.terrain.buildings || [];
-  const bStride = allB.length > BUILDING_RENDER_CAP ? Math.ceil(allB.length / BUILDING_RENDER_CAP) : 1;
-  for (let bi = 0; bi < allB.length; bi += bStride) {
-    const b = allB[bi];
+  let drawB = allB;
+  if (allB.length > BUILDING_RENDER_CAP) {
+    // Prominence over distance²: near buildings and tall/large ones win, so a
+    // real city keeps its street fabric up close AND its skyline in the
+    // distance — a blind every-k-th stride guts both.
+    const eye = cameraEye(cam);
+    const scored = [];
+    for (const b of allB) {
+      if (b.x < x0 || b.x > x1 || b.y < y0 || b.y > y1) continue; // cull before ranking
+      const dx = b.x - eye.x, dy = b.y - eye.y;
+      scored.push({ b, sc: (b.w * b.d + 2 * b.heightM * b.heightM) / (dx * dx + dy * dy + eye.z * eye.z) });
+    }
+    scored.sort((a, b) => b.sc - a.sc);
+    scored.length = Math.min(scored.length, BUILDING_RENDER_CAP);
+    drawB = scored.map(e => e.b);
+  }
+  for (const b of drawB) {
     if (b.x < x0 || b.x > x1 || b.y < y0 || b.y > y1) continue; // outside the rendered ground
     const base = terrainGroundAt(s.terrain, b.x, b.y);
     const top = base + b.heightM;
@@ -255,6 +371,12 @@ function renderView3D(ctx, cv, s, status, cam, selected) {
   // Painter's algorithm: farthest first, nearest last.
   items.sort((a, b) => b.depth - a.depth);
   for (const it of items) {
+    if (it.tex) {
+      const t = it.tex, P = it.pts;
+      texTri(ctx, t.img, P[0].x, P[0].y, P[1].x, P[1].y, P[2].x, P[2].y, t.u0, t.v0, t.u1, t.v0, t.u1, t.v1);
+      texTri(ctx, t.img, P[0].x, P[0].y, P[2].x, P[2].y, P[3].x, P[3].y, t.u0, t.v0, t.u1, t.v1, t.u0, t.v1);
+      continue;
+    }
     ctx.beginPath();
     ctx.moveTo(it.pts[0].x, it.pts[0].y);
     ctx.lineTo(it.pts[1].x, it.pts[1].y);

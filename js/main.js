@@ -698,8 +698,9 @@
 
     killBtn.disabled = !(selected && alive(selected));
     killBtn.textContent = selected ? 'Kill ' + selected.id : 'Kill drone (select one)';
-    // Basemap credit is legally required whenever the real map is on screen.
-    mapAttrib.style.display = (!view3D && swarm.terrain.geoAnchor) ? 'block' : 'none';
+    // Basemap credit is legally required whenever the real map is on screen —
+    // and it now shows in BOTH views (3D drapes the tiles onto the ground).
+    mapAttrib.style.display = swarm.terrain.geoAnchor ? 'block' : 'none';
   }
 
   const mapAttrib = el('mapAttrib');
