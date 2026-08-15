@@ -252,6 +252,10 @@ contributors (ODbL).
 
 1. **Kill a relay** (click it, then *Kill*) — watch C2 lose telemetry,
    re-plan, and the chain heal.
+1. **Drag the operator** (the C2 marker) — the chain re-plans live and pulls
+   extra relays as you walk away from the flock. Teleport it far beyond radio
+   range and you'll honestly lose contact: nobody in the flock can know where
+   C2 went without a link to hear it from.
 2. **Switch radio to LoRa EU868** — kilometres of range, but the duty cycle
    stretches command rounds to ~40 s and the swarm gets visibly sluggish.
 3. **Set environment to Urban** — usable range collapses to 20%, links

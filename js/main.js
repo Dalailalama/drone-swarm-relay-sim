@@ -124,6 +124,7 @@
       corridor: corridorChk.checked, broadcast: bcastChk.checked, coverage: coverageChk.checked,
       cityDensity: +cityDensityRange.value, cityHeight: +cityHeightRange.value,
       seed: swarm._terrainSeed,
+      base: { x: swarm.base.x, y: swarm.base.y },
       osm: (terrainSel.value === 'osm' && osmArea)
         ? { lat: osmArea.lat, lon: osmArea.lon, radiusM: osmArea.radiusM, name: osmArea.name }
         : undefined,
@@ -157,6 +158,7 @@
     resetSwarm();
     forcedSeed = null;
     const applyMissionOverrides = () => {
+      if (sc.base) { swarm.base.x = sc.base.x; swarm.base.y = sc.base.y; }
       if (sc.target) { swarm.target.x = sc.target.x; swarm.target.y = sc.target.y; }
       swarm.jammers.length = 0;
       if (sc.jammers) sc.jammers.forEach(j => swarm.jammers.push({ id: 'JX-load' + Math.round(j.x) + '_' + Math.round(j.y), ...j }));
@@ -528,14 +530,14 @@
     // Second finger down → pinch zoom takes over whatever drag was happening.
     if (pointers.size === 2) {
       dragMode = 'pinch'; lastPinch = null; lastMouse = null;
-      cv.setPointerCapture(e.pointerId);
+      try { cv.setPointerCapture(e.pointerId); } catch (_) { /* pointer already gone */ }
       return;
     }
     // Hit radii are in canvas px: scale with DPR, and widen for fingers.
     const hitU = (window.uiScale || 1) * (e.pointerType === 'touch' ? 1.6 : 1);
     if (view3D) {
       dragMode = 'orbit'; lastMouse = p;
-      cv.setPointerCapture(e.pointerId);
+      try { cv.setPointerCapture(e.pointerId); } catch (_) { /* pointer already gone */ }
       return;
     }
     const w = screenToWorld(view, cv, p.x, p.y);
@@ -546,10 +548,13 @@
       if (Math.hypot(p.x - js.x, p.y - js.y) < 16 * hitU) { jHit = j; break; }
     }
     const tScreen = worldToScreen(view, cv, swarm.target.x, swarm.target.y);
+    const bScreen = worldToScreen(view, cv, swarm.base.x, swarm.base.y);
     if (jHit) {
       selectedJammer = jHit; dragMode = 'jammer'; updateJammerPanel();
     } else if (Math.hypot(p.x - tScreen.x, p.y - tScreen.y) < 26 * hitU) {
       dragMode = 'target';
+    } else if (Math.hypot(p.x - bScreen.x, p.y - bScreen.y) < 26 * hitU) {
+      dragMode = 'base'; // the operator moves too — chain re-plans live
     } else {
       // Drone hit test (screen space)
       let hit = null;
@@ -599,6 +604,9 @@
     if (dragMode === 'target') {
       const w = screenToWorld(view, cv, p.x, p.y);
       swarm.target.x = w.x; swarm.target.y = w.y;
+    } else if (dragMode === 'base') {
+      const w = screenToWorld(view, cv, p.x, p.y);
+      swarm.base.x = w.x; swarm.base.y = w.y;
     } else if (dragMode === 'jammer' && selectedJammer) {
       const w = screenToWorld(view, cv, p.x, p.y);
       selectedJammer.x = w.x; selectedJammer.y = w.y;
