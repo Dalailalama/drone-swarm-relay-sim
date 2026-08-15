@@ -84,6 +84,17 @@ main { flex: 1; display: flex; min-height: 0; }
 #map { display: block; width: 100%; height: 100%; cursor: grab; touch-action: none; }
 #map:active { cursor: grabbing; }
 
+#mapAttrib {
+  position: absolute;
+  right: 8px; bottom: 8px;
+  background: rgba(26, 27, 22, 0.78);
+  border-radius: 2px;
+  padding: 2px 8px;
+  font-size: 10px;
+  color: var(--dim);
+}
+#mapAttrib a { color: var(--dim-2); }
+
 #legend {
   position: absolute;
   top: 10px; left: 12px;

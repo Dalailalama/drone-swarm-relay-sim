@@ -76,6 +76,9 @@
       const bs = osmArea.buildings.map(b => ({ x: b.x + cx, y: b.y + cy, w: b.w, d: b.d, heightM: b.heightM, estimated: b.estimated }));
       osmArea.cleared = osmClearZones(bs, [{ x: 0, y: 0, rM: 70 }, { x: tX, y: tY, rM: 60 }]);
       terrain = indexBuildings({ seed: terrainSeed, groundAmpM: 0, groundScaleM: 1, buildings: bs });
+      // Pin the fetched area's geographic center to the corridor midpoint —
+      // this is what lets the renderer draw the real map under the mission.
+      terrain.geoAnchor = { lat: osmArea.lat, lon: osmArea.lon, x: cx, y: cy };
     } else {
       terrain = makeTerrain(terrainSel.value === 'osm' ? 'flat' : terrainSel.value, {
         distM: Math.hypot(tX, tY), altM: +altRange.value,
@@ -695,8 +698,11 @@
 
     killBtn.disabled = !(selected && alive(selected));
     killBtn.textContent = selected ? 'Kill ' + selected.id : 'Kill drone (select one)';
+    // Basemap credit is legally required whenever the real map is on screen.
+    mapAttrib.style.display = (!view3D && swarm.terrain.geoAnchor) ? 'block' : 'none';
   }
 
+  const mapAttrib = el('mapAttrib');
   fleetBody.addEventListener('click', e => {
     const row = e.target.closest('.fleet-row');
     if (row) selected = swarm.drones.find(d => d.id === row.dataset.id) || null;

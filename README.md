@@ -230,6 +230,15 @@ API and drops the swarm over them — same LOS physics, same routing, same 3D
 view, but over the city you actually care about: your neighbourhood, a
 disaster-response sector, an inspection corridor.
 
+And it's map-first: with a real area loaded, the 2D canvas stops being an
+abstract dark plane and renders the *actual map* — genuine OSM cartography
+(CARTO dark tiles), streets and parks and block layout — with the swarm,
+relay chain, coverage and interference drawn on top, the way a professional
+ground-control station does it. Pan and zoom (mouse or pinch) work on the
+map itself. The map is the picture; the fetched buildings remain the
+physics — a river on the tile does not block radio, and we don't pretend it
+does.
+
 Honesty notes, because the physics depends on them: OSM building heights are
 used when surveyed, estimated from floor counts when not (the UI shows the
 split); a small staging clearing is carved at the GCS and objective; very

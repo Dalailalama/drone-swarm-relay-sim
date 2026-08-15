@@ -359,7 +359,8 @@ function drawScaleBar(ctx, cv, view) {
 
 function render(ctx, cv, view, s, status, selected, usable) {
   ctx.clearRect(0, 0, cv.width, cv.height);
-  drawGrid(ctx, cv, view);
+  // Georeferenced mission → the real map is the ground; otherwise the grid.
+  if (!drawTiles(ctx, cv, view, s.terrain.geoAnchor)) drawGrid(ctx, cv, view);
   drawTerrain(ctx, cv, view, s);
   drawCoverage(ctx, cv, view, s);
   drawJammers(ctx, cv, view, s, selected, s.time);
