@@ -220,6 +220,25 @@ the mixed-terrain low-altitude scenario goes from a chain that breaks in
 steady state to 95% uptime with the flock on target, using one extra
 densified relay along a path 1.1× the straight-line distance.)
 
+## Real places (OpenStreetMap import)
+
+Terrain → **Real area (OpenStreetMap)** turns the sim loose on actual
+geography: type a place name ("Connaught Place Delhi", "Shibuya") or paste
+`lat, lon` from any map app, pick a radius, and Load. The sim fetches the
+real building footprints and heights for that spot from the public Overpass
+API and drops the swarm over them — same LOS physics, same routing, same 3D
+view, but over the city you actually care about: your neighbourhood, a
+disaster-response sector, an inspection corridor.
+
+Honesty notes, because the physics depends on them: OSM building heights are
+used when surveyed, estimated from floor counts when not (the UI shows the
+split); a small staging clearing is carved at the GCS and objective; very
+dense fetches keep the largest 6,000 buildings (the UI says when); ground
+under a real city is flat in this version. Needs internet (this is the one
+feature that does); saved scenarios store the coordinates and re-fetch on
+load. Building data © [OpenStreetMap](https://www.openstreetmap.org/copyright)
+contributors (ODbL).
+
 ## Things to try
 
 1. **Kill a relay** (click it, then *Kill*) — watch C2 lose telemetry,

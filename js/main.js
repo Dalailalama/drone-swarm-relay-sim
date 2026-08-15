@@ -67,11 +67,22 @@
     missionSeq += 1;
     const tX = dist, tY = -dist * 0.25;
     const terrainSeed = forcedSeed != null ? forcedSeed : 42 + missionSeq;
-    const terrain = makeTerrain(terrainSel.value, {
-      distM: Math.hypot(tX, tY), altM: +altRange.value,
-      targetX: tX, targetY: tY, seed: terrainSeed,
-      density: +cityDensityRange.value / 100, heightScale: +cityHeightRange.value / 100,
-    });
+    let terrain;
+    if (terrainSel.value === 'osm' && osmArea) {
+      // Real place: buildings are centered on the corridor midpoint (like the
+      // procedural city), plus small cleared staging areas at the GCS and the
+      // objective — you'd stage in a lot, not on somebody's roof.
+      const cx = tX / 2, cy = tY / 2;
+      const bs = osmArea.buildings.map(b => ({ x: b.x + cx, y: b.y + cy, w: b.w, d: b.d, heightM: b.heightM, estimated: b.estimated }));
+      osmArea.cleared = osmClearZones(bs, [{ x: 0, y: 0, rM: 70 }, { x: tX, y: tY, rM: 60 }]);
+      terrain = indexBuildings({ seed: terrainSeed, groundAmpM: 0, groundScaleM: 1, buildings: bs });
+    } else {
+      terrain = makeTerrain(terrainSel.value === 'osm' ? 'flat' : terrainSel.value, {
+        distM: Math.hypot(tX, tY), altM: +altRange.value,
+        targetX: tX, targetY: tY, seed: terrainSeed,
+        density: +cityDensityRange.value / 100, heightScale: +cityHeightRange.value / 100,
+      });
+    }
     swarm = makeSwarm({
       terrain,
       count: +countRange.value,
@@ -94,6 +105,7 @@
     cam3D = view3D ? makeCamera3D(swarm) : null;
     if (typeof updateJammerPanel === 'function') updateJammerPanel();
     if (typeof updateCityLabels === 'function') updateCityLabels();
+    updateOsmNote();
     fitView();
     logEvent(swarm, 'Swarm launched: ' + swarm.drones.length + ' drones on ' + radio.name, 'info');
   }
@@ -109,6 +121,9 @@
       corridor: corridorChk.checked, broadcast: bcastChk.checked, coverage: coverageChk.checked,
       cityDensity: +cityDensityRange.value, cityHeight: +cityHeightRange.value,
       seed: swarm._terrainSeed,
+      osm: (terrainSel.value === 'osm' && osmArea)
+        ? { lat: osmArea.lat, lon: osmArea.lon, radiusM: osmArea.radiusM, name: osmArea.name }
+        : undefined,
       target: { x: swarm.target.x, y: swarm.target.y },
       jammers: swarm.jammers.map(j => ({ x: j.x, y: j.y, erpDbm: j.erpDbm, band: j.band, altM: j.altM, on: j.on })),
     };
@@ -129,14 +144,30 @@
     if (sc.corridor != null) corridorChk.checked = sc.corridor;
     if (sc.broadcast != null) bcastChk.checked = sc.broadcast;
     if (sc.coverage != null) coverageChk.checked = sc.coverage;
+    if (sc.osm) {
+      osmPlace.value = sc.osm.name || (sc.osm.lat + ', ' + sc.osm.lon);
+      if (sc.osm.radiusM) { osmRadiusRange.value = sc.osm.radiusM; osmRadiusOut.textContent = fmtDist(sc.osm.radiusM); }
+    }
+    updateOsmRow();
     updateSpecCard(); updateAirframeInfo(); applySpacing();
     forcedSeed = sc.seed != null ? sc.seed : null; // exact same map if the file has a seed
     resetSwarm();
     forcedSeed = null;
-    if (sc.target) { swarm.target.x = sc.target.x; swarm.target.y = sc.target.y; }
-    if (sc.jammers) sc.jammers.forEach(j => swarm.jammers.push({ id: 'JX-load' + Math.round(j.x) + '_' + Math.round(j.y), ...j }));
-    fitView(); updateJammerPanel(); if (typeof updateCityLabels === 'function') updateCityLabels();
+    const applyMissionOverrides = () => {
+      if (sc.target) { swarm.target.x = sc.target.x; swarm.target.y = sc.target.y; }
+      swarm.jammers.length = 0;
+      if (sc.jammers) sc.jammers.forEach(j => swarm.jammers.push({ id: 'JX-load' + Math.round(j.x) + '_' + Math.round(j.y), ...j }));
+      fitView(); updateJammerPanel(); if (typeof updateCityLabels === 'function') updateCityLabels();
+    };
+    applyMissionOverrides();
     logEvent(swarm, 'Scenario loaded', 'info');
+    // A real-area scenario stores coordinates, not buildings: refetch from OSM
+    // (needs internet), then re-pin the mission on the refreshed swarm.
+    if (sc.terrain === 'osm' && sc.osm) {
+      loadOsmArea(sc.osm.lat, sc.osm.lon, sc.osm.radiusM || 1200, sc.osm.name || null)
+        .then(applyMissionOverrides)
+        .catch(() => {}); // the note already explains the failure
+    }
   }
 
   let viewFitted = false;
@@ -236,7 +267,7 @@
     if (swarm) swarm.corridorRouting = corridorChk.checked;
     corridorOut.textContent = corridorChk.checked ? 'transits follow the chain' : 'straight-line transits';
   });
-  terrainSel.addEventListener('change', resetSwarm);
+  terrainSel.addEventListener('change', () => { updateOsmRow(); resetSwarm(); });
 
   // --- City density / height sliders — regenerate the buildings live (same
   // seed, same mission) so you can dial from a couple of buildings to a dense
@@ -261,7 +292,7 @@
   }
   window.updateCityLabels = updateCityLabels;
   function regenerateCity() {
-    if (!swarm) return;
+    if (!swarm || terrainSel.value === 'osm') return; // real buildings aren't dialable
     const tX = swarm.target.x, tY = swarm.target.y;
     swarm.terrain = makeTerrain(terrainSel.value, {
       distM: Math.hypot(tX, tY), altM: swarm.altitudeM,
@@ -272,6 +303,75 @@
   }
   cityDensityRange.addEventListener('input', regenerateCity);
   cityHeightRange.addEventListener('input', regenerateCity);
+
+  // --- Real areas from OpenStreetMap ------------------------------------------
+  // The place box + Load button fetch actual building footprints and heights
+  // for anywhere on Earth (js/osm.js) and drop the swarm over them.
+  const osmRow = el('osmRow'), osmPlace = el('osmPlace'), osmNote = el('osmNote');
+  const osmRadiusRange = el('osmRadiusRange'), osmRadiusOut = el('osmRadiusOut');
+  const osmLoadBtn = el('osmLoadBtn');
+  let osmArea = null; // { lat, lon, radiusM, name, buildings (centered on 0,0), dropped, cleared }
+  const OSM_INTRO = osmNote.innerHTML;
+
+  function updateOsmRow() {
+    const isOsm = terrainSel.value === 'osm';
+    osmRow.style.display = isOsm ? 'block' : 'none';
+    // Real buildings aren't dialable — hide the procedural-city sliders.
+    cityDensityRange.closest('.ctl-row').style.display = isOsm ? 'none' : '';
+    cityHeightRange.closest('.ctl-row').style.display = isOsm ? 'none' : '';
+  }
+
+  function updateOsmNote() {
+    if (terrainSel.value !== 'osm') return;
+    if (!osmArea) { osmNote.innerHTML = OSM_INTRO; return; }
+    const n = osmArea.buildings.length;
+    const nEst = osmArea.buildings.reduce((a, b) => a + (b.estimated ? 1 : 0), 0);
+    const pctMeasured = n ? Math.round(100 * (1 - nEst / n)) : 0;
+    osmNote.innerHTML = '<b>' + osmArea.name + '</b>: <b>' + n.toLocaleString() + '</b> real buildings' +
+      (pctMeasured > 0
+        ? ' (' + pctMeasured + '% have surveyed heights; the rest are estimated from floor counts)'
+        : ' (heights estimated from floor counts — OSM rarely has them surveyed)') +
+      (osmArea.dropped ? ' &middot; kept the ' + OSM_MAX_BUILDINGS.toLocaleString() + ' largest of ' + (n + osmArea.dropped).toLocaleString() : '') +
+      (osmArea.cleared ? ' &middot; ' + osmArea.cleared + ' cleared for the staging areas' : '') +
+      '. Ground is flat in this version. Buildings &copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener" style="color:var(--accent)">OpenStreetMap</a> contributors (ODbL).';
+  }
+
+  async function loadOsmArea(lat, lon, radiusM, name) {
+    osmLoadBtn.disabled = true; osmLoadBtn.textContent = 'Loading…';
+    osmNote.innerHTML = 'Fetching real buildings from OpenStreetMap&hellip;';
+    try {
+      const area = await osmFetchArea(lat, lon, radiusM);
+      if (!area.buildings.length) throw new Error('No mapped buildings there — try a bigger radius or a denser place');
+      area.name = name || (lat.toFixed(4) + ', ' + lon.toFixed(4));
+      osmArea = area;
+      resetSwarm();
+      logEvent(swarm, 'Real area loaded: ' + area.name + ' — ' + area.buildings.length + ' buildings', 'info');
+    } catch (e) {
+      osmNote.innerHTML = '<b style="color:var(--lost)">' + e.message + '</b> &middot; This feature needs internet, and the free OSM servers are sometimes busy — try again in a minute.';
+      throw e;
+    } finally {
+      osmLoadBtn.disabled = false; osmLoadBtn.textContent = 'Load real area';
+    }
+  }
+
+  osmLoadBtn.addEventListener('click', async () => {
+    const txt = osmPlace.value.trim();
+    if (!txt) { osmNote.innerHTML = 'Type a place name or paste <b>lat, lon</b> first.'; return; }
+    const r = +osmRadiusRange.value;
+    let ll = osmParseLatLon(txt), name = null;
+    if (!ll) {
+      osmNote.innerHTML = 'Finding the place&hellip;';
+      try {
+        const g = await osmGeocode(txt);
+        ll = g; name = (g.name || txt).split(',').slice(0, 2).join(',');
+      } catch (e) {
+        osmNote.innerHTML = '<b style="color:var(--lost)">' + e.message + '</b> &middot; Check the spelling, or paste coordinates as <b>lat, lon</b>.';
+        return;
+      }
+    }
+    await loadOsmArea(ll.lat, ll.lon, r, name).catch(() => {}); // note shows the error
+  });
+  osmRadiusRange.addEventListener('input', () => { osmRadiusOut.textContent = fmtDist(+osmRadiusRange.value); });
 
   coverageChk.addEventListener('change', () => {
     if (swarm) swarm.showCoverage = coverageChk.checked;
@@ -660,6 +760,7 @@
   // --- Boot -------------------------------------------------------------------
   resize();
   countOut.textContent = countRange.value;
+  updateOsmRow();
   updateAirframeInfo();
   updateSpecCard();
   applySpacing();

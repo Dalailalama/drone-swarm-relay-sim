@@ -93,7 +93,23 @@
           <option value="rolling">Rolling hills (fractal)</option>
           <option value="urban">Urban district</option>
           <option value="mixed">Hills + city</option>
+          <option value="osm">Real area (OpenStreetMap)</option>
         </select>
+      </div>
+      <div id="osmRow" style="display:none;">
+        <div class="ctl-row">
+          <label for="osmPlace">Place</label>
+          <input type="text" id="osmPlace" placeholder="City name or lat, lon" style="flex:1; background:var(--bg); color:var(--text-2); border:1px solid var(--line); border-radius:2px; padding:6px 8px; font:12px var(--mono);">
+        </div>
+        <div class="ctl-row">
+          <label for="osmRadiusRange">Area radius</label>
+          <input type="range" id="osmRadiusRange" min="400" max="2500" value="1200" step="100">
+          <output id="osmRadiusOut">1.2 km</output>
+        </div>
+        <div class="btn-row">
+          <button id="osmLoadBtn">Load real area</button>
+        </div>
+        <div id="osmNote" class="af-info">Type a real place (<b>Connaught Place Delhi</b>, <b>Shibuya</b>) or paste <b>lat, lon</b> from any map app, then Load. The swarm flies over that place's actual buildings.</div>
       </div>
       <div class="ctl-row">
         <label for="cityDensityRange">Building density</label>
@@ -213,6 +229,7 @@
 
 <script src="js/radios.js"></script>
 <script src="js/terrain.js"></script>
+<script src="js/osm.js"></script>
 <script src="js/airframes.js"></script>
 <script src="js/net.js"></script>
 <script src="js/swarm.js"></script>
