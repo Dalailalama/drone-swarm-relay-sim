@@ -119,11 +119,12 @@
       relayAirframe: AIRFRAMES.find(a => a.id === relayAirframeSel.value) || null,
       relayRadio: RADIOS.find(r => r.id === relayRadioSel.value) || null,
     });
-    selected = null; selectedJammer = null;
+    selected = null; selectedJammer = null; selectedZone = null;
     swarm._terrainSeed = terrainSeed;
     swarm.showCoverage = coverageChk.checked;
     cam3D = view3D ? makeCamera3D(swarm) : null;
     if (typeof updateJammerPanel === 'function') updateJammerPanel();
+    if (typeof updateZonePanel === 'function') updateZonePanel();
     if (typeof updateCityLabels === 'function') updateCityLabels();
     updateOsmNote();
     fitView();
@@ -149,6 +150,10 @@
         : undefined,
       target: { x: swarm.target.x, y: swarm.target.y },
       jammers: swarm.jammers.map(j => ({ x: j.x, y: j.y, erpDbm: j.erpDbm, band: j.band, altM: j.altM, on: j.on })),
+      gpsZones: (swarm.gpsZones || []).map(z => ({ x: z.x, y: z.y, rM: z.rM, on: z.on })),
+      spectrumAgility: !!swarm.spectrumAgility,
+      videoBackhaul: !!swarm.videoOn,
+      videoKbps: swarm.videoKbps || 0,
     };
   }
   function applyScenario(sc) {
@@ -185,7 +190,10 @@
       if (sc.target) { swarm.target.x = sc.target.x; swarm.target.y = sc.target.y; }
       swarm.jammers.length = 0;
       if (sc.jammers) sc.jammers.forEach(j => swarm.jammers.push({ id: 'JX-load' + Math.round(j.x) + '_' + Math.round(j.y), ...j }));
-      fitView(); updateJammerPanel(); if (typeof updateCityLabels === 'function') updateCityLabels();
+      swarm.gpsZones.length = 0;
+      if (sc.gpsZones) sc.gpsZones.forEach(z => swarm.gpsZones.push({ id: 'GZ-load' + Math.round(z.x) + '_' + Math.round(z.y), ...z }));
+      if (sc.spectrumAgility != null && 'spectrumAgility' in swarm) swarm.spectrumAgility = !!sc.spectrumAgility;
+      fitView(); updateJammerPanel(); updateZonePanel(); if (typeof updateCityLabels === 'function') updateCityLabels();
     };
     applyMissionOverrides();
     logEvent(swarm, 'Scenario loaded', 'info');
@@ -515,6 +523,56 @@
     updateJammerPanel();
   });
 
+  // --- GPS-denied zones (navigation denial, not RF denial) --------------------
+  const addGpsZoneBtn = el('addGpsZoneBtn');
+  const zonePanel = el('zonePanel'), zoneBtnRow = el('zoneBtnRow');
+  const zoneToggleBtn = el('zoneToggleBtn'), zoneRemoveBtn = el('zoneRemoveBtn');
+  let selectedZone = null;
+
+  function updateZonePanel() {
+    const z = selectedZone;
+    const count = swarm.gpsZones ? swarm.gpsZones.length : 0;
+    zoneBtnRow.style.display = z ? 'flex' : 'none';
+    if (z) {
+      zoneToggleBtn.textContent = z.on === false ? 'Turn on' : 'Turn off';
+      zonePanel.style.display = 'block';
+      zonePanel.innerHTML = 'Editing <b>' + z.id + '</b> — a <b>' + fmtDist(z.rM) +
+        '</b> radius where GNSS is denied. Drones cross it on dead reckoning: their reported positions drift, and C2 plans around that.';
+    } else {
+      zonePanel.style.display = count ? 'block' : 'none';
+      if (count) zonePanel.innerHTML = '<b>' + count + '</b> GPS-denied zone' + (count === 1 ? '' : 's') +
+        '. Click one on the map to move or toggle it.';
+    }
+  }
+  window.updateZonePanel = updateZonePanel;
+
+  addGpsZoneBtn.addEventListener('click', () => {
+    // First outage lands astride the mid-corridor (where the chain lives);
+    // later ones stagger along it so multiple zones don't stack.
+    const n = swarm.gpsZones.length;
+    const B = swarm.base, T = swarm.target;
+    const L = Math.hypot(T.x - B.x, T.y - B.y) || 1;
+    const ux = (T.x - B.x) / L, uy = (T.y - B.y) / L, px = -uy, py = ux;
+    const f = 0.5 + ((n % 3) - 1) * 0.16;
+    const off = Math.floor(n / 3) * 300 * ((n % 2) ? -1 : 1);
+    const rM = Math.max(150, Math.min(800, usable() * 0.5));
+    const z = makeGpsZone(B.x + ux * L * f + px * off, B.y + uy * L * f + py * off, rM);
+    swarm.gpsZones.push(z);
+    selectedJammer = null; selectedZone = z;
+    updateZonePanel(); updateJammerPanel();
+  });
+  zoneToggleBtn.addEventListener('click', () => {
+    if (!selectedZone) return;
+    selectedZone.on = selectedZone.on === false;
+    updateZonePanel();
+  });
+  zoneRemoveBtn.addEventListener('click', () => {
+    if (!selectedZone) return;
+    swarm.gpsZones = swarm.gpsZones.filter(z => z !== selectedZone);
+    selectedZone = swarm.gpsZones[swarm.gpsZones.length - 1] || null;
+    updateZonePanel();
+  });
+
   // --- Scenario save/load + after-action report ------------------------------
   function download(text, name, mime) {
     const a = document.createElement('a');
@@ -592,10 +650,17 @@
       const js = worldToScreen(view, cv, j.x, j.y);
       if (Math.hypot(p.x - js.x, p.y - js.y) < 16 * hitU) { jHit = j; break; }
     }
+    let zHit = null;
+    for (const z of (swarm.gpsZones || [])) {
+      const zs = worldToScreen(view, cv, z.x, z.y);
+      if (Math.hypot(p.x - zs.x, p.y - zs.y) < 16 * hitU) { zHit = z; break; }
+    }
     const tScreen = worldToScreen(view, cv, swarm.target.x, swarm.target.y);
     const bScreen = worldToScreen(view, cv, swarm.base.x, swarm.base.y);
     if (jHit) {
-      selectedJammer = jHit; dragMode = 'jammer'; updateJammerPanel();
+      selectedJammer = jHit; selectedZone = null; dragMode = 'jammer'; updateJammerPanel(); updateZonePanel();
+    } else if (zHit) {
+      selectedZone = zHit; selectedJammer = null; dragMode = 'zone'; updateZonePanel(); updateJammerPanel();
     } else if (Math.hypot(p.x - tScreen.x, p.y - tScreen.y) < 26 * hitU) {
       dragMode = 'target';
     } else if (Math.hypot(p.x - bScreen.x, p.y - bScreen.y) < 26 * hitU) {
@@ -655,6 +720,9 @@
     } else if (dragMode === 'jammer' && selectedJammer) {
       const w = screenToWorld(view, cv, p.x, p.y);
       selectedJammer.x = w.x; selectedJammer.y = w.y;
+    } else if (dragMode === 'zone' && selectedZone) {
+      const w = screenToWorld(view, cv, p.x, p.y);
+      selectedZone.x = w.x; selectedZone.y = w.y;
     } else if (dragMode === 'pan' && lastMouse) {
       view.cx -= (p.x - lastMouse.x) / view.pxPerM;
       view.cy -= (p.y - lastMouse.y) / view.pxPerM;

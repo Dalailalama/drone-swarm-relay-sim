@@ -126,6 +126,9 @@ function makeDrone(x, y, target, rng, airframe, radio, cls) {
     af: airframe || null,
     radio: radio || null,
     cls: cls || 'mission',   // 'relay' = relay-wing unit, 'mission' = tactical
+    // Navigation belief: where the drone THINKS it is (GPS-denied drift, js/gpsnav.js)
+    belX: x, belY: y, dvx: 0, dvy: 0,
+    gpsDenied: false,
     // Onboard state — the drone's own little world
     order: { role: 'mission', slot: -1, k: 0, upstream: 'C2', target: { x: target.x, y: target.y } }, // preflight upload
     upMarginEma: 30, // smoothed RSSI margin to the upstream neighbor, dB
@@ -170,6 +173,7 @@ function makeSwarm(opts) {
       ? relayClassIndices(opts.count, opts.relayWing) : [],
     terrain: opts.terrain || makeTerrain('flat'),
     jammers: opts.jammers ? opts.jammers.map(j => ({ ...j })) : [],
+    gpsZones: opts.gpsZones ? opts.gpsZones.map(z => ({ ...z })) : [],
     covCellM: Math.max(20, usableRangeM(opts.radio, opts.envFactor) * 0.15),
     showCoverage: true,
     broadcastC2: opts.broadcastC2 !== false,
@@ -239,7 +243,12 @@ function insideObstacle(s, pos) {
 }
 
 function badPlan(s, pos) {
-  return covState(s, pos.x, pos.y) === 'bad' || insideObstacle(s, pos) || inDenialZone(s, pos);
+  // GPS-denied areas count as bad PLANS even though the RF there is fine:
+  // relay geometry is built from telemetry positions, and a drone deep in
+  // denial reports garbage positions — so C2 places slots outside active
+  // zones unless nowhere better exists (covAdjust handles the "unless").
+  return covState(s, pos.x, pos.y) === 'bad' || insideObstacle(s, pos)
+    || inDenialZone(s, pos) || gpsDeniedAt(s.gpsZones, pos.x, pos.y);
 }
 
 // If a planned position is a bad plan (measured-bad cell or known terrain),
@@ -295,7 +304,8 @@ function planChain(s) {
   const minY = Math.min(s.base.y, s.target.y) - pad, maxY = Math.max(s.base.y, s.target.y) + pad;
   const nx = Math.max(2, Math.ceil((maxX - minX) / cell)), ny = Math.max(2, Math.ceil((maxY - minY) / cell));
   const pos = (ix, iy) => ({ x: minX + (ix + 0.5) * cell, y: minY + (iy + 0.5) * cell });
-  const blocked = p => insideObstacle(s, p) || covState(s, p.x, p.y) === 'bad' || inDenialZone(s, p);
+  const blocked = p => insideObstacle(s, p) || covState(s, p.x, p.y) === 'bad'
+    || inDenialZone(s, p) || gpsDeniedAt(s.gpsZones, p.x, p.y);
   const idx = (ix, iy) => iy * nx + ix;
 
   const sIx = Math.min(nx - 1, Math.max(0, Math.floor((s.base.x - minX) / cell)));
@@ -930,9 +940,14 @@ function droneComms(s, d) {
   // upload) and are cleared once handed to the radio.
   if (s.time >= d.nextTlm) {
     d.nextTlm = s.time + tlmIntervalSec(s);
+    // Report what the drone's navigation believes — GNSS denial poisons the
+    // position C2 sees, which is exactly how a real jammed airframe lies.
+    const repX = d.gpsDenied ? d.belX : d.x + GPS_SIGMA_M * gaussian(s.net.rng);
+    const repY = d.gpsDenied ? d.belY : d.y + GPS_SIGMA_M * gaussian(s.net.rng);
     sendPacket(s, 'tlm', d.id, 'C2', {
-      x: d.x + GPS_SIGMA_M * gaussian(s.net.rng),
-      y: d.y + GPS_SIGMA_M * gaussian(s.net.rng),
+      x: repX,
+      y: repY,
+      gps: d.gpsDenied ? 'denied' : 'ok',   // drones DO know when they've lost the fix
       battery: d.batteryPct, role: effRole(d),
       cls: d.cls,   // fleet class rides along so C2 assigns roles by capability
       reject: d.rejectedRole || null,
@@ -1091,6 +1106,30 @@ function stepDrone(s, d, dt) {
     if (d.tethered && d.upMarginEma > plannedHopMarginDb(s, d) - TETHER.slowBelowPlanDb + 1) d.tethered = false;
   }
 
+  // GNSS: is the truth position inside a denial zone? Healthy → belief snaps
+  // to truth. Denied → dead reckoning (js/gpsnav.js): belief integrates
+  // airspeed + drift, so the drone steers by where it THINKS it is.
+  const wasDenied = d.gpsDenied;
+  d.gpsDenied = gpsDeniedAt(s.gpsZones, d.x, d.y);
+  if (!wasDenied && d.gpsDenied) logEvent(s, d.id + ' GNSS degraded — dead reckoning', 'warn');
+  if (wasDenied && !d.gpsDenied) {
+    const err = Math.hypot(d.belX - d.x, d.belY - d.y);
+    if (err > 25) {
+      logEvent(s, d.id + ' GNSS reacquired — nav error had grown to ' + err.toFixed(0) + ' m', 'warn');
+      s.maxNavErrM = Math.max(s.maxNavErrM || 0, err);
+    }
+  }
+  const bel = stepBelief(d, dt, s.net.rng, d.gpsDenied);
+  d.belX = bel.belX; d.belY = bel.belY; d.dvx = bel.dvx; d.dvy = bel.dvy;
+  // Instrumentation (sim-side observables, like batteryPct): whether this
+  // drone ever lost GNSS, and the worst truth-vs-belief error seen.
+  if (d.gpsDenied) {
+    d.hadDenied = true;
+    const err = Math.hypot(d.belX - d.x, d.belY - d.y);
+    if (err > (d.peakNavErr || 0)) d.peakNavErr = err;
+    s.maxNavErrM = Math.max(s.maxNavErrM || 0, err);
+  }
+
   const goal = tetherGoal(s, d, corridorGoal(s, d, goalFor(s, d)));
   // Cache the vetted goal so external mode ships exactly this one instead of
   // recomputing goalFor (which advances orbitPhase as a side effect — a
@@ -1110,7 +1149,11 @@ function stepDrone(s, d, dt) {
     const eva = Math.hypot(d.vx - s.wind.x, d.vy - s.wind.y);
     updateBattery(s, d, dt, Math.min(eva, maxV));
   } else {
-    const dx = goal.x - d.x, dy = goal.y - d.y;
+    // Steer by the navigation BELIEF, not truth: without GNSS the drone aims
+    // at where it thinks the goal is and misses by exactly its nav error.
+    // The proximity/obstacle pushes below stay on truth — those are onboard
+    // sensors, not satellite receivers.
+    const dx = goal.x - d.belX, dy = goal.y - d.belY;
     const dGoal = Math.hypot(dx, dy);
 
     const brake = (maxV * maxV) / (2 * DRONE.accelMs2);
@@ -1317,6 +1360,11 @@ function afterActionReport(s) {
   L.push('- **Objective distance:** ' + fmtDist(D) + ' from the ground station');
   L.push('- **Altitude:** ' + s.altitudeM + ' m AGL' + (Math.hypot(s.wind.x, s.wind.y) > 0.5 ? ' · wind ' + Math.hypot(s.wind.x, s.wind.y).toFixed(0) + ' m/s' : ''));
   L.push('- **Interference sources:** ' + activeJam + (activeJam ? ' active (RF denial in play)' : ' (clean spectrum)'));
+  const gpsZ = (s.gpsZones || []).filter(z => z.on !== false).length;
+  if (gpsZ) {
+    L.push('- **GPS denial:** ' + gpsZ + ' zone' + (gpsZ === 1 ? '' : 's') +
+      (s.maxNavErrM ? ' · worst observed nav error ' + s.maxNavErrM.toFixed(0) + ' m' : ''));
+  }
   L.push('');
   L.push('## Outcome');
   L.push('- **Link to objective:** ' + (st.connected ? '**CONNECTED** end-to-end' : '**not connected** at report time'));

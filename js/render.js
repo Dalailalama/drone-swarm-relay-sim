@@ -24,6 +24,7 @@ const COLORS = {
   textDim: '#8a887a',
   packetCmd: '#6f9fe6',
   packetTlm: '#e8e6da',
+  gpsZone: '#a48fe0',
 };
 
 function worldToScreen(view, cv, x, y) {
@@ -177,6 +178,38 @@ function drawJammers(ctx, cv, view, s, selected, timeSec) {
     ctx.font = (11 * U) + 'px "IBM Plex Mono", monospace'; ctx.textAlign = 'center';
     ctx.fillStyle = j.on === false ? '#8a887a' : '#e06050';
     ctx.fillText((j.on === false ? 'off · ' : '') + j.erpDbm + ' dBm', c.x, c.y + 22 * U);
+  }
+}
+
+// GPS-denied zones: violet hatched circles. RF inside may be fine — what's
+// denied here is POSITION, so the swarm flies through on dead reckoning and
+// its reported positions go unreliable.
+function drawGpsZones(ctx, cv, view, s, timeSec) {
+  if (!s.gpsZones || !s.gpsZones.length) return;
+  const U = window.uiScale || 1;
+  for (const z of s.gpsZones) {
+    const c = worldToScreen(view, cv, z.x, z.y);
+    const r = z.rM * view.pxPerM;
+    if (z.on !== false && r > 3 && r < 8000) {
+      ctx.beginPath(); ctx.arc(c.x, c.y, r, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(164,143,224,0.08)'; ctx.fill();
+      ctx.strokeStyle = 'rgba(164,143,224,0.55)'; ctx.lineWidth = 1 * U;
+      ctx.setLineDash([8 * U, 4 * U]); ctx.stroke(); ctx.setLineDash([]);
+    }
+    // satellite-crossed-out glyph
+    ctx.beginPath(); ctx.arc(c.x, c.y, 5 * U, 0, Math.PI * 2);
+    ctx.fillStyle = z.on === false ? '#8a887a' : COLORS.gpsZone; ctx.fill();
+    if (z.on !== false) {
+      for (let k = 0; k < 2; k++) {
+        const ph = ((timeSec * 0.35 + k / 2) % 1);
+        ctx.beginPath(); ctx.arc(c.x, c.y, (8 + ph * 18) * U, 0, Math.PI * 2);
+        ctx.strokeStyle = 'rgba(164,143,224,' + (0.45 * (1 - ph)).toFixed(2) + ')';
+        ctx.lineWidth = 1.2 * U; ctx.stroke();
+      }
+    }
+    ctx.font = (11 * U) + 'px "IBM Plex Mono", monospace'; ctx.textAlign = 'center';
+    ctx.fillStyle = z.on === false ? '#8a887a' : COLORS.gpsZone;
+    ctx.fillText((z.on === false ? 'off · ' : '') + 'GPS DENIED', c.x, c.y + 20 * U);
   }
 }
 
@@ -374,6 +407,7 @@ function render(ctx, cv, view, s, status, selected, usable) {
   drawTerrain(ctx, cv, view, s);
   drawCoverage(ctx, cv, view, s);
   drawJammers(ctx, cv, view, s, selected, s.time);
+  drawGpsZones(ctx, cv, view, s, s.time);
 
   // Coverage rings around every transmitting chain node
   for (const node of status.nodes) {

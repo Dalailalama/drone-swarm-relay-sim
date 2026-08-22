@@ -22,8 +22,8 @@ function loadSim(files) {
 
 // Everything pure enough to run under Node, in dependency order.
 const CORE = [
-  'radios.js', 'airframes.js', 'fleet.js', 'net.js', 'terrain.js',
-  'swarm.js', 'render.js',
+  'radios.js', 'airframes.js', 'fleet.js', 'gpsnav.js', 'net.js',
+  'terrain.js', 'swarm.js', 'render.js',
 ];
 
 function loadCore(extra) {
