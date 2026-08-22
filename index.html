@@ -247,6 +247,24 @@
     </section>
 
     <section>
+      <h2>Calibration (sim &harr; real)</h2>
+      <div id="calIntro" class="af-info">Walk two real radios apart logging RSSI vs distance (any CSV: <b>dist</b>,<b>rssi</b> or <b>x</b>,<b>y</b>[,<b>z</b>],<b>rssi</b>). The fit re-derives this simulator's path-loss exponent from YOUR field data and issues a calibrated radio preset + validation report.</div>
+      <div class="ctl-row">
+        <select id="calRadioSel" style="flex:1;"></select>
+      </div>
+      <div class="btn-row">
+        <input type="file" id="calFileInput" accept=".csv,text/csv,text/plain" style="display:none;">
+        <button id="calPickBtn">Choose CSV&hellip;</button>
+        <button id="calFitBtn" disabled>Fit &amp; validate</button>
+      </div>
+      <div id="calResult" class="af-info" style="display:none;"></div>
+      <div class="btn-row" id="calOutRow" style="display:none;">
+        <button id="calReportBtn">Validation report (.md)</button>
+        <button id="calPresetBtn">Calibrated preset (.json)</button>
+      </div>
+    </section>
+
+    <section>
       <h2>External vehicles (SITL)</h2>
       <div class="ctl-row">
         <label for="wsUrl">Bridge URL</label>
@@ -292,6 +310,7 @@
 <script src="js/fleet.js"></script>
 <script src="js/gpsnav.js"></script>
 <script src="js/scenarios.js"></script>
+<script src="js/calibrate.js"></script>
 <script src="js/net.js"></script>
 <script src="js/swarm.js"></script>
 <script src="js/render.js"></script>

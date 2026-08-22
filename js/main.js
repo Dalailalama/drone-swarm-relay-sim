@@ -669,6 +669,60 @@
   el('reportBtn').addEventListener('click', () => {
     download(afterActionReport(swarm), 'after-action-T' + Math.floor(swarm.time) + 's.md', 'text/markdown');
   });
+
+  // --- Sim-to-real calibration loop --------------------------------------------
+  const calRadioSel = el('calRadioSel'), calPickBtn = el('calPickBtn');
+  const calFileInput = el('calFileInput'), calFitBtn = el('calFitBtn');
+  const calResult = el('calResult'), calOutRow = el('calOutRow');
+  RADIOS.forEach(r => {
+    const o = document.createElement('option');
+    o.value = r.id; o.textContent = r.name;
+    calRadioSel.appendChild(o);
+  });
+  let calText = null, calReport = null, calPresetJson = null;
+
+  calPickBtn.addEventListener('click', () => calFileInput.click());
+  calFileInput.addEventListener('change', ev => {
+    const file = ev.target.files[0]; if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      calText = String(reader.result || '');
+      calFitBtn.disabled = !calText;
+      if (calText) calResult.textContent = file.name + ' loaded (' + file.size + ' bytes) — ready to fit.';
+      calOutRow.style.display = 'none';
+    };
+    reader.readAsText(file);
+    ev.target.value = '';
+  });
+  calFitBtn.addEventListener('click', () => {
+    if (!calText) return;
+    const basePreset = RADIOS.find(r => r.id === calRadioSel.value) || radio;
+    const parsed = parseFlightLogCsv(calText);
+    const fit = fitPathLoss(parsed.samples);
+    if (!fit.ok) {
+      calResult.innerHTML = '<b style="color:var(--lost)">Fit failed:</b> ' + fit.reason +
+        (parsed.notes.length ? '<br>' + parsed.notes.join('<br>') : '');
+      return;
+    }
+    const cal = calibratePreset(fit, basePreset);
+    calReport = validationReportMd(fit, basePreset, parsed.samples, parsed);
+    calPresetJson = JSON.stringify(cal, null, 1);
+    const dsN = pathLossExponent(basePreset);
+    const drift = fit.n - dsN;
+    calResult.innerHTML =
+      '<b>Fit complete</b> — ' + fit.count + ' samples<br>' +
+      'measured n = <b>' + fit.n.toFixed(2) + '</b> (datasheet model: ' + dsN.toFixed(2) +
+        ', drift ' + (drift >= 0 ? '+' : '') + drift.toFixed(2) + ')<br>' +
+      'RMSE <b>' + fit.rmse.toFixed(1) + ' dB</b> · R² <b>' + fit.r2.toFixed(3) + '</b><br>' +
+      're-derived rated range: <b>' + fmtDist(cal.rangeLosM) + '</b> (was ' + fmtDist(basePreset.rangeLosM) + ')';
+    calOutRow.style.display = 'flex';
+  });
+  el('calReportBtn').addEventListener('click', () => {
+    if (calReport) download(calReport, 'rf-calibration-report.md', 'text/markdown');
+  });
+  el('calPresetBtn').addEventListener('click', () => {
+    if (calPresetJson) download(calPresetJson, 'radio-preset-calibrated.json', 'application/json');
+  });
   speedBtns.forEach(b => b.addEventListener('click', () => {
     const v = b.dataset.speed;
     if (v === 'pause') { paused = !paused; b.textContent = paused ? 'Resume' : 'Pause'; }
