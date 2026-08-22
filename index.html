@@ -67,6 +67,23 @@
       <select id="airframeSel"></select>
       <div id="airframeInfo" class="af-info"></div>
       <div class="ctl-row">
+        <label for="heteroChk">Mixed fleet</label>
+        <input type="checkbox" id="heteroChk" style="flex:0 0 auto; width:auto; accent-color:var(--accent);">
+        <output style="flex:1; text-align:left; color:var(--dim);">endurance relay wing + tactical drones</output>
+      </div>
+      <div id="heteroRow" style="display:none;">
+        <div class="ctl-row">
+          <label for="wingRange">Relay wing</label>
+          <input type="range" id="wingRange" min="1" max="15" value="4" step="1">
+          <output id="wingOut">4</output>
+        </div>
+        <div style="height:8px"></div>
+        <select id="relayAirframeSel"></select>
+        <div style="height:8px"></div>
+        <select id="relayRadioSel"></select>
+        <div id="heteroInfo" class="af-info"></div>
+      </div>
+      <div class="ctl-row">
         <label for="distRange">Target distance</label>
         <input type="range" id="distRange" min="10" max="220" value="100" step="1">
         <output id="distOut">—</output>
@@ -233,6 +250,7 @@
 <script src="js/osm.js"></script>
 <script src="js/tiles.js"></script>
 <script src="js/airframes.js"></script>
+<script src="js/fleet.js"></script>
 <script src="js/net.js"></script>
 <script src="js/swarm.js"></script>
 <script src="js/render.js"></script>

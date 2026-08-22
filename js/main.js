@@ -8,6 +8,9 @@
   const el = id => document.getElementById(id);
   const radioSel = el('radioSel'), envSel = el('envSel');
   const airframeSel = el('airframeSel'), airframeInfo = el('airframeInfo');
+  const heteroChk = el('heteroChk'), heteroRow = el('heteroRow'), heteroInfo = el('heteroInfo');
+  const wingRange = el('wingRange'), wingOut = el('wingOut');
+  const relayAirframeSel = el('relayAirframeSel'), relayRadioSel = el('relayRadioSel');
   const countRange = el('countRange'), countOut = el('countOut');
   const distRange = el('distRange'), distOut = el('distOut');
   const altRange = el('altRange'), altOut = el('altOut');
@@ -42,7 +45,17 @@
     const o = document.createElement('option');
     o.value = a.id; o.textContent = a.name;
     airframeSel.appendChild(o);
+    const r = o.cloneNode(); r.textContent = a.name;
+    relayAirframeSel.appendChild(r);
   });
+  RADIOS.forEach(r0 => {
+    const o = document.createElement('option');
+    o.value = r0.id; o.textContent = r0.name;
+    relayRadioSel.appendChild(o);
+  });
+  // Default relay wing: the endurance airframe on the long-range radio.
+  relayAirframeSel.value = 'x8';
+  relayRadioSel.value = 'rfd900x';
 
   // --- State ----------------------------------------------------------------
   let radio = RADIOS[0];
@@ -101,6 +114,10 @@
       radio, envFactor: env.factor,
       shadowSigmaDb: env.shadowSigmaDb,
       seed: terrainSeed,
+      // Heterogeneous fleet: the relay wing flies its own airframe + radio.
+      relayWing: heteroChk.checked ? +wingRange.value : 0,
+      relayAirframe: AIRFRAMES.find(a => a.id === relayAirframeSel.value) || null,
+      relayRadio: RADIOS.find(r => r.id === relayRadioSel.value) || null,
     });
     selected = null; selectedJammer = null;
     swarm._terrainSeed = terrainSeed;
@@ -118,6 +135,8 @@
   function currentScenario() {
     return {
       version: 1, radio: radio.id, env: env.id, airframe: airframe.id,
+      hetero: heteroChk.checked,
+      relayWing: +wingRange.value, relayAirframe: relayAirframeSel.value, relayRadio: relayRadioSel.value,
       count: +countRange.value, altitudeM: +altRange.value, spacingPct: +spacingRange.value,
       distancePct: +distRange.value, terrain: terrainSel.value,
       windSpd: +windSpdRange.value, windDir: +windDirRange.value,
@@ -136,6 +155,10 @@
     if (sc.radio) { radioSel.value = sc.radio; radio = RADIOS.find(r => r.id === sc.radio) || radio; }
     if (sc.env) { envSel.value = sc.env; env = ENVIRONMENTS.find(e => e.id === sc.env) || env; }
     if (sc.airframe) { airframeSel.value = sc.airframe; airframe = AIRFRAMES.find(a => a.id === sc.airframe) || airframe; }
+    if (sc.hetero != null) { heteroChk.checked = !!sc.hetero; updateHeteroRow(); }
+    if (sc.relayWing != null) wingRange.value = sc.relayWing;
+    if (sc.relayAirframe) relayAirframeSel.value = sc.relayAirframe;
+    if (sc.relayRadio) relayRadioSel.value = sc.relayRadio;
     if (sc.count != null) { countRange.value = sc.count; countOut.textContent = sc.count; }
     if (sc.altitudeM != null) { altRange.value = sc.altitudeM; altOut.textContent = sc.altitudeM + ' m'; }
     if (sc.spacingPct != null) spacingRange.value = sc.spacingPct;
@@ -235,6 +258,28 @@
       Math.round(hoverEnduranceMin(airframe)) + ' min</b> &middot; ' + airframe.maxSpeedMs + ' m/s<br>' +
       airframe.note;
   }
+
+  // --- Mixed fleet (heterogeneous swarms) -------------------------------------
+  function updateHeteroRow() {
+    heteroRow.style.display = heteroChk.checked ? 'block' : 'none';
+    if (!heteroChk.checked) return;
+    const waf = AIRFRAMES.find(a => a.id === relayAirframeSel.value);
+    const wr = RADIOS.find(r => r.id === relayRadioSel.value);
+    wingOut.textContent = wingRange.value;
+    if (waf && wr) {
+      const bandOk = bandCompatible(wr, radio);
+      heteroInfo.innerHTML =
+        '<b>Relay wing:</b> ' + waf.name + ' (~' + Math.round(hoverEnduranceMin(waf)) +
+        ' min hover) on <b>' + wr.name + '</b> — usable ' + fmtDist(usableRangeM(wr, env.factor)) +
+        (bandOk ? '' : ' <b style="color:var(--lost)">· different band from the tactical radio: the wing can bridge C2↔wing and wing↔wing, but tactical drones only link to their own kind</b>') +
+        '.<br><b>Tactical:</b> ' + airframe.name + ' on ' + radio.name + ' — usable ' + fmtDist(usableRangeM(radio, env.factor)) + '.';
+    }
+  }
+  heteroChk.addEventListener('change', () => { updateHeteroRow(); resetSwarm(); });
+  wingRange.addEventListener('input', () => { wingOut.textContent = wingRange.value; });
+  wingRange.addEventListener('change', () => { if (heteroChk.checked) resetSwarm(); });
+  relayAirframeSel.addEventListener('change', () => { updateHeteroRow(); if (heteroChk.checked) resetSwarm(); });
+  relayRadioSel.addEventListener('change', () => { updateHeteroRow(); if (heteroChk.checked) resetSwarm(); });
   distRange.addEventListener('input', () => {
     const dist = +distRange.value / 100 * defaultTargetDist();
     distOut.textContent = fmtDist(dist);
@@ -694,7 +739,7 @@
       const sel = d === selected ? ' style="outline:1px solid #e2e8f0;"' : '';
       const role = effRole(d);
       return '<div class="fleet-row role-' + role + '"' + sel + ' data-id="' + d.id + '">' +
-        '<span class="dot"></span><span class="fid">' + d.id + '</span>' +
+        '<span class="dot"></span><span class="fid">' + d.id + (d.cls === 'relay' ? ' ◆' : '') + '</span>' +
         '<span class="frole">' + role + '</span>' +
         '<span class="fbat"><span class="fbat-fill" style="width:' + d.batteryPct.toFixed(0) + '%"></span></span>' +
         '<span class="fpct">' + d.batteryPct.toFixed(0) + '%</span></div>';
@@ -776,6 +821,7 @@
   resize();
   countOut.textContent = countRange.value;
   updateOsmRow();
+  updateHeteroRow();
   updateAirframeInfo();
   updateSpecCard();
   applySpacing();

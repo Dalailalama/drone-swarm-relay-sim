@@ -69,8 +69,11 @@ const TETHER = {
   minStopDb: 0.5,
 };
 
-function plannedHopMarginDb(s) {
-  return linkMarginDb(s.radio, s.envFactor, usableRangeM(s.radio, s.envFactor) * s.deployFrac);
+function plannedHopMarginDb(s, d) {
+  // Per-drone: a heterogeneous fleet plans each unit's hop against the radio
+  // THAT UNIT flies — the tactical edge is shorter-legged than the wing.
+  const r = (d && droneRadio(d)) || s.radio;
+  return linkMarginDb(r, s.envFactor, usableRangeM(r, s.envFactor) * s.deployFrac);
 }
 
 const COVERAGE = {
@@ -97,13 +100,32 @@ function cmdIntervalSec(s, nDrones) {
 
 let droneSeq = 0;
 
-function makeDrone(x, y, target, rng, airframe) {
+// Per-node hardware. Heterogeneous missions give each drone its own airframe
+// and radio (js/fleet.js); homogeneous missions leave both null and everything
+// falls back to the swarm-wide preset — identical behaviour to before.
+function afOf(s, d) { return d.af || s.airframe; }
+function droneRadio(d) { return d.radio || null; }
+
+// The radio a node transmits on. C2 is assumed to carry a matched companion
+// unit for every radio type in the field (two dongles on the mast is exactly
+// what real mixed-fleet ground stations do), so C2 pairs with whatever the
+// far end flies.
+function nodeRadioOf(s, id) {
+  if (id === 'C2') return null;
+  const d = nodePos(s, id);
+  return d ? droneRadio(d) : null;
+}
+
+function makeDrone(x, y, target, rng, airframe, radio, cls) {
   droneSeq += 1;
   return {
     id: 'DR-' + droneSeq,
     x, y, vx: 0, vy: 0,
     energyWh: usableWh(airframe),
     batteryPct: 100,
+    af: airframe || null,
+    radio: radio || null,
+    cls: cls || 'mission',   // 'relay' = relay-wing unit, 'mission' = tactical
     // Onboard state — the drone's own little world
     order: { role: 'mission', slot: -1, k: 0, upstream: 'C2', target: { x: target.x, y: target.y } }, // preflight upload
     upMarginEma: 30, // smoothed RSSI margin to the upstream neighbor, dB
@@ -140,6 +162,12 @@ function makeSwarm(opts) {
     radio: opts.radio,
     envFactor: opts.envFactor,
     shadowSigmaDb: opts.shadowSigmaDb || 0,
+    // Heterogeneous fleet (js/fleet.js): relayWing drones carry the heavy
+    // radio + endurance airframe and hold the chain; the rest fly tactical.
+    relayAirframe: opts.relayAirframe || null,
+    relayRadio: opts.relayRadio || null,
+    relayIdx: (opts.relayWing > 0 && opts.relayAirframe && opts.relayRadio)
+      ? relayClassIndices(opts.count, opts.relayWing) : [],
     terrain: opts.terrain || makeTerrain('flat'),
     jammers: opts.jammers ? opts.jammers.map(j => ({ ...j })) : [],
     covCellM: Math.max(20, usableRangeM(opts.radio, opts.envFactor) * 0.15),
@@ -147,11 +175,16 @@ function makeSwarm(opts) {
     broadcastC2: opts.broadcastC2 !== false,
     captureOn: !!opts.captureOn,
     net: makeNet(opts.seed || 42),
-    c2: { known: {}, relays: [], inbox: [], nextCmd: 0, wasFresh: {}, lost: {}, rescuers: [], unfit: {}, cov: new Map(), slotCache: {}, bcastSeq: 0 },
+    c2: { known: {}, relays: [], inbox: [], nextCmd: 0, wasFresh: {}, lost: {}, rescuers: [], unfit: {}, cov: new Map(), slotCache: {}, bcastSeq: 0, everHeard: new Set() },
   };
   for (let i = 0; i < opts.count; i++) {
     const a = (i / opts.count) * Math.PI * 2;
-    s.drones.push(makeDrone(s.base.x + 60 * Math.cos(a), s.base.y + 60 * Math.sin(a), s.target, s.net.rng, opts.airframe));
+    const isWing = s.relayIdx.includes(i);
+    s.drones.push(makeDrone(
+      s.base.x + 60 * Math.cos(a), s.base.y + 60 * Math.sin(a), s.target, s.net.rng,
+      isWing && opts.relayAirframe ? opts.relayAirframe : opts.airframe,
+      isWing && opts.relayRadio ? opts.relayRadio : opts.radio,
+      isWing ? 'relay' : 'mission'));
   }
   return s;
 }
@@ -242,12 +275,17 @@ const C2_ANTENNA_M = 6; // ground station telemetry mast — BVLOS ops raise the
 // rather than a dead hop across it.
 const PLAN = { replanSec: 5, maxSlots: 12 };
 
+// The relay chain lives on whatever radio the relay wing flies (heterogeneous)
+// or on the swarm-wide radio (homogeneous). Planning numbers for slot spacing
+// come from THAT radio, because those are the radios holding the slots.
+function chainRadio(s) { return (s.relayIdx && s.relayIdx.length && s.relayRadio) || s.radio; }
+
 function planChain(s) {
   const tKey = Math.round(s.target.x / 40) + ',' + Math.round(s.target.y / 40);
   const cached = s.c2.chainPlan;
   if (cached && cached.tKey === tKey && s.time - cached.at < PLAN.replanSec) return cached;
 
-  const usable = Math.min(usableRangeM(s.radio, s.envFactor), radioHorizonM(C2_ANTENNA_M, s.altitudeM));
+  const usable = Math.min(usableRangeM(chainRadio(s), s.envFactor), radioHorizonM(C2_ANTENNA_M, s.altitudeM));
   const span = usable * s.deployFrac;
   const cell = Math.max(40, usable * 0.25);
   // The search box must be wide enough to route AROUND the widest denial zone,
@@ -341,6 +379,30 @@ function planChain(s) {
   };
   let slots = [];
   for (let i = 0; i < kSlots; i++) slots.push(at(pathLen * (i + 1) / (kSlots + 1)));
+
+  // Heterogeneous fleets: the wing's long hops span the backhaul, but the
+  // FLOCK hangs off the last relay on the tactical radio's short legs — so
+  // the plan always ends with a slot inside tactical reach of the objective.
+  // Without this the chain "closes" on paper over wing-radio hops and then
+  // can't hand off to short-range mission drones at all.
+  if (s.relayIdx && s.relayIdx.length) {
+    const tactReach = usableRangeM(s.radio, s.envFactor) * s.deployFrac * 0.9;
+    if (pathLen > tactReach) {
+      const arcs = [];
+      const nEven = kSlots + 1;
+      for (let i = 0; i < kSlots; i++) arcs.push(pathLen * (i + 1) / nEven);
+      arcs.push(pathLen - Math.min(tactReach, pathLen * 0.45));
+      arcs.sort((a, b) => a - b);
+      const minGap = span * 0.25;
+      slots = [];
+      let prev = -Infinity;
+      for (const arc of arcs) {
+        if (arc - prev < minGap) continue;
+        slots.push(at(arc));
+        prev = arc;
+      }
+    }
+  }
 
   // LOS-densify with the terrain model: a ridge between adjacent nodes gets
   // a relay on it instead of a dead hop over it (two passes max)
@@ -471,8 +533,14 @@ function liveMarginDb(s, aId, bId) {
   const ground = dist2d(a, b);
   if (ground > radioHorizonM(altA, altB)) return -Infinity;
   if (losBlocked(s.terrain, a.x, a.y, altA, b.x, b.y, altB)) return -Infinity;
+  // Mixed fleets: each end transmits with its own radio's power, antenna and
+  // calibrated path-loss curve; the link carries the worse direction (js/fleet.js).
+  // C2 pairs with the far end's radio (the ground station flies a matched
+  // companion unit for every type in the field).
+  const ra = (aId === 'C2' ? droneRadio(b) : droneRadio(a)) || s.radio;
+  const rb = (bId === 'C2' ? droneRadio(a) : droneRadio(b)) || s.radio;
   const slant = Math.hypot(ground, altA - altB);
-  return linkMarginDb(s.radio, s.envFactor, slant) + fadeDb(s, aId, bId)
+  return mixedLinkMarginDb(ra, rb, s.envFactor, slant) + fadeDb(s, aId, bId)
     - interferencePenaltyDb(s, a, altA, b, altB);
 }
 
@@ -485,7 +553,7 @@ function liveMarginDb(s, aId, bId) {
 // god-view needed.
 function corridorGoal(s, d, g) {
   if (!s.corridorRouting) return g;
-  const hop = usableRangeM(s.radio, s.envFactor) * 0.8;
+  const hop = usableRangeM(droneRadio(d) || s.radio, s.envFactor) * 0.8;
   if (dist2d(d, g) <= hop) return g;                    // final hop: go direct
   const B = s.base, T = d.order.target;
   const L = dist2d(B, T);
@@ -511,7 +579,7 @@ function orderGoal(s, order) {
 // backup plan is energetic: fly to the goal, then still make it home against
 // the wind with the pessimism margin and reserve intact.
 function orderFeasible(s, d, order) {
-  const af = s.airframe;
+  const af = afOf(s, d);
   const goal = orderGoal(s, order);
   const windMs = Math.hypot(s.wind.x, s.wind.y);
   const speed = Math.max(1, af.maxSpeedMs - windMs);
@@ -542,6 +610,7 @@ function c2Step(s) {
   // a coverage measurement: the link provably worked at that position.
   for (const p of s.c2.inbox) {
     s.c2.known[p.src] = { ...p.payload, at: s.time };
+    s.c2.everHeard.add(p.src);
     covMark(s, p.payload.x, p.payload.y, 'good');
     if (p.payload.deadLog) {
       // Sitting somewhere in silence is much stronger evidence than one
@@ -608,9 +677,10 @@ function c2Step(s) {
 
   // Chain length comes from the PLANNED PATH (A* around known terrain and
   // measured dead zones, LOS-densified over ridges) — not from straight-line
-  // distance. Hop span stays capped by the radio horizon at altitude.
+  // distance. Hop span stays capped by the radio horizon at altitude, and is
+  // sized to whatever radio holds the slots (relay wing in a mixed fleet).
   const usable = Math.min(
-    usableRangeM(s.radio, s.envFactor),
+    usableRangeM(chainRadio(s), s.envFactor),
     radioHorizonM(C2_ANTENNA_M, s.altitudeM));
   const plan = planChain(s);
   const k = s.c2.relays.length;
@@ -629,12 +699,23 @@ function c2Step(s) {
   }
 
   if (kNeeded > k) {
-    // Elect from fresh mission drones with battery to spare
-    const candidates = Object.keys(known).filter(id =>
+    // Elect from fresh mission drones with battery to spare. Heterogeneous
+    // fleets: relay-wing units are preferred for relay duty (they carry the
+    // long-range radio + endurance pack); tactical units are only pulled
+    // onto the chain when no wing unit is available — C2 says so out loud.
+    const base = Object.keys(known).filter(id =>
       fresh(id) && known[id].role === 'mission' &&
       known[id].battery >= RELAY.minBatteryPct && !s.c2.relays.includes(id) &&
       !s.c2.rescuers.includes(id) && !(s.c2.unfit[id] > s.time));
-    if (candidates.length) {
+    const wing = base.filter(id => known[id].cls === 'relay');
+    const candidates = wing.length ? wing : base;
+    // Mixed fleet, launch phase: if wing units exist but haven't checked in
+    // yet, hold the election a few command rounds instead of pinning a
+    // tactical drone onto the chain it can barely hold. "Checked in ever"
+    // (not currently-fresh) is the right bar — contact drops are normal.
+    const rosterKnown = s.c2.everHeard.size >= s.drones.length;
+    const waitingForRoster = !wing.length && !!s.relayIdx.length && !rosterKnown && s.time < 30;
+    if (candidates.length && !waitingForRoster) {
       const slot = plan.slots[k] || s.target;
       let best = null, bestScore = -Infinity;
       for (const id of candidates) {
@@ -642,6 +723,11 @@ function c2Step(s) {
                     + 0.4 * (1 - Math.min(1, dist2d(known[id], slot) / (usable * 2)));
         if (score > bestScore) { bestScore = score; best = id; }
       }
+      if (!wing.length && !s.c2.wingFallbackWarned) {
+        logEvent(s, 'C2: no relay-wing units available — electing tactical drones for the chain', 'warn');
+        s.c2.wingFallbackWarned = true;
+      }
+      if (wing.length) s.c2.wingFallbackWarned = false;
       s.c2.relays.push(best);
       logEvent(s, 'C2 orders ' + best + ' to relay slot ' + s.c2.relays.length, 'relay');
     }
@@ -681,10 +767,14 @@ function c2Step(s) {
     return tip && dist2d(tip, lostCentroid(s)) > reach * 1.05;
   })();
   if (wantMoreRescuers) {
-    const candidates = Object.keys(known).filter(id =>
+    // Rescue prefers TACTICAL units: pulling a relay-wing drone off the chain
+    // costs the whole swarm its backhaul, so the wing is the last resort.
+    const base = Object.keys(known).filter(id =>
       fresh(id) && known[id].role === 'mission' &&
       known[id].battery >= RELAY.minBatteryPct && !s.c2.relays.includes(id) &&
       !s.c2.rescuers.includes(id) && !(s.c2.unfit[id] > s.time));
+    const tac = base.filter(id => known[id].cls !== 'relay');
+    const candidates = tac.length ? tac : base;
     if (candidates.length) {
       const c = lostCentroid(s);
       let best = null, bestD = Infinity;
@@ -844,6 +934,7 @@ function droneComms(s, d) {
       x: d.x + GPS_SIGMA_M * gaussian(s.net.rng),
       y: d.y + GPS_SIGMA_M * gaussian(s.net.rng),
       battery: d.batteryPct, role: effRole(d),
+      cls: d.cls,   // fleet class rides along so C2 assigns roles by capability
       reject: d.rejectedRole || null,
       deadLog: d.deadLog.length ? d.deadLog.splice(0) : null,
     });
@@ -889,7 +980,7 @@ function droneComms(s, d) {
         // Attempt failed. Fall back one radio-range step toward base and
         // listen again; after the last attempt, go home for real.
         const dHome = dist2d(d, s.base);
-        const step = usableRangeM(s.radio, s.envFactor) * FAILSAFE.relinkStepFrac;
+        const step = usableRangeM(droneRadio(d) || s.radio, s.envFactor) * FAILSAFE.relinkStepFrac;
         if (d.relinkAttempt >= FAILSAFE.relinkAttempts || dHome <= step) {
           d.mode = 'rtl';
           logEvent(s, d.id + ' no contact after ' + d.relinkAttempt + ' attempts — returning to C2', 'warn');
@@ -907,7 +998,7 @@ function droneComms(s, d) {
 }
 
 function updateBattery(s, d, dt, vAirMs) {
-  const af = s.airframe;
+  const af = afOf(s, d);
   d.energyWh = Math.max(0, d.energyWh - flightPowerW(af, vAirMs) * dt / 3600);
   d.batteryPct = d.energyWh / usableWh(af) * 100;
 
@@ -947,7 +1038,7 @@ function goalFor(s, d) {
   if (d.order.role === 'rescue' && d.order.goto) return d.order.goto;
   if (d.order.role === 'relay') return slotFromOrder(s, d.order);
   // Mission: loiter ring around the ORDERED target (which may be stale — that's the point)
-  d.orbitPhase += 0.0004 * s.airframe.maxSpeedMs;
+  d.orbitPhase += 0.0004 * afOf(s, d).maxSpeedMs;
   const flock = s.drones.filter(x => alive(x) && x.mode === 'ok' && x.order.role === 'mission');
   const idx = Math.max(0, flock.indexOf(d));
   const a = d.orbitPhase + (idx / Math.max(1, flock.length)) * Math.PI * 2;
@@ -968,7 +1059,7 @@ function tetherGoal(s, d, goal) {
   const upPos = d.order.upstream === 'C2' ? s.base : nodePos(s, d.order.upstream);
   if (!upPos || (upPos !== s.base && !alive(upPos))) return goal;
 
-  const plan = plannedHopMarginDb(s);
+  const plan = plannedHopMarginDb(s, d);
   const slowDb = Math.max(TETHER.minSlowDb, plan - TETHER.slowBelowPlanDb);
   const stopDb = Math.max(TETHER.minStopDb, plan - TETHER.stopBelowPlanDb);
   const m = d.upMarginEma;
@@ -997,7 +1088,7 @@ function stepDrone(s, d, dt) {
     const raw = liveMarginDb(s, d.id, d.order.upstream);
     const capped = Math.max(-20, Math.min(40, raw));
     d.upMarginEma += (capped - d.upMarginEma) * TETHER.emaAlpha;
-    if (d.tethered && d.upMarginEma > plannedHopMarginDb(s) - TETHER.slowBelowPlanDb + 1) d.tethered = false;
+    if (d.tethered && d.upMarginEma > plannedHopMarginDb(s, d) - TETHER.slowBelowPlanDb + 1) d.tethered = false;
   }
 
   const goal = tetherGoal(s, d, corridorGoal(s, d, goalFor(s, d)));
@@ -1005,7 +1096,7 @@ function stepDrone(s, d, dt) {
   // recomputing goalFor (which advances orbitPhase as a side effect — a
   // second call would double-step the loiter and diverge from what we vet).
   d.goalX = goal.x; d.goalY = goal.y;
-  const maxV = s.airframe.maxSpeedMs;
+  const maxV = afOf(s, d).maxSpeedMs;
 
   // External-vehicle mode: real autopilot firmware (or the mock) flies the
   // drone. Position and velocity were pulled from telemetry at the top of the
@@ -1173,7 +1264,7 @@ function stepSwarm(s, dt) {
   for (const d of s.drones) {
     if (d.mode === 'landed' && d.swapAt && s.time >= d.swapAt) {
       d.mode = 'ok';
-      d.energyWh = usableWh(s.airframe);
+      d.energyWh = usableWh(afOf(s, d));
       d.batteryPct = 100;
       d.swapAt = null;
       d.lastC2 = s.time;
@@ -1215,7 +1306,14 @@ function afterActionReport(s) {
   L.push('');
   L.push('## Setup');
   L.push('- **Radio:** ' + s.radio.name + ' (' + s.radio.freqMHz + ' MHz, usable ~' + fmtDist(usableRangeM(s.radio, s.envFactor)) + ')');
-  L.push('- **Airframe:** ' + s.airframe.name + ' — ' + s.drones.length + ' drones');
+  // Fleet composition: heterogeneous missions list each class separately.
+  const wingN = (s.relayIdx && s.relayIdx.length) || 0;
+  let fleetLine = '- **Airframe:** ' + afOf(s, s.drones[0] || {}).name + ' × ' + (s.drones.length - wingN);
+  if (wingN) {
+    fleetLine += ' · relay wing: ' + s.relayAirframe.name + ' × ' + wingN +
+      ' on ' + s.relayRadio.name;
+  }
+  L.push(fleetLine + ' — ' + s.drones.length + ' drones');
   L.push('- **Objective distance:** ' + fmtDist(D) + ' from the ground station');
   L.push('- **Altitude:** ' + s.altitudeM + ' m AGL' + (Math.hypot(s.wind.x, s.wind.y) > 0.5 ? ' · wind ' + Math.hypot(s.wind.x, s.wind.y).toFixed(0) + ' m/s' : ''));
   L.push('- **Interference sources:** ' + activeJam + (activeJam ? ' active (RF denial in play)' : ' (clean spectrum)'));

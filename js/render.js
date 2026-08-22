@@ -297,6 +297,16 @@ function drawDrone(ctx, cv, view, d, selected) {
     ctx.lineWidth = 2 * U; ctx.stroke();
   }
 
+  // Relay-wing class marker: a gold diamond halo on heterogeneous fleets.
+  if (d.cls === 'relay' && alive(d)) {
+    const r = 16 * U;
+    ctx.beginPath();
+    ctx.moveTo(c.x, c.y - r); ctx.lineTo(c.x + r, c.y); ctx.lineTo(c.x, c.y + r); ctx.lineTo(c.x - r, c.y);
+    ctx.closePath();
+    ctx.strokeStyle = 'rgba(230,179,69,0.75)'; ctx.lineWidth = 1 * U;
+    ctx.setLineDash([3 * U, 3 * U]); ctx.stroke(); ctx.setLineDash([]);
+  }
+
   ctx.font = (10 * U) + 'px "Segoe UI", sans-serif'; ctx.textAlign = 'center';
   ctx.fillStyle = COLORS.textDim;
   ctx.fillText(d.id, c.x, c.y + 24 * U);
