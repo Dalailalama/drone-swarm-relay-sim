@@ -108,6 +108,8 @@
       corridorRouting: corridorChk.checked,
       broadcastC2: bcastChk.checked,
       captureOn: captureChk.checked,
+      spectrumAgility: agilityChk.checked,
+      lpiMode: lpiChk.checked,
       windX: +windSpdRange.value * Math.cos(+windDirRange.value * Math.PI / 180),
       windY: +windSpdRange.value * Math.sin(+windDirRange.value * Math.PI / 180),
       targetX: dist, targetY: -dist * 0.25,
@@ -152,6 +154,7 @@
       jammers: swarm.jammers.map(j => ({ x: j.x, y: j.y, erpDbm: j.erpDbm, band: j.band, altM: j.altM, on: j.on })),
       gpsZones: (swarm.gpsZones || []).map(z => ({ x: z.x, y: z.y, rM: z.rM, on: z.on })),
       spectrumAgility: !!swarm.spectrumAgility,
+      lpiMode: !!swarm.lpiMode,
       videoBackhaul: !!swarm.videoOn,
       videoKbps: swarm.videoKbps || 0,
     };
@@ -174,6 +177,8 @@
     if (sc.windSpd != null) windSpdRange.value = sc.windSpd;
     if (sc.windDir != null) windDirRange.value = sc.windDir;
     if (sc.corridor != null) corridorChk.checked = sc.corridor;
+    if (sc.spectrumAgility != null) agilityChk.checked = !!sc.spectrumAgility;
+    if (sc.lpiMode != null) lpiChk.checked = !!sc.lpiMode;
     if (sc.broadcast != null) bcastChk.checked = sc.broadcast;
     if (sc.coverage != null) coverageChk.checked = sc.coverage;
     if (sc.osm) {
@@ -237,6 +242,7 @@
     radio = RADIOS.find(r => r.id === radioSel.value);
     swarm.radio = radio;
     updateSpecCard();
+    applyAgility();
     resetSwarm();
   });
   envSel.addEventListener('change', () => {
@@ -324,6 +330,29 @@
   corridorChk.addEventListener('change', () => {
     if (swarm) swarm.corridorRouting = corridorChk.checked;
     corridorOut.textContent = corridorChk.checked ? 'transits follow the chain' : 'straight-line transits';
+  });
+  // --- EW waveforms: spectrum agility + LPI/LPD --------------------------------
+  const agilityChk = el('agilityChk'), lpiChk = el('lpiChk');
+  function applyAgility() {
+    if (!swarm) return;
+    swarm.spectrumAgility = agilityChk.checked;
+    const r = radio.hopGainDb;
+    agilityOut.textContent = agilityChk.checked
+      ? (r ? '+' + r + ' dB anti-jam on ' + radio.name.split(' ')[0] : 'no hopping capability on this radio')
+      : 'frequency-hopping anti-jam';
+  }
+  function applyLpi() {
+    if (!swarm) return;
+    swarm.lpiMode = lpiChk.checked;
+    lpiOut.textContent = lpiChk.checked ? '\u22123 dB budget · +6 dB denial rejection' : 'harder to detect, harder to jam';
+  }
+  agilityChk.addEventListener('change', () => {
+    applyAgility();
+    if (swarm) logEvent(swarm, 'Spectrum agility ' + (swarm.spectrumAgility ? 'ON — frequency hopping active' : 'off'), 'info');
+  });
+  lpiChk.addEventListener('change', () => {
+    applyLpi();
+    if (swarm) logEvent(swarm, 'LPI/LPD waveform ' + (swarm.lpiMode ? 'ON — trading link budget for survivability' : 'off'), 'info');
   });
   terrainSel.addEventListener('change', () => { updateOsmRow(); resetSwarm(); });
 
@@ -893,6 +922,8 @@
   updateAirframeInfo();
   updateSpecCard();
   applySpacing();
+  applyAgility();
+  applyLpi();
   resetSwarm();
   distOut.textContent = fmtDist(+distRange.value / 100 * defaultTargetDist());
   document.querySelector('[data-speed="5"]').classList.add('active');

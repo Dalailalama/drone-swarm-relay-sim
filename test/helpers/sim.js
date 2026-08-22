@@ -27,7 +27,14 @@ const CORE = [
 ];
 
 function loadCore(extra) {
-  return loadSim([...CORE, ...(extra || [])]);
+  const ctx = loadSim([...CORE, ...(extra || [])]);
+  // Top-level `const` declarations don't attach to the vm global — surface
+  // the ones tests need explicitly.
+  try {
+    ctx.consts = vm.runInContext(
+      '({ AGILITY, GPS_DENIED, TETHER, FAILSAFE, PLAN })', ctx);
+  } catch (_) { /* older core without some consts */ }
+  return ctx;
 }
 
 module.exports = { loadSim, loadCore };

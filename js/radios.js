@@ -51,7 +51,8 @@ const RADIOS = [
     antGainDbi: 2,
     airRateKbps: 5,       // usable MAVLink telemetry throughput, not RF rate
     rangeLosM: 10000,     // routinely proven 10+ km at 100 mW / 150 Hz
-    note: 'RC-control link repurposed for C2. Astonishing range per milliwatt, but only a few kbps of telemetry fits through.',
+    hopGainDb: 12,        // FHSS across the band — inherent jam resistance
+    note: 'RC-control link repurposed for C2. Astonishing range per milliwatt, frequency-hopping by design, but only a few kbps of telemetry fits through.',
     source: 'https://www.expresslrs.org/info/signal-health/',
   },
   {
@@ -91,7 +92,8 @@ const RADIOS = [
     antGainDbi: 3,
     airRateKbps: 40000,   // MIMO throughput, tens of Mbps
     rangeLosM: 20000,     // multi-km MANET; long with elevation
-    note: 'Battlefield/industrial MANET flagship — 550+ nodes in one self-healing mesh, MIMO for non-line-of-sight. Motorola bought Silvus for $4.4B.',
+    hopGainDb: 16,        // MIMO anti-jam waveform — deep interference rejection
+    note: 'Battlefield/industrial MANET flagship — 550+ nodes in one self-healing mesh, MIMO for non-line-of-sight and anti-jam. Motorola bought Silvus for $4.4B.',
     source: 'https://silvustechnologies.com/products/streamcaster-4400/',
   },
   {
@@ -103,6 +105,7 @@ const RADIOS = [
     antGainDbi: 3,
     airRateKbps: 20000,
     rangeLosM: 12000,     // long-range mesh, frequency-agile
+    hopGainDb: 13,        // frequency-hopping across the band
     note: 'Compact frequency-hopping mesh radio widely flown on small drones (incl. Ukraine). Built for jamming-resilient, self-forming links.',
     source: 'https://doodlelabs.com/products/mesh-rider-radios/',
   },
