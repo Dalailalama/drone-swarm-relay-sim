@@ -264,7 +264,10 @@
     updateSpecCard();
     logEvent(swarm, 'Environment: ' + env.name + ' — usable range now ' + fmtDist(usable()), 'warn');
   });
-  countRange.addEventListener('input', () => { countOut.textContent = countRange.value; });
+  countRange.addEventListener('input', () => {
+    countOut.textContent = countRange.value;
+    el('scaleNote').style.display = +countRange.value >= 60 ? 'block' : 'none';
+  });
   countRange.addEventListener('change', () => {
     resetSwarm();
     // If a bridge is flying the swarm, respawn its vehicles to the new count

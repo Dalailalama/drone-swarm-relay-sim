@@ -1180,6 +1180,36 @@ function tetherGoal(s, d, goal) {
   return { x: d.x + (goal.x - d.x) * f, y: d.y + (goal.y - d.y) * f };
 }
 
+// --- Separation spatial grid ---------------------------------------------------
+// Naive flocking separation is O(n²); at 100+ nodes every substep pays it
+// four times over. A uniform grid at exactly the separation radius turns
+// each drone's neighbor query into ~9 cells of a few members each — same
+// physics, linear-ish cost.
+function buildSepGrid(s) {
+  const cell = DRONE.separationM;
+  const grid = new Map();
+  for (const d of s.drones) {
+    if (!alive(d)) continue;
+    const key = Math.floor(d.x / cell) + ',' + Math.floor(d.y / cell);
+    const arr = grid.get(key);
+    if (arr) arr.push(d); else grid.set(key, [d]);
+  }
+  return grid;
+}
+
+function sepNeighbors(s, x, y) {
+  const cell = DRONE.separationM;
+  const gx = Math.floor(x / cell), gy = Math.floor(y / cell);
+  const out = [];
+  for (let dx = -1; dx <= 1; dx++) {
+    for (let dy = -1; dy <= 1; dy++) {
+      const arr = s._sepGrid && s._sepGrid.get((gx + dx) + ',' + (gy + dy));
+      if (arr) for (const d of arr) out.push(d);
+    }
+  }
+  return out;
+}
+
 function stepDrone(s, d, dt) {
   if (!alive(d)) return;
 
@@ -1253,7 +1283,9 @@ function stepDrone(s, d, dt) {
       ax = -d.vx; ay = -d.vy;
     }
 
-    for (const o of s.drones) {
+    // Separation: only nearby flockmates matter — 3×3 grid cells around the
+    // drone (cell = separation radius), not the whole fleet.
+    for (const o of sepNeighbors(s, d.x, d.y)) {
       if (o === d || !alive(o)) continue;
       const sd = dist2d(d, o);
       if (sd < DRONE.separationM && sd > 0.01) {
@@ -1344,7 +1376,10 @@ function chainStatus(s) {
       const dd = Math.hypot(d.x - cx2, d.y - cy2);
       if (dd < repD) { repD = dd; rep = d; }
     }
-    const route = routePath(s, 'C2', rep.id);
+    const route = (() => {
+      const up = pathToC2(s, rep.id);       // shared C2 tree — no fresh search
+      return up ? up.slice().reverse() : null;
+    })();
     if (route && route.length > 1) {
       chainPts = route.map(id => {
         if (id === 'C2') return { kind: 'base', x: s.base.x, y: s.base.y, label: 'C2', id: 'C2' };
@@ -1367,8 +1402,10 @@ function chainStatus(s) {
     });
   }
 
-  // Ground truth connectivity: can a packet route from C2 to any mission drone?
-  const connected = flock.some(d => routePath(s, 'C2', d.id) !== null);
+  // Ground truth connectivity: any mission drone reachable from C2 — read
+  // straight off the shared tree's distance map, no fresh searches.
+  const tree = c2Tree(s);
+  const connected = flock.some(d => (tree.dist.get(d.id) || Infinity) < Infinity);
 
   // Operator's view: how many drones does C2 have fresh contact with?
   const freshCount = Object.keys(s.c2.known)
@@ -1444,6 +1481,8 @@ function stepSwarm(s, dt) {
     }
   }
 
+  // Neighbor grid rebuilt once per tick — the flock moves between ticks.
+  s._sepGrid = buildSepGrid(s);
   for (const d of s.drones) stepDrone(s, d, dt);
   stepNet(s, dt);
 

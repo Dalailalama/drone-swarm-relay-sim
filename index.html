@@ -60,9 +60,10 @@
       <h2>Mission setup</h2>
       <div class="ctl-row">
         <label for="countRange">Drones</label>
-        <input type="range" id="countRange" min="3" max="30" value="10" step="1">
+        <input type="range" id="countRange" min="3" max="120" value="10" step="1">
         <output id="countOut">10</output>
       </div>
+      <div id="scaleNote" class="af-info" style="display:none;">Large fleets (100+) are supported and benchmarked — see bench/BASELINE.md. Expect the shared channel, not the physics, to be the binding constraint.</div>
       <div style="height:10px"></div>
       <select id="airframeSel"></select>
       <div id="airframeInfo" class="af-info"></div>

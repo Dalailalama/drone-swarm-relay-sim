@@ -202,10 +202,55 @@ function routePath(s, from, to) {
   return path;
 }
 
+// --- Shortest-path tree toward C2 ---------------------------------------------
+// At scale, running a fresh Dijkstra PER TELEMETRY PACKET was the dominant
+// cost (N drones → N full searches per round). Since nearly everything
+// flows TOWARD the ground station and ETX link costs are symmetric, ONE
+// tree rooted at C2 serves every upstream packet — rebuilt on a short
+// cadence so routes still track the moving swarm.
+const C2_TREE_TTL_SEC = 0.5;
+
+function c2Tree(s) {
+  if (s._c2Tree && s.time - s._c2Tree.at < C2_TREE_TTL_SEC) return s._c2Tree;
+  const ids = nodeIds(s);
+  const dist = new Map(ids.map(id => [id, Infinity]));
+  const prev = new Map();
+  const done = new Set();
+  dist.set('C2', 0);
+  for (;;) {
+    let cur = null, best = Infinity;
+    for (const id of ids) {
+      if (!done.has(id) && dist.get(id) < best) { best = dist.get(id); cur = id; }
+    }
+    if (cur === null || best === Infinity) break; // nothing reachable remains
+    done.add(cur);
+    for (const nxt of ids) {
+      if (done.has(nxt)) continue;
+      const c = linkCost(s, cur, nxt);
+      if (c === Infinity) continue;
+      if (best + c < dist.get(nxt)) { dist.set(nxt, best + c); prev.set(nxt, cur); }
+    }
+  }
+  s._c2Tree = { at: s.time, prev, dist };
+  return s._c2Tree;
+}
+
+function pathToC2(s, src) {
+  const t = c2Tree(s);
+  if (!t.dist.has(src) || t.dist.get(src) === Infinity) return null;
+  const path = [src];
+  let p = src;
+  while (p !== 'C2') { p = t.prev.get(p); if (p === undefined) return null; path.push(p); }
+  return path;
+}
+
 // --- Packets ------------------------------------------------------------------
 // bytesOverride lets payload kinds (video chunks) carry their real size.
 function sendPacket(s, kind, src, dst, payload, bytesOverride) {
-  const path = routePath(s, src, dst);
+  // Upstream traffic (everything toward the ground station — telemetry,
+  // video chunks) rides the shared C2-rooted tree; only rare downstream
+  // unicasts pay a dedicated search.
+  const path = dst === 'C2' ? pathToC2(s, src) : routePath(s, src, dst);
   if (!path || path.length < 2) {
     s.net.dropped++;
     if (kind === 'vid') s.net.vid.droppedFrames++;
