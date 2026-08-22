@@ -11,6 +11,15 @@ const NET = {
   bcastRowBytes: 12,    // ...plus one packed row per drone
 };
 
+// Payload/video backhaul: streamed chunks are REAL packets — they pay real
+// airtime on the one shared channel, queue behind retries, and starve C2
+// traffic exactly as hard as they starve behind it. One streamer at a time
+// is C2's policy (see swarm.js), because a store-and-forward relay chain's
+// capacity divides across hops and users — physics, not preference.
+const VID = {
+  chunkSec: 0.5,        // one aggregated frame bundle per chunk interval
+};
+
 // Deterministic seeded RNG (mulberry32) — same seed, same mission playback.
 function mulberry32(a) {
   return function () {
@@ -39,6 +48,8 @@ function makeNet(seed) {
     // packet id counter — always advances, independent of capture being on,
     // so pids are unique in a trace even for packets that predate capture
     pktSeq: 0,
+    // payload/video accounting (Feature: Tier-1 #4)
+    vid: { framesDelivered: 0, droppedFrames: 0 },
   };
 }
 
@@ -188,19 +199,24 @@ function routePath(s, from, to) {
 }
 
 // --- Packets ------------------------------------------------------------------
-function sendPacket(s, kind, src, dst, payload) {
+// bytesOverride lets payload kinds (video chunks) carry their real size.
+function sendPacket(s, kind, src, dst, payload, bytesOverride) {
   const path = routePath(s, src, dst);
   if (!path || path.length < 2) {
     s.net.dropped++;
+    if (kind === 'vid') s.net.vid.droppedFrames++;
     capLog(s, { ev: 'drop', reason: 'no-route', kind, src, dst });
     return false; // no route — radio silence
   }
-  const bytes = kind === 'cmd' ? NET.cmdBytes : NET.tlmBytes;
+  const bytes = bytesOverride != null ? bytesOverride
+    : kind === 'cmd' ? NET.cmdBytes : NET.tlmBytes;
   const dt = hopTimeSec(s.radio, bytes);
   const pid = 'p' + s.net.pktSeq++;
   s.net.packets.push({
     kind, src, dst, payload, path,
     pid, hop: 0,
+    bytes,
+    chunkSec: kind === 'vid' ? VID.chunkSec : null,
     tHopStart: s.time,
     tArrive: s.time + dt,
   });
@@ -210,7 +226,12 @@ function sendPacket(s, kind, src, dst, payload) {
 
 function deliverPacket(s, p) {
   s.net.delivered++;
-  if (p.dst === 'C2') s.c2.inbox.push(p);
+  if (p.kind === 'vid') s.net.vid.framesDelivered++;
+  if (p.dst === 'C2') {
+    // Payload chunks are consumed by the application layer, not the
+    // telemetry ingest — C2's belief state only updates from real reports.
+    if (p.kind !== 'vid') s.c2.inbox.push(p);
+  }
   else {
     const d = nodePos(s, p.dst);
     if (d && alive(d)) d.inbox.push(p);
@@ -221,17 +242,19 @@ function deliverPacket(s, p) {
 function stepNet(s, dt) {
   stepFades(s, dt);
   stepBcasts(s);
-  const bytesOf = p => (p.kind === 'cmd' ? NET.cmdBytes : NET.tlmBytes);
+  const bytesOf = p => p.bytes != null ? p.bytes
+    : (p.kind === 'cmd' ? NET.cmdBytes : NET.tlmBytes);
   const keep = [];
   for (const p of s.net.packets) {
     let dead = false;
     while (s.time >= p.tArrive && !dead) {
       const from = p.path[p.hop], to = p.path[p.hop + 1];
       const retries = hopDelivered(s, from, to);
-      const txSec = (bytesOf(p) * 8) / (s.radio.airRateKbps * 1000);
+      const txSec = bytesOf(p) * 8 / (s.radio.airRateKbps * 1000);
       s.net.airtimeAccum += txSec * (1 + (retries < 0 ? HOP_RETRIES : retries));
       if (retries < 0) {
         s.net.dropped++;
+        if (p.kind === 'vid') s.net.vid.droppedFrames++;
         capLog(s, { ev: 'drop', reason: 'link-fail', pid: p.pid, kind: p.kind, from, to, marginDb: +liveMarginDb(s, from, to).toFixed(1) });
         dead = true; break;
       }

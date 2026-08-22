@@ -115,6 +115,16 @@
         <output id="lpiOut" style="flex:1; text-align:left; color:var(--dim);">harder to detect, harder to jam</output>
       </div>
       <div class="ctl-row">
+        <label for="videoChk">Video backhaul</label>
+        <input type="checkbox" id="videoChk" style="flex:0 0 auto; width:auto; accent-color:var(--accent);">
+        <output id="videoOut" style="flex:1; text-align:left; color:var(--dim);">payload competes for the chain</output>
+      </div>
+      <div class="ctl-row" id="videoKbpsRow" style="display:none;">
+        <label for="videoKbpsRange">Bitrate</label>
+        <input type="range" id="videoKbpsRange" min="50" max="2000" value="500" step="50">
+        <output id="videoKbpsOut">500 kbps</output>
+      </div>
+      <div class="ctl-row">
         <label for="terrainSel">Terrain</label>
         <select id="terrainSel" style="flex:1;">
           <option value="flat">Flat (no terrain)</option>
@@ -238,6 +248,11 @@
         <button id="extConnectBtn">Fly via bridge</button>
       </div>
       <div id="extStatus" class="af-info">off — drones flown by built-in physics</div>
+    </section>
+
+    <section>
+      <h2>Payload link</h2>
+      <div id="payloadInfo" class="af-info">Video backhaul off — enable it in Mission setup to see who gets to stream, and what it costs the chain.</div>
     </section>
 
     <section>

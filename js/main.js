@@ -110,6 +110,8 @@
       captureOn: captureChk.checked,
       spectrumAgility: agilityChk.checked,
       lpiMode: lpiChk.checked,
+      videoOn: videoChk.checked,
+      videoKbps: +videoKbpsRange.value,
       windX: +windSpdRange.value * Math.cos(+windDirRange.value * Math.PI / 180),
       windY: +windSpdRange.value * Math.sin(+windDirRange.value * Math.PI / 180),
       targetX: dist, targetY: -dist * 0.25,
@@ -179,6 +181,8 @@
     if (sc.corridor != null) corridorChk.checked = sc.corridor;
     if (sc.spectrumAgility != null) agilityChk.checked = !!sc.spectrumAgility;
     if (sc.lpiMode != null) lpiChk.checked = !!sc.lpiMode;
+    if (sc.videoBackhaul != null) videoChk.checked = !!sc.videoBackhaul;
+    if (sc.videoKbps != null && sc.videoKbps > 0) { videoChk.checked = true; videoKbpsRange.value = sc.videoKbps; }
     if (sc.broadcast != null) bcastChk.checked = sc.broadcast;
     if (sc.coverage != null) coverageChk.checked = sc.coverage;
     if (sc.osm) {
@@ -353,6 +357,28 @@
   lpiChk.addEventListener('change', () => {
     applyLpi();
     if (swarm) logEvent(swarm, 'LPI/LPD waveform ' + (swarm.lpiMode ? 'ON — trading link budget for survivability' : 'off'), 'info');
+  });
+  // --- Video backhaul -----------------------------------------------------------
+  const videoChk = el('videoChk'), videoOut = el('videoOut');
+  const videoKbpsRow = el('videoKbpsRow');
+  const videoKbpsRange = el('videoKbpsRange'), videoKbpsOut = el('videoKbpsOut');
+  const payloadInfo = el('payloadInfo');
+  function applyVideo() {
+    if (!swarm) return;
+    swarm.videoOn = videoChk.checked;
+    swarm.videoKbps = +videoKbpsRange.value;
+    videoKbpsRow.style.display = videoChk.checked ? 'flex' : 'none';
+    videoOut.textContent = videoChk.checked
+      ? swarm.videoKbps + ' kbps · C2 schedules who streams'
+      : 'payload competes for the chain';
+  }
+  videoChk.addEventListener('change', () => {
+    applyVideo();
+    if (swarm) logEvent(swarm, 'Video backhaul ' + (swarm.videoOn ? 'ON — C2 scheduling payload turns at ' + swarm.videoKbps + ' kbps' : 'off'), 'info');
+  });
+  videoKbpsRange.addEventListener('input', () => {
+    videoKbpsOut.textContent = videoKbpsRange.value + ' kbps';
+    applyVideo();
   });
   terrainSel.addEventListener('change', () => { updateOsmRow(); resetSwarm(); });
 
@@ -836,7 +862,8 @@
       const sel = d === selected ? ' style="outline:1px solid #e2e8f0;"' : '';
       const role = effRole(d);
       return '<div class="fleet-row role-' + role + '"' + sel + ' data-id="' + d.id + '">' +
-        '<span class="dot"></span><span class="fid">' + d.id + (d.cls === 'relay' ? ' ◆' : '') + '</span>' +
+        '<span class="dot"></span><span class="fid">' + d.id +
+        (d.cls === 'relay' ? ' \u25c6' : '') + (swarm.c2.vidGrantee === d.id ? ' \u25cf' : '') + '</span>' +
         '<span class="frole">' + role + '</span>' +
         '<span class="fbat"><span class="fbat-fill" style="width:' + d.batteryPct.toFixed(0) + '%"></span></span>' +
         '<span class="fpct">' + d.batteryPct.toFixed(0) + '%</span></div>';
@@ -845,6 +872,19 @@
     eventLog.innerHTML = swarm.events.slice().reverse().map(ev =>
       '<div class="ev ev-' + ev.kind + '"><span class="ev-t">' + fmtSimClock(ev.t) + '</span>' + ev.msg + '</div>'
     ).join('');
+
+    if (swarm.videoOn) {
+      const v = swarm.net.vid;
+      const total = v.framesDelivered + v.droppedFrames;
+      const loss = total ? (100 * v.droppedFrames / total).toFixed(1) + '% loss' : 'no data yet';
+      payloadInfo.innerHTML =
+        '<b>' + (swarm.c2.vidGrantee || 'nobody') + '</b> has the channel at <b>' +
+        swarm.videoKbps + ' kbps</b> · chunks ' + v.framesDelivered.toLocaleString() +
+        ' delivered (' + loss + ') · chain busy ' + (swarm.net.utilization * 100).toFixed(0) + '%' +
+        '<br><span style="color:var(--dim)">● streaming · ◆ relay wing — one streamer at a time; video eats the same airtime C2 needs.</span>';
+    } else {
+      payloadInfo.textContent = 'Video backhaul off — enable it in Mission setup to see who gets to stream, and what it costs the chain.';
+    }
 
     killBtn.disabled = !(selected && alive(selected));
     killBtn.textContent = selected ? 'Kill ' + selected.id : 'Kill drone (select one)';
@@ -924,6 +964,7 @@
   applySpacing();
   applyAgility();
   applyLpi();
+  applyVideo();
   resetSwarm();
   distOut.textContent = fmtDist(+distRange.value / 100 * defaultTargetDist());
   document.querySelector('[data-speed="5"]').classList.add('active');

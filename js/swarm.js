@@ -178,12 +178,15 @@ function makeSwarm(opts) {
     showCoverage: true,
     broadcastC2: opts.broadcastC2 !== false,
     captureOn: !!opts.captureOn,
+    // Payload/video backhaul (Feature: Tier-1 #4)
+    videoOn: !!opts.videoOn,
+    videoKbps: opts.videoKbps || 500,
     // Anti-jam spectrum agility + LPI/LPD waveform (Feature: Tier-1 #5)
     spectrumAgility: !!opts.spectrumAgility,
     lpiMode: !!opts.lpiMode,
     stats: { tSec: 0, connSec: 0 },
     net: makeNet(opts.seed || 42),
-    c2: { known: {}, relays: [], inbox: [], nextCmd: 0, wasFresh: {}, lost: {}, rescuers: [], unfit: {}, cov: new Map(), slotCache: {}, bcastSeq: 0, everHeard: new Set() },
+    c2: { known: {}, relays: [], inbox: [], nextCmd: 0, wasFresh: {}, lost: {}, rescuers: [], unfit: {}, cov: new Map(), slotCache: {}, bcastSeq: 0, everHeard: new Set(), vidGrantee: null, vidIdx: 0 },
   };
   for (let i = 0; i < opts.count; i++) {
     const a = (i / opts.count) * Math.PI * 2;
@@ -883,6 +886,7 @@ function c2Step(s) {
         role: 'rescue', slot: -1, goto: rescueOrders[id].goto,
         upstream: rescueOrders[id].upstream,
         k: s.c2.relays.length,
+        videoOn: false,
         target: { x: s.target.x, y: s.target.y },
       };
     }
@@ -893,11 +897,34 @@ function c2Step(s) {
       upstream: slot > 0 ? s.c2.relays[slot - 1] : (slot === 0 ? 'C2' : lastRelay),
       k: s.c2.relays.length,
       slotPos: slot >= 0 ? adjustedSlotPos(s, slot, s.c2.relays.length) : null,
+      videoOn: id === s.c2.vidGrantee,
       target: { x: s.target.x, y: s.target.y },
     };
   };
 
   const ids = Object.keys(known);
+
+  // --- Payload scheduling (video backhaul) --------------------------------
+  // One streamer at a time: a store-and-forward relay chain divides its
+  // airrate across hops AND users, so C2 hands out the channel in round-robin
+  // turns. The grant rides to the drone inside its order packet — no magic.
+  if (s.videoOn && s.videoKbps > 0) {
+    const wanters = ids.filter(id => fresh(id) && known[id].role === 'mission').sort();
+    if (!wanters.length) {
+      s.c2.vidGrantee = null;
+    } else {
+      let idx = wanters.indexOf(s.c2.vidGrantee);
+      if (idx < 0) {
+        // previous grantee gone from contact — hand the mic to the next in line
+        idx = s.c2.vidIdx % wanters.length;
+        s.c2.vidIdx = (s.c2.vidIdx + 1) % wanters.length;
+      }
+      s.c2.vidGrantee = wanters[idx];
+    }
+  } else {
+    s.c2.vidGrantee = null;
+  }
+
   if (s.broadcastC2) {
     // One flooded packet carries the whole table — see stepBcasts
     const orders = {};
@@ -991,6 +1018,16 @@ function droneComms(s, d) {
       reject: d.rejectedRole || null,
       deadLog: d.deadLog.length ? d.deadLog.splice(0) : null,
     });
+  }
+
+  // Payload stream: emit real video chunks only while C2's grant says so.
+  // Each chunk pays its full airtime on the shared channel — video visibly
+  // competes with C2 traffic, and both starve when the chain thins.
+  if (!d.nextVid) d.nextVid = 0;
+  if (s.videoOn && d.order.videoOn && d.mode === 'ok' && s.time >= d.nextVid) {
+    d.nextVid = Math.max(d.nextVid + VID.chunkSec, s.time);
+    sendPacket(s, 'vid', d.id, 'C2', null,
+      Math.round(s.videoKbps * 1000 / 8 * VID.chunkSec));
   }
 
   // Black box: while the link is silent, remember where it was silent.
@@ -1425,6 +1462,16 @@ function afterActionReport(s) {
   }
   L.push('- **Relay re-plans:** ' + relayEvents + ' · **Failsafe events:** ' + failsafes + ' · **Battery swaps:** ' + swaps);
   L.push('');
+  if (s.videoOn) {
+    const v = s.net.vid;
+    const total = v.framesDelivered + v.droppedFrames;
+    L.push('## Payload link');
+    L.push('- **Video backhaul:** ' + s.videoKbps + ' kbps demand — ' +
+      v.framesDelivered.toLocaleString() + ' chunks delivered' +
+      (total ? ' (' + (100 * v.droppedFrames / total).toFixed(1) + '% chunk loss)' : '') +
+      (s.c2.vidGrantee ? ' · streaming now: ' + s.c2.vidGrantee : ''));
+    L.push('');
+  }
   L.push('## RF environment learned');
   L.push('- **Coverage cells mapped:** ' + cov.length + ' (' + goodCells + ' measured-good, ' + badCells + ' measured dead zones)');
   L.push('- **Packets delivered:** ' + deliv.toLocaleString() + ' · **dropped:** ' + drop.toLocaleString() + ' (' + dropPct + '% loss)');
