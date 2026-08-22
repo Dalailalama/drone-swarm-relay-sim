@@ -7,7 +7,7 @@ const assert = require('node:assert');
 
 const G = require('../js/gpsnav.js');
 const { loadCore } = require('./helpers/sim.js');
-const ctx = loadCore(['gpsnav.js']);
+const ctx = loadCore(); // CORE already includes gpsnav.js
 const R = require('../js/radios.js');
 const A = require('../js/airframes.js');
 
