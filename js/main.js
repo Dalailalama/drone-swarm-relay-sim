@@ -638,6 +638,26 @@
   el('saveScenarioBtn').addEventListener('click', () => {
     download(JSON.stringify(currentScenario(), null, 1), 'scenario-' + terrainSel.value + '.json', 'application/json');
   });
+
+  // --- DDIL scenario pack (bundled one-click demos) ---------------------------
+  const packSel = el('packSel'), packBlurb = el('packBlurb'), loadPackBtn = el('loadPackBtn');
+  SCENARIO_PACK.forEach((p, i) => {
+    const o = document.createElement('option');
+    o.value = String(i); o.textContent = p.title;
+    packSel.appendChild(o);
+  });
+  function syncPackBlurb() {
+    const p = SCENARIO_PACK[+packSel.value || 0];
+    if (p) packBlurb.textContent = p.blurb;
+  }
+  packSel.addEventListener('change', syncPackBlurb);
+  syncPackBlurb();
+  loadPackBtn.addEventListener('click', () => {
+    const p = SCENARIO_PACK[+packSel.value || 0];
+    if (!p) return;
+    applyScenario(p.scenario);
+    logEvent(swarm, 'Loaded scenario: ' + p.title, 'info');
+  });
   el('loadScenarioBtn').addEventListener('click', () => el('loadScenarioInput').click());
   el('loadScenarioInput').addEventListener('change', ev => {
     const file = ev.target.files[0]; if (!file) return;
