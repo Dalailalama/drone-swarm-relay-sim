@@ -181,6 +181,11 @@ function makeSwarm(opts) {
     // Payload/video backhaul (Feature: Tier-1 #4)
     videoOn: !!opts.videoOn,
     videoKbps: opts.videoKbps || 500,
+    // Moving-mission dynamics (Tier-2 mission library): the ground station
+    // itself can drive (convoy escort) and the objective can drift (wildfire
+    // front, flood edge). m/s in world frame; zero for static missions.
+    baseVel: opts.baseVel || { x: 0, y: 0 },
+    targetVel: opts.targetVel || { x: 0, y: 0 },
     // Anti-jam spectrum agility + LPI/LPD waveform (Feature: Tier-1 #5)
     spectrumAgility: !!opts.spectrumAgility,
     lpiMode: !!opts.lpiMode,
@@ -1369,6 +1374,14 @@ function chainStatus(s) {
 // --- Tick -------------------------------------------------------------------------
 function stepSwarm(s, dt) {
   s.time += dt;
+
+  // Moving-mission dynamics: the convoy drives, the fire front creeps. The
+  // chain re-plans live behind them — exactly the behaviour a dragged
+  // operator already exercises, now on a clock.
+  s.base.x += (s.baseVel ? s.baseVel.x : 0) * dt;
+  s.base.y += (s.baseVel ? s.baseVel.y : 0) * dt;
+  s.target.x += (s.targetVel ? s.targetVel.x : 0) * dt;
+  s.target.y += (s.targetVel ? s.targetVel.y : 0) * dt;
 
   // External-vehicle mode: adopt the vehicles' real positions BEFORE any
   // logic runs, so C2 planning, routing, and the tether all reason about

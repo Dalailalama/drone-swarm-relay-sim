@@ -155,6 +155,8 @@
       target: { x: swarm.target.x, y: swarm.target.y },
       jammers: swarm.jammers.map(j => ({ x: j.x, y: j.y, erpDbm: j.erpDbm, band: j.band, altM: j.altM, on: j.on })),
       gpsZones: (swarm.gpsZones || []).map(z => ({ x: z.x, y: z.y, rM: z.rM, on: z.on })),
+      baseVelMps: (swarm.baseVel && (swarm.baseVel.x || swarm.baseVel.y)) ? { x: swarm.baseVel.x, y: swarm.baseVel.y } : undefined,
+      targetVelMps: (swarm.targetVel && (swarm.targetVel.x || swarm.targetVel.y)) ? { x: swarm.targetVel.x, y: swarm.targetVel.y } : undefined,
       spectrumAgility: !!swarm.spectrumAgility,
       lpiMode: !!swarm.lpiMode,
       videoBackhaul: !!swarm.videoOn,
@@ -201,6 +203,9 @@
       if (sc.jammers) sc.jammers.forEach(j => swarm.jammers.push({ id: 'JX-load' + Math.round(j.x) + '_' + Math.round(j.y), ...j }));
       swarm.gpsZones.length = 0;
       if (sc.gpsZones) sc.gpsZones.forEach(z => swarm.gpsZones.push({ id: 'GZ-load' + Math.round(z.x) + '_' + Math.round(z.y), ...z }));
+      // Moving-mission dynamics (mission library): convoy base, drifting front.
+      swarm.baseVel = sc.baseVelMps ? { x: sc.baseVelMps.x, y: sc.baseVelMps.y } : { x: 0, y: 0 };
+      swarm.targetVel = sc.targetVelMps ? { x: sc.targetVelMps.x, y: sc.targetVelMps.y } : { x: 0, y: 0 };
       if (sc.spectrumAgility != null && 'spectrumAgility' in swarm) swarm.spectrumAgility = !!sc.spectrumAgility;
       fitView(); updateJammerPanel(); updateZonePanel(); if (typeof updateCityLabels === 'function') updateCityLabels();
     };
@@ -657,6 +662,34 @@
     if (!p) return;
     applyScenario(p.scenario);
     logEvent(swarm, 'Loaded scenario: ' + p.title, 'info');
+  });
+
+  // --- Vertical mission library (with moving-mission dynamics) -----------------
+  const missionSel = el('missionSel'), missionBlurb = el('missionBlurb'), loadMissionBtn = el('loadMissionBtn');
+  MISSION_LIBRARY.forEach((m, i) => {
+    const o = document.createElement('option');
+    o.value = String(i); o.textContent = m.vertical + ' — ' + m.title;
+    missionSel.appendChild(o);
+  });
+  function syncMissionBlurb() {
+    const m = MISSION_LIBRARY[+missionSel.value || 0];
+    if (!m) return;
+    missionBlurb.innerHTML = '<b>' + m.title + '</b><br>' + m.blurb +
+      '<ul style="margin:6px 0 0 16px; padding:0;">' +
+      m.checklist.map(c => '<li>' + c + '</li>').join('') + '</ul>';
+  }
+  missionSel.addEventListener('change', syncMissionBlurb);
+  syncMissionBlurb();
+  loadMissionBtn.addEventListener('click', () => {
+    const m = MISSION_LIBRARY[+missionSel.value || 0];
+    if (!m) return;
+    const sc = Object.assign({}, m.scenario);
+    if (m.dynamics && m.dynamics.baseVelMps) sc.baseVelMps = m.dynamics.baseVelMps;
+    if (m.dynamics && m.dynamics.targetVelMps) sc.targetVelMps = m.dynamics.targetVelMps;
+    applyScenario(sc);
+    logEvent(swarm, 'Mission loaded: ' + m.title +
+      (sc.baseVelMps ? ' — command vehicle moving at ' + Math.hypot(sc.baseVelMps.x, sc.baseVelMps.y).toFixed(1) + ' m/s' : '') +
+      (sc.targetVelMps ? ' — objective drifting' : ''), 'info');
   });
   el('loadScenarioBtn').addEventListener('click', () => el('loadScenarioInput').click());
   el('loadScenarioInput').addEventListener('change', ev => {
