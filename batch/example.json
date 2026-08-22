@@ -1,0 +1,19 @@
+{
+  "label": "Urban altitude sweep — does height buy uptime?",
+  "radio": "sik-v3",
+  "env": "urban",
+  "airframe": "q450",
+  "terrain": "urban",
+  "cityDensity": 55,
+  "cityHeight": 45,
+  "count": 12,
+  "durationSec": 300,
+  "seeds": [101, 102, 103, 104, 105],
+  "mission": { "targetX": 520, "targetY": -130 },
+  "features": { "videoOn": true, "videoKbps": 250 },
+  "sweep": [
+    { "name": "45 m AGL", "altitudeM": 45 },
+    { "name": "90 m AGL", "altitudeM": 90 },
+    { "name": "140 m AGL", "altitudeM": 140 }
+  ]
+}
