@@ -174,6 +174,46 @@ all tested:
   measurement, and emits a Markdown validation report with per-band residuals.
   This is the loop that turns the simulator from plausible into validated.
 
+## Tier-2 capabilities (the moat)
+
+Five features that make this hard to copy — all software-only, all tested:
+
+- **Vertical mission library** (*Mission library* section) — one-click
+  templates for the industries this sells into: SAR grid search, wildfire
+  front overwatch, pipeline linear inspection, convoy escort, perimeter
+  patrol. Each carries an operator checklist. Two of them MOVE: in **convoy
+  escort** the ground station itself drives at road speed while the chain
+  re-plans live behind it; in **wildfire** the objective drifts downwind and
+  the flock follows.
+- **Red-team adversary mode** (*Interference → Red-team mode*) — interference
+  sources direction-find the swarm's own transmissions (sensor-honest: no
+  god view, just a radio receiver) and crawl toward the recency-weighted
+  traffic centroid at limited ground speed. A denial zone that hunts. Uptime
+  with hunting vs static jammers is measurable; the report accounts for how
+  far the adversary moved.
+- **ATAK / TAK integration** (*ATAK / TAK section*) — exports the live common
+  operating picture as Cursor-on-Target atoms: every drone, the command post,
+  the objective, and denial/GNSS-dead zones as ellipse hazards. Download a
+  snapshot `.xml`, or stream live (5 s cadence) through `sitl/tak_bridge.py`
+  onto TAK's UDP multicast (`239.2.3.1:6969`) where real ATAK clients
+  subscribe. Import someone else's CoT marks onto the map; one click turns
+  any mark into the mission objective. Georeferencing reuses a loaded OSM
+  area's exact anchor, or an operator origin (equirectangular, sub-metre at
+  these scales).
+- **Scale: 100+ nodes** — drone slider to 120. Upstream routing uses one
+  C2-rooted shortest-path tree refreshed on a 0.5 s cadence instead of a
+  Dijkstra per packet (16× faster at n=100), separation runs on a uniform
+  neighbor grid. `node bench/run.js` regenerates `bench/BASELINE.md` —
+  committed numbers so performance regressions diff in review. At scale the
+  binding constraint is the shared channel, honestly.
+- **Batch Monte Carlo + REST API** — `node tools/batch.js --config
+  batch/example.json` sweeps parameter cells across seeds overnight and emits
+  a Markdown confidence report (uptime/loss/contact as mean ± sd, p05/p95)
+  plus raw CSV. Same engine served over zero-dependency HTTP:
+  `node tools/server.js`, then `POST /api/batch`. The bundled example already
+  surfaced a quotable finding: in dense urban terrain with short-range
+  radios, LOWER altitude holds more uptime than high altitude.
+
 ## The radio model (and its honesty)
 
 Every radio preset is a real product with datasheet numbers — TX power,
@@ -315,6 +355,14 @@ contributors (ODbL).
 8. **Add a GPS outage over the objective** — drones cross on dead reckoning,
    miss their slots by tens of metres, and C2's picture of them drifts with
    them. Toggle the zone off and navigation snaps back.
+9. **Load *Convoy escort* from the Mission library** — the C2 marker drives
+   itself across the map at road speed while the relay wing re-forms behind
+   it. This is the demo clip.
+10. **Switch on *Red-team mode*** with two jammers placed — they stop sitting
+   still and start hunting whoever transmits.
+11. **Run the overnight study** — `node tools/batch.js --config batch/example.json`
+    and read the confidence report it writes; or serve the same thing as an
+    API: `node tools/server.js`, `curl -X POST localhost:8090/api/batch -d @batch/example.json`.
 
 ## Architecture
 
@@ -327,8 +375,15 @@ js/net.js        packet network: routing, per-hop airtime, fading, retries
 js/swarm.js      C2 planner, drone onboard logic, failsafes, motion
 js/render.js     canvas map: links, packets, range rings, wind, scale bar
 js/scenarios.js  DDIL scenario pack (bundled one-click demos)
+js/missions.js   vertical mission library (SAR/wildfire/pipeline/convoy/perimeter)
+js/adversary.js  red-team mode: DF-hunting interference sources
+js/tak.js        ATAK/TAK Cursor-on-Target export + import
 js/calibrate.js  sim-to-real loop: CSV ingest, path-loss fit, validation
+js/batchstats.js Monte Carlo aggregation (distributions per cell)
 js/main.js       UI wiring, sim loop, camera
+sitl/            MAVLink bridge, mock vehicles, TAK multicast bridge
+tools/           batch engine CLI (batch.js) + REST API server (server.js)
+bench/           scale benchmark suite + committed BASELINE.md
 test/            physics + integration tests (node --test)
 ```
 

@@ -74,6 +74,12 @@ buyer's checklist.
 
 ## Tier 2 — Moat-deepeners (why they can't just copy it)
 
+> **STATUS: BUILT ✅ — all five shipped and tested.** Mission library with
+> moving convoy/wildfire dynamics; red-team DF-hunting jammers; ATAK/TAK
+> CoT export-import + UDP-multicast bridge (`sitl/tak_bridge.py`); 100+ node
+> scale with committed benchmarks (`bench/BASELINE.md`); Monte Carlo batch
+> engine + zero-dep REST API (`tools/server.js`).
+
 - **Red-team adversary mode** — an adaptive jammer AI that learns the swarm's
   routes and moves to exploit them; wargame connectivity before deployment.
 - **ATAK / TAK integration** — export the live common operating picture (tracks,
