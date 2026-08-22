@@ -190,6 +190,9 @@ function makeSwarm(opts) {
     // transmissions and crawl toward the traffic (js/adversary.js).
     adversaryMode: !!opts.adversaryMode,
     advStats: { movedM: 0 },
+    // Imported ATAK CoT marks (Tier-2): [{id, callsign, lat, lon, x, y}] —
+    // ephemeral intel, not saved with scenarios.
+    takMarks: [],
     // Anti-jam spectrum agility + LPI/LPD waveform (Feature: Tier-1 #5)
     spectrumAgility: !!opts.spectrumAgility,
     lpiMode: !!opts.lpiMode,

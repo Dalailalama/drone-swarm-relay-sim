@@ -281,6 +281,36 @@
     </section>
 
     <section>
+      <h2>ATAK / TAK</h2>
+      <div class="af-info">Exports the live common operating picture as <b>Cursor-on-Target</b> atoms — the format ATAK already speaks. Set the origin (auto-filled when a real OSM area is loaded), export a snapshot, stream live to a real client via <b>sitl/tak_bridge.py</b>, or drop someone's CoT marks onto the map and use them as objectives.</div>
+      <div class="ctl-row">
+        <label for="takLat">Origin lat</label>
+        <input type="number" id="takLat" value="38.8977000" step="0.0001" style="flex:1; background:var(--bg); color:var(--text-2); border:1px solid var(--line); border-radius:2px; padding:6px 8px; font:12px var(--mono);">
+      </div>
+      <div class="ctl-row">
+        <label for="takLon">Origin lon</label>
+        <input type="number" id="takLon" value="-77.0365000" step="0.0001" style="flex:1; background:var(--bg); color:var(--text-2); border:1px solid var(--line); border-radius:2px; padding:6px 8px; font:12px var(--mono);">
+      </div>
+      <div class="btn-row">
+        <button id="takExportBtn">Export CoT snapshot (.xml)</button>
+      </div>
+      <div class="btn-row">
+        <input type="file" id="takImportInput" accept=".xml,.cot,.txt,application/xml,text/xml,text/plain" style="display:none;">
+        <button id="takImportBtn">Import CoT marks&hellip;</button>
+        <button id="takClearBtn" class="danger" style="display:none;">Clear marks</button>
+      </div>
+      <div id="takList" class="af-info"></div>
+      <div class="ctl-row">
+        <label for="takWs">Bridge URL</label>
+        <input type="text" id="takWs" value="ws://localhost:8087" style="flex:1; background:var(--bg); color:var(--text-2); border:1px solid var(--line); border-radius:2px; padding:6px 8px; font:12px var(--mono);">
+      </div>
+      <div class="btn-row">
+        <button id="takConnectBtn">Stream to TAK</button>
+      </div>
+      <div id="takStatus" class="af-info">off — use Export for one-shot snapshots</div>
+    </section>
+
+    <section>
       <h2>External vehicles (SITL)</h2>
       <div class="ctl-row">
         <label for="wsUrl">Bridge URL</label>
@@ -328,6 +358,7 @@
 <script src="js/missions.js"></script>
 <script src="js/scenarios.js"></script>
 <script src="js/calibrate.js"></script>
+<script src="js/tak.js"></script>
 <script src="js/net.js"></script>
 <script src="js/swarm.js"></script>
 <script src="js/render.js"></script>

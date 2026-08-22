@@ -372,6 +372,25 @@ function drawLostMarkers(ctx, cv, view, s) {
   }
 }
 
+// Imported ATAK CoT marks: purple diamonds with their callsigns — someone
+// else's picture dropped onto our map, one click from becoming an objective.
+function drawTakMarkers(ctx, cv, view, s) {
+  const U = window.uiScale || 1;
+  for (const m of (s.takMarks || [])) {
+    const c = worldToScreen(view, cv, m.x, m.y);
+    if (c.x < -40 || c.y < -40 || c.x > cv.width + 40 || c.y > cv.height + 40) continue;
+    const r = 8 * U;
+    ctx.beginPath();
+    ctx.moveTo(c.x, c.y - r); ctx.lineTo(c.x + r, c.y); ctx.lineTo(c.x, c.y + r); ctx.lineTo(c.x - r, c.y);
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(164,143,224,0.85)'; ctx.fill();
+    ctx.strokeStyle = '#e8e6da'; ctx.lineWidth = 1 * U; ctx.stroke();
+    ctx.font = (10 * U) + 'px "Segoe UI", sans-serif'; ctx.textAlign = 'center';
+    ctx.fillStyle = COLORS.textDim;
+    ctx.fillText(m.callsign, c.x, c.y - 12 * U);
+  }
+}
+
 function drawWind(ctx, cv, s) {
   const U = window.uiScale || 1;
   const spd = Math.hypot(s.wind.x, s.wind.y);
@@ -418,6 +437,7 @@ function render(ctx, cv, view, s, status, selected, usable) {
   drawLinks(ctx, cv, view, status.hops, s.time, status.connected);
   drawPackets(ctx, cv, view, s);
   drawLostMarkers(ctx, cv, view, s);
+  drawTakMarkers(ctx, cv, view, s);
   drawBase(ctx, cv, view, s.base);
   drawTarget(ctx, cv, view, s.target);
   for (const d of s.drones) drawDrone(ctx, cv, view, d, d === selected);

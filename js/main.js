@@ -466,6 +466,7 @@
       area.name = name || (lat.toFixed(4) + ', ' + lon.toFixed(4));
       osmArea = area;
       resetSwarm();
+      syncTakOrigin();
       logEvent(swarm, 'Real area loaded: ' + area.name + ' — ' + area.buildings.length + ' buildings', 'info');
     } catch (e) {
       osmNote.innerHTML = '<b style="color:var(--lost)">' + e.message + '</b> &middot; This feature needs internet, and the free OSM servers are sometimes busy — try again in a minute.';
@@ -779,6 +780,112 @@
   });
   resetBtn.addEventListener('click', resetSwarm);
 
+  // --- ATAK / TAK (Cursor-on-Target) --------------------------------------------
+  const takLat = el('takLat'), takLon = el('takLon');
+  const takExportBtn = el('takExportBtn'), takImportBtn = el('takImportBtn'), takImportInput = el('takImportInput');
+  const takClearBtn = el('takClearBtn'), takList = el('takList');
+  const takWsInput = el('takWs'), takConnectBtn = el('takConnectBtn'), takStatus = el('takStatus');
+
+  function takAnchor() {
+    // A loaded real area pins the exact geographic anchor; otherwise the
+    // operator-entered origin converts local metres to lat/lon.
+    const geo = swarm && swarm.terrain && swarm.terrain.geoAnchor;
+    if (geo) return makeTakAnchor(geo.lat, geo.lon, geo.x, geo.y);
+    return makeTakAnchor(parseFloat(takLat.value) || 38.8977, parseFloat(takLon.value) || -77.0365, 0, 0);
+  }
+  function syncTakOrigin() {
+    const geo = swarm && swarm.terrain && swarm.terrain.geoAnchor;
+    if (geo) {
+      takLat.value = geo.lat.toFixed(7);
+      takLon.value = geo.lon.toFixed(7);
+    }
+  }
+  window.syncTakOrigin = syncTakOrigin;
+
+  takExportBtn.addEventListener('click', () => {
+    if (!swarm) return;
+    const xml = buildCotFromSwarm(swarm, takAnchor());
+    download(xml.join('\n'), 'cot-snapshot-T' + Math.floor(swarm.time) + 's.xml', 'application/xml');
+    logEvent(swarm, 'ATAK: exported ' + xml.length + ' CoT atoms', 'info');
+  });
+
+  function renderTakList() {
+    const marks = swarm.takMarks || [];
+    takClearBtn.style.display = marks.length ? 'inline-block' : 'none';
+    if (!marks.length) {
+      takList.textContent = '';
+      return;
+    }
+    takList.innerHTML = '<b>' + marks.length + '</b> imported mark' + (marks.length === 1 ? '' : 's') + ':<br>' +
+      marks.map((m, i) =>
+        '<div>' + m.callsign + ' <button class="tak-obj" data-i="' + i +
+        '" style="font-size:10px; padding:1px 6px;">objective</button></div>').join('');
+  }
+  takList.addEventListener('click', ev => {
+    const btn = ev.target.closest('.tak-obj');
+    if (!btn) return;
+    const m = swarm.takMarks[+btn.dataset.i];
+    if (!m) return;
+    swarm.target.x = m.x; swarm.target.y = m.y;
+    logEvent(swarm, 'ATAK: objective moved to imported mark "' + m.callsign + '"', 'info');
+  });
+  takClearBtn.addEventListener('click', () => { swarm.takMarks = []; renderTakList(); });
+  takImportBtn.addEventListener('click', () => takImportInput.click());
+  takImportInput.addEventListener('change', ev => {
+    const file = ev.target.files[0]; if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const anchor = takAnchor();
+        const marks = parseCoTFile(String(reader.result || '')).map(m => {
+          const loc = latLonToLocal(anchor, m.lat, m.lon);
+          return Object.assign({}, m, loc);
+        });
+        swarm.takMarks = marks;
+        renderTakList();
+        logEvent(swarm, 'ATAK: imported ' + marks.length + ' CoT marks from ' + file.name, 'info');
+      } catch (e) {
+        alert('Could not parse CoT file: ' + e.message);
+      }
+    };
+    reader.readAsText(file);
+    ev.target.value = '';
+  });
+
+  // Live stream to sitl/tak_bridge.py -> UDP multicast -> real ATAK clients.
+  let takWs = null, takTimer = null;
+  function takStreamOnce() {
+    if (!swarm || !takWs || takWs.readyState !== WebSocket.OPEN) return;
+    takWs.send(buildCotFromSwarm(swarm, takAnchor(), Date.now() / 1000).join('\n'));
+  }
+  takConnectBtn.addEventListener('click', () => {
+    if (takWs) {
+      clearInterval(takTimer); takTimer = null;
+      try { takWs.close(); } catch (_) { /* already gone */ }
+      takWs = null;
+      takConnectBtn.textContent = 'Stream to TAK';
+      takStatus.textContent = 'off — use Export for one-shot snapshots';
+      return;
+    }
+    let url = takWsInput.value.trim();
+    if (!url) return;
+    // Bare host:port is a common paste; normalize so WebSocket constructor accepts it.
+    if (!/^wss?:\/\//.test(url)) url = 'ws://' + url;
+    try { takWs = new WebSocket(url); } catch (e) { takStatus.textContent = 'bad URL: ' + e.message; return; }
+    takWs.onopen = () => {
+      takConnectBtn.textContent = 'Disconnect TAK stream';
+      takStatus.textContent = 'streaming to ' + url + ' every 5 s — run sitl/tak_bridge.py to reach real ATAK clients';
+      takStreamOnce();
+      takTimer = setInterval(takStreamOnce, 5000);
+    };
+    takWs.onclose = () => {
+      clearInterval(takTimer); takTimer = null; takWs = null;
+      takConnectBtn.textContent = 'Stream to TAK';
+      takStatus.textContent = 'bridge closed';
+    };
+    takWs.onerror = () => { takStatus.textContent = 'bridge unreachable — is tak_bridge.py running?'; };
+  });
+
   // --- Canvas interaction ---------------------------------------------------
   let dragMode = null; // 'target' | 'pan' | 'orbit' | 'jammer' | 'pinch'
   let lastMouse = null;
@@ -1076,6 +1183,7 @@
   countOut.textContent = countRange.value;
   updateOsmRow();
   updateHeteroRow();
+  syncTakOrigin();
   updateAirframeInfo();
   updateSpecCard();
   applySpacing();
