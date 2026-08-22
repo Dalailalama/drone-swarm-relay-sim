@@ -133,6 +133,47 @@ terrain and the learned RF coverage map (roadmap) exist, corridors will
 bend around *measured* dead zones instead of following a straight spine.
 Same dependency as FASTER itself: corridors need a map to matter.
 
+## Tier-1 capabilities (the DDIL edition)
+
+Six features that map this sim onto funded-RFP language — all software-only,
+all tested:
+
+- **Heterogeneous swarms** — mix airframes AND radios in one mission
+  (*Mixed fleet* in Mission setup): an endurance relay wing on long-range
+  radios holds the backhaul while tactical drones fly the objective on cheap
+  short-range hardware. Link budgets between different radios are computed per
+  direction over each radio's own calibrated curve; band-incompatible nodes
+  simply cannot hear each other. C2 elects wing units for relay duty, keeps
+  them off rescue tasking, and always plans a *tactical-tail slot* so the
+  short-legged flock can actually hang off the chain.
+- **GPS-denied navigation** (*Interference → Add GPS outage*) — inside a
+  denial zone drones fly on dead reckoning: their believed position integrates
+  airspeed with Ornstein-Uhlenbeck drift, they steer by that belief (and miss
+  slots by exactly their nav error), and telemetry poisons C2's picture of
+  where they are. The planner hedges: relay slots sidestep zones it cannot
+  trust positions in.
+- **Anti-jam spectrum agility + LPI/LPD** (*Mission setup*) — frequency-hopping
+  presets (Doodle Mesh Rider, Silvus, ELRS) shed a datasheet-class amount of
+  interference when agility is on; LPI waveforms trade 3 dB of link budget for
+  6 dB of denial rejection; denial zones visibly shrink for agile chains; link
+  uptime is measured so recovery is a number, not an adjective.
+- **Payload/video backhaul** (*Mission setup → Video backhaul*) — streamed
+  chunks are real packets paying real airtime on the one shared channel.
+  C2 grants ONE streamer at a time in round-robin turns delivered inside order
+  packets; chunk delivery/loss is accounted, the fleet panel marks who holds
+  the channel, and video visibly starves C2 traffic (and vice versa).
+- **DDIL scenario pack** (*Scenario → dropdown*) — five one-click seeded
+  scenarios: GPS-denied crossing, jammed corridor on an agile MANET,
+  intermittent urban canyons, duty-cycle-limited LoRa with a starving video
+  scheduler, and the full combination (mixed fleet + jammer + GNSS denial +
+  LPI + payload). Each is plain JSON-shaped data — save/load compatible.
+- **Sim-to-real calibration loop** (*Calibration section*) — feed any CSV log
+  of RSSI vs distance from real hardware (`dist,rssi` or `x,y[,z],rssi`);
+  least-squares fits the path-loss exponent and reference power with RMSE/R²,
+  re-derives a field-calibrated radio preset whose model exponent equals your
+  measurement, and emits a Markdown validation report with per-band residuals.
+  This is the loop that turns the simulator from plausible into validated.
+
 ## The radio model (and its honesty)
 
 Every radio preset is a real product with datasheet numbers — TX power,
@@ -264,17 +305,31 @@ contributors (ODbL).
    budget, is the binding constraint at 40 km scale.
 5. **Crank wind to 12 m/s** — upwind legs crawl, relays burn battery holding
    station, RTB triggers early.
+6. **Load *Full DDIL* from the Scenario dropdown** — mixed fleet, jammer,
+   GNSS denial over the objective, LPI waveforms, and a 300 kbps video feed
+   all fighting for one channel. Then toggle spectrum agility off mid-run and
+   watch link uptime fall.
+7. **Enable *Mixed fleet*** — an X8 relay wing on RFD900x radios bridges
+   3 km while SiK-equipped micros work the target; kill a wing relay and
+   watch C2 re-elect another *wing* unit, not a tactical one.
+8. **Add a GPS outage over the objective** — drones cross on dead reckoning,
+   miss their slots by tens of metres, and C2's picture of them drifts with
+   them. Toggle the zone off and navigation snaps back.
 
 ## Architecture
 
 ```
 js/radios.js     radio presets (datasheet values + sources) & link physics
 js/airframes.js  airframe presets & momentum-theory energy model
+js/fleet.js      heterogeneous fleets: mixed-band per-direction link budgets
+js/gpsnav.js     GPS-denied dead-reckoning belief model
 js/net.js        packet network: routing, per-hop airtime, fading, retries
 js/swarm.js      C2 planner, drone onboard logic, failsafes, motion
 js/render.js     canvas map: links, packets, range rings, wind, scale bar
+js/scenarios.js  DDIL scenario pack (bundled one-click demos)
+js/calibrate.js  sim-to-real loop: CSV ingest, path-loss fit, validation
 js/main.js       UI wiring, sim loop, camera
-test/            physics unit tests (node --test)
+test/            physics + integration tests (node --test)
 ```
 
 Plain ES5-ish JavaScript, zero dependencies, deterministic under a seeded

@@ -35,6 +35,10 @@ Every feature below exists to make one of those four signatures defensible.
 
 ## Tier 1 — Deal-closers (verbatim funded-RFP language)
 
+> **STATUS: BUILT ✅ — all six shipped and tested (see README "Tier-1
+> capabilities"); commits land feature-by-feature with headless integration
+> tests under `test/`.**
+
 These phrases appear in real RFPs and grant calls worldwide. Each maps to one
 buyer's checklist.
 
