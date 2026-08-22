@@ -50,6 +50,9 @@ function makeNet(seed) {
     pktSeq: 0,
     // payload/video accounting (Feature: Tier-1 #4)
     vid: { framesDelivered: 0, droppedFrames: 0 },
+    // last-transmission clock per node id — the RF signature a direction-
+    // finding adversary can legally sense (js/adversary.js)
+    txAt: {},
   };
 }
 
@@ -85,6 +88,7 @@ function stepBcasts(s) {
     const b = list[i];
     if (s.time < b.tFire) { next.push(b); continue; }
     s.net.airtimeAccum += (b.bytes * 8) / (s.radio.airRateKbps * 1000);
+    s.net.txAt[b.srcId] = s.time;
     for (const id of nodeIds(s)) {
       if (id === b.srcId || id === 'C2') continue;
       const d = nodePos(s, id);
@@ -252,6 +256,7 @@ function stepNet(s, dt) {
       const retries = hopDelivered(s, from, to);
       const txSec = bytesOf(p) * 8 / (s.radio.airRateKbps * 1000);
       s.net.airtimeAccum += txSec * (1 + (retries < 0 ? HOP_RETRIES : retries));
+      s.net.txAt[from] = s.time;
       if (retries < 0) {
         s.net.dropped++;
         if (p.kind === 'vid') s.net.vid.droppedFrames++;

@@ -204,6 +204,11 @@
     <section>
       <h2>Interference (RF denial)</h2>
       <div id="jammerIntro" class="af-info">An interference source jams the radio inside a <b>red circle</b> around it — a jammer, a crowded city, or a broken transmitter. Drones can't hold a link in the red zone, so the swarm avoids or routes around it. Add one, then <b>drag it</b> onto or beside the chain to see what happens.</div>
+      <div class="ctl-row">
+        <label for="advChk">Red-team mode</label>
+        <input type="checkbox" id="advChk" style="flex:0 0 auto; width:auto; accent-color:var(--accent);">
+        <output style="flex:1; text-align:left; color:var(--dim);">sources DF your traffic and hunt it</output>
+      </div>
       <div class="btn-row">
         <button id="addJammerBtn">Add RF source</button>
         <button id="addGpsZoneBtn">Add GPS outage</button>

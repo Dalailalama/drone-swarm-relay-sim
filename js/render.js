@@ -177,7 +177,8 @@ function drawJammers(ctx, cv, view, s, selected, timeSec) {
     ctx.fillStyle = j.on === false ? '#8a887a' : '#e06050'; ctx.fill();
     ctx.font = (11 * U) + 'px "IBM Plex Mono", monospace'; ctx.textAlign = 'center';
     ctx.fillStyle = j.on === false ? '#8a887a' : '#e06050';
-    ctx.fillText((j.on === false ? 'off · ' : '') + j.erpDbm + ' dBm', c.x, c.y + 22 * U);
+    ctx.fillText((j.on === false ? 'off · ' : '') + j.erpDbm + ' dBm' +
+      (s.adversaryMode ? ' · AI' : ''), c.x, c.y + 22 * U);
   }
 }
 

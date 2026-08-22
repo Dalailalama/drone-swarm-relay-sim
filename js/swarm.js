@@ -186,6 +186,10 @@ function makeSwarm(opts) {
     // front, flood edge). m/s in world frame; zero for static missions.
     baseVel: opts.baseVel || { x: 0, y: 0 },
     targetVel: opts.targetVel || { x: 0, y: 0 },
+    // Red-team mode: interference sources direction-find the swarm's own
+    // transmissions and crawl toward the traffic (js/adversary.js).
+    adversaryMode: !!opts.adversaryMode,
+    advStats: { movedM: 0 },
     // Anti-jam spectrum agility + LPI/LPD waveform (Feature: Tier-1 #5)
     spectrumAgility: !!opts.spectrumAgility,
     lpiMode: !!opts.lpiMode,
@@ -1371,6 +1375,36 @@ function chainStatus(s) {
   return { nodes, hops, connected, missionCount: flock.length, relayCount: relays.length, freshCount, aliveCount };
 }
 
+// --- Red-team adversaries -----------------------------------------------------
+// Each active source DFs recent transmissions (net.txAt) and crawls toward
+// their recency-weighted centroid at its own ground speed. Sensor-honest:
+// no truth-state access, no route knowledge — just a radio receiver.
+function stepAdversaries(s, dt) {
+  if (!s.adversaryMode || !s.jammers || !s.jammers.length) return;
+  const now = s.time;
+  for (const j of s.jammers) {
+    if (j.on === false) continue;
+    const contacts = [];
+    for (const [id, t] of Object.entries(s.net.txAt)) {
+      const p = nodePos(s, id);
+      if (!p || !alive(p)) continue;
+      contacts.push({ x: p.x, y: p.y, age: t });
+    }
+    const target = trafficCentroid(contacts, now);
+    const speed = j.moveSpeedMs || 9;
+    const before = { x: j.x, y: j.y };
+    const np = adversaryStep(j, target, speed, dt);
+    if (np !== j) {
+      j.x = np.x; j.y = np.y;
+      s.advStats.movedM += dist2d(before, j);
+      if (!j._huntLogged) {
+        logEvent(s, 'RED TEAM: ' + j.id + ' is direction-finding traffic — hunting at ' + speed + ' m/s', 'error');
+        j._huntLogged = true;
+      }
+    }
+  }
+}
+
 // --- Tick -------------------------------------------------------------------------
 function stepSwarm(s, dt) {
   s.time += dt;
@@ -1382,6 +1416,9 @@ function stepSwarm(s, dt) {
   s.base.y += (s.baseVel ? s.baseVel.y : 0) * dt;
   s.target.x += (s.targetVel ? s.targetVel.x : 0) * dt;
   s.target.y += (s.targetVel ? s.targetVel.y : 0) * dt;
+
+  // Red team moves first: it repositions before the swarm's planning round.
+  stepAdversaries(s, dt);
 
   // External-vehicle mode: adopt the vehicles' real positions BEFORE any
   // logic runs, so C2 planning, routing, and the tether all reason about
@@ -1464,6 +1501,10 @@ function afterActionReport(s) {
   if (gpsZ) {
     L.push('- **GPS denial:** ' + gpsZ + ' zone' + (gpsZ === 1 ? '' : 's') +
       (s.maxNavErrM ? ' · worst observed nav error ' + s.maxNavErrM.toFixed(0) + ' m' : ''));
+  }
+  if (s.adversaryMode && activeJam) {
+    L.push('- **Red-team adversary:** sources hunted traffic, repositioning ' +
+      s.advStats.movedM.toFixed(0) + ' m in total — uptime below includes the chase.');
   }
   L.push('');
   L.push('## Outcome');

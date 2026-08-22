@@ -112,6 +112,7 @@
       lpiMode: lpiChk.checked,
       videoOn: videoChk.checked,
       videoKbps: +videoKbpsRange.value,
+      adversaryMode: advChk.checked,
       windX: +windSpdRange.value * Math.cos(+windDirRange.value * Math.PI / 180),
       windY: +windSpdRange.value * Math.sin(+windDirRange.value * Math.PI / 180),
       targetX: dist, targetY: -dist * 0.25,
@@ -161,6 +162,7 @@
       lpiMode: !!swarm.lpiMode,
       videoBackhaul: !!swarm.videoOn,
       videoKbps: swarm.videoKbps || 0,
+      adversaryMode: !!swarm.adversaryMode,
     };
   }
   function applyScenario(sc) {
@@ -183,6 +185,7 @@
     if (sc.corridor != null) corridorChk.checked = sc.corridor;
     if (sc.spectrumAgility != null) agilityChk.checked = !!sc.spectrumAgility;
     if (sc.lpiMode != null) lpiChk.checked = !!sc.lpiMode;
+    if (sc.adversaryMode != null) { advChk.checked = !!sc.adversaryMode; }
     if (sc.videoBackhaul != null) videoChk.checked = !!sc.videoBackhaul;
     if (sc.videoKbps != null && sc.videoKbps > 0) { videoChk.checked = true; videoKbpsRange.value = sc.videoKbps; }
     if (sc.broadcast != null) bcastChk.checked = sc.broadcast;
@@ -605,6 +608,13 @@
     }
   }
   window.updateZonePanel = updateZonePanel;
+
+  // --- Red-team adversary mode ---------------------------------------------------
+  const advChk = el('advChk');
+  advChk.addEventListener('change', () => {
+    if (swarm) swarm.adversaryMode = advChk.checked;
+    if (swarm && advChk.checked) logEvent(swarm, 'RED TEAM: interference sources now direction-find swarm traffic', 'error');
+  });
 
   addGpsZoneBtn.addEventListener('click', () => {
     // First outage lands astride the mid-corridor (where the chain lives);
