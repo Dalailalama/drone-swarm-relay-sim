@@ -22,12 +22,18 @@ function loadSim(files) {
 
 // Everything pure enough to run under Node, in dependency order.
 const CORE = [
-  'radios.js', 'airframes.js', 'fleet.js', 'gpsnav.js', 'net.js',
+  'radios.js', 'airframes.js', 'fleet.js', 'gpsnav.js', 'adversary.js', 'net.js',
   'terrain.js', 'swarm.js', 'render.js',
 ];
 
 function loadCore(extra) {
-  const ctx = loadSim([...CORE, ...(extra || [])]);
+  const files = [...CORE];
+  if (extra) {
+    for (const f of extra) {
+      if (!files.includes(f)) files.push(f);
+    }
+  }
+  const ctx = loadSim(files);
   // Top-level `const` declarations don't attach to the vm global — surface
   // the ones tests need explicitly.
   try {

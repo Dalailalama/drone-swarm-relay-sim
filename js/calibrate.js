@@ -79,7 +79,8 @@ function parseFlightLogCsv(text) {
         if (!isFinite(oz)) oz = 0;
         continue; // first row is the origin, not a sample
       }
-      const dz = iZ >= 0 ? (num(iZ) || oz) : oz;
+      const vz = iZ >= 0 ? num(iZ) : null;
+      const dz = (vz !== null && isFinite(vz)) ? vz : oz;
       dM = Math.hypot(x - ox, y - oy, (iZ >= 0 ? dz : 0) - oz);
     }
     const rssi = num(iR);
@@ -127,10 +128,7 @@ function fitPathLoss(samples) {
 // EQUALS the measured one — exactly the tuning step that makes predictions
 // match your field data.
 function calibratePreset(fit, basePreset) {
-  const budget = basePreset.txDbm + 2 * basePreset.antGainDbi - basePreset.sensDbm;
-  const pl1 = pl1m(basePreset.freqMHz);
-  // model n = (budget − PL(1m)) / (10·log10(rangeLosM)) → solve for rangeLosM
-  const rangeLosM = Math.pow(10, (budget - pl1) / (10 * fit.n));
+  const rangeLosM = Math.pow(10, (fit.refPowerDbm - basePreset.sensDbm) / (10 * fit.n));
   return {
     id: basePreset.id + '-calibrated',
     name: basePreset.name + ' (field-calibrated)',
@@ -142,6 +140,8 @@ function calibratePreset(fit, basePreset) {
     // Full precision on purpose: the model-exponent identity below is exact
     // only if this number isn't rounded.
     rangeLosM,
+    refPowerDbm: fit.refPowerDbm,
+    nFit: fit.n,
     hopGainDb: basePreset.hopGainDb,
     dutyCycle: basePreset.dutyCycle,
     note: 'Calibrated against ' + fit.count + ' field samples: measured path-loss exponent n=' +

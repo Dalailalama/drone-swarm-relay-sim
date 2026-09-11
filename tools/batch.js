@@ -25,7 +25,26 @@ const LIMITS = {
   maxSeedsPerCell: 20,
   maxTotalRuns: 200,
   maxDurationSec: 1800,
+  maxDrones: 120,
+  maxTotalWorkSec: 360000,
 };
+
+function normalizeConfig(cfg) {
+  if (!cfg || typeof cfg !== 'object') return null;
+  const cells = Array.isArray(cfg.sweep) && cfg.sweep.length ? cfg.sweep : [{ name: 'base' }];
+  const seeds = Array.isArray(cfg.seeds) && cfg.seeds.length ? cfg.seeds : [101, 102, 103];
+  const durationSec = Math.min(LIMITS.maxDurationSec, Math.max(30, cfg.durationSec != null ? cfg.durationSec : 300));
+  const count = Math.min(LIMITS.maxDrones, Math.max(1, cfg.count != null ? cfg.count : 10));
+  return {
+    ...cfg,
+    count,
+    durationSec,
+    seeds,
+    sweep: cells,
+    airframe: cfg.airframe || 'q450',
+    terrain: cfg.terrain || 'flat',
+  };
+}
 
 function validateConfig(cfg) {
   if (!cfg || typeof cfg !== 'object') return 'config must be a JSON object';
@@ -35,16 +54,34 @@ function validateConfig(cfg) {
   if (!A.AIRFRAMES.some(a => a.id === (cfg.airframe || 'q450'))) return 'unknown airframe';
   const cells = Array.isArray(cfg.sweep) ? cfg.sweep : [{ name: 'base' }];
   if (!cells.length || cells.length > LIMITS.maxCells) return 'sweep must have 1..' + LIMITS.maxCells + ' cells';
-  for (const c of cells) if (!c.name) return 'every sweep cell needs a name';
+  const names = new Set();
+  for (const c of cells) {
+    if (!c || typeof c !== 'object' || !c.name) return 'every sweep cell needs a name';
+    if (names.has(c.name)) return 'duplicate sweep cell name: ' + c.name;
+    names.add(c.name);
+  }
   const seeds = Array.isArray(cfg.seeds) ? cfg.seeds : [101, 102, 103];
   if (!seeds.length || seeds.length > LIMITS.maxSeedsPerCell) {
     return 'seeds must be a non-empty array of at most ' + LIMITS.maxSeedsPerCell;
   }
-  if (cells.length * seeds.length > LIMITS.maxTotalRuns) {
-    return 'total runs (' + cells.length * seeds.length + ') exceeds cap ' + LIMITS.maxTotalRuns;
+  for (const s of seeds) {
+    if (typeof s !== 'number' || !Number.isInteger(s)) return 'seeds must be integers';
   }
-  const dur = Math.min(LIMITS.maxDurationSec, cfg.durationSec || 300);
-  if (!(dur >= 30)) return 'durationSec must be >= 30';
+  const totalRuns = cells.length * seeds.length;
+  if (totalRuns > LIMITS.maxTotalRuns) {
+    return 'total runs (' + totalRuns + ') exceeds cap ' + LIMITS.maxTotalRuns;
+  }
+  const dur = cfg.durationSec != null ? cfg.durationSec : 300;
+  if (typeof dur !== 'number' || dur < 30 || dur > LIMITS.maxDurationSec) {
+    return 'durationSec must be between 30 and ' + LIMITS.maxDurationSec;
+  }
+  const count = cfg.count != null ? cfg.count : 10;
+  if (typeof count !== 'number' || count < 1 || count > LIMITS.maxDrones) {
+    return 'count must be between 1 and ' + LIMITS.maxDrones;
+  }
+  if (totalRuns * dur > LIMITS.maxTotalWorkSec) {
+    return 'total workload exceeds safety cap';
+  }
   // Mission geometry sanity
   const t = cfg.mission || {};
   if (!isFinite(t.targetX) || !isFinite(t.targetY)) return 'mission.targetX/targetY required (metres)';
@@ -67,7 +104,7 @@ function runOne(ctx, cfg, cell, seed) {
     seed,
     terrain: ctx.makeTerrain(cfg.terrain === 'osm' ? 'flat' : (cfg.terrain || 'flat'), {
       distM: Math.hypot(cfg.mission.targetX, cfg.mission.targetY),
-      altM: cell.altitudeM || cfg.altitudeM || 70,
+      altM: cfg.altitudeM || 70, // Bug 26: hold terrain constant across sweep cells
       targetX: cfg.mission.targetX, targetY: cfg.mission.targetY, seed,
       density: (cfg.cityDensity != null ? cfg.cityDensity : 40) / 100,
       heightScale: (cfg.cityHeight != null ? cfg.cityHeight : 40) / 100,
@@ -101,10 +138,11 @@ function runOne(ctx, cfg, cell, seed) {
 }
 
 // Run a full batch. Returns plain data + rendered artifacts.
-function runBatch(cfg, progress) {
-  const err = validateConfig(cfg);
+function runBatch(rawCfg, progress) {
+  const err = validateConfig(rawCfg);
   if (err) throw new Error('invalid config: ' + err);
-  const cells = Array.isArray(cfg.sweep) ? cfg.sweep : [{ name: 'base' }];
+  const cfg = normalizeConfig(rawCfg);
+  const cells = cfg.sweep;
   const seeds = cfg.seeds;
   const ctx = loadCore(); // one context reused across runs (state comes per-swarm)
   const rows = [];
@@ -131,7 +169,7 @@ function runBatch(cfg, progress) {
   return { rows, summary, md, csv };
 }
 
-module.exports = { runBatch, validateConfig, LIMITS };
+module.exports = { runBatch, validateConfig, normalizeConfig, LIMITS };
 
 // --- CLI ----------------------------------------------------------------------
 if (require.main === module) {

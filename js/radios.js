@@ -144,6 +144,7 @@ function pl1m(freqMHz) {
 }
 
 function pathLossExponent(radio) {
+  if (radio.nFit != null) return radio.nFit;
   const budget = radio.txDbm + 2 * radio.antGainDbi - radio.sensDbm; // dB available
   return (budget - pl1m(radio.freqMHz)) / (10 * Math.log10(radio.rangeLosM));
 }
@@ -152,6 +153,9 @@ function pathLossExponent(radio) {
 function rssiAt(radio, envFactor, dMetres) {
   const d = Math.max(1, dMetres / envFactor); // environment shrinks effective range
   const n = pathLossExponent(radio);
+  if (radio.refPowerDbm != null) {
+    return radio.refPowerDbm - 10 * n * Math.log10(d);
+  }
   const pl = pl1m(radio.freqMHz) + 10 * n * Math.log10(d);
   return radio.txDbm + 2 * radio.antGainDbi - pl;
 }
@@ -167,6 +171,10 @@ const FADE_MARGIN_DB = 6;
 
 function usableRangeM(radio, envFactor) {
   const n = pathLossExponent(radio);
+  if (radio.refPowerDbm != null) {
+    const d = Math.pow(10, (radio.refPowerDbm - radio.sensDbm - FADE_MARGIN_DB) / (10 * n));
+    return d * envFactor;
+  }
   const budget = radio.txDbm + 2 * radio.antGainDbi - radio.sensDbm - FADE_MARGIN_DB;
   const d = Math.pow(10, (budget - pl1m(radio.freqMHz)) / (10 * n));
   return d * envFactor;

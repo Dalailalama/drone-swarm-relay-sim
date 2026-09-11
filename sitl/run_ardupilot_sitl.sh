@@ -62,10 +62,10 @@ for ((i = 0; i < N; i++)); do
 
     # --no-mavproxy: we don't need the interactive MAVProxy console, just
     # the raw MAVLink stream forwarded to the bridge.
-    # --out=udp:127.0.0.1:PORT: forwards (in addition to SITL's own default
-    # links) a MAVLink stream to our bridge's udpin listener for this vehicle.
+    # -A "--serial0=udpclient:127.0.0.1:${PORT}": direct serial link to bridge's
+    # udpin listener without depending on MAVProxy routing.
     setsid "$SIM_VEHICLE" -v ArduCopter -I"$i" --no-mavproxy \
-        --out="udp:127.0.0.1:${PORT}" \
+        -A "--serial0=udpclient:127.0.0.1:${PORT}" \
         >"sitl_instance_${i}.log" 2>&1 &
     PIDS+=("$!")
 

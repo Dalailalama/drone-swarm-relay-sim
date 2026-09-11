@@ -27,6 +27,7 @@
     ws: null,
     connected: false,
     ready: false,
+    controlMode: 'internal', // 'internal' | 'external'
     ids: null,          // vehicle ids the bridge reports
     telem: {},          // id -> {x, y, alt, connected, t}
     prev: {},           // id -> {x, y, t} for velocity estimation
@@ -44,6 +45,7 @@
   // Connect to a bridge/mock at wsUrl and prepare `count` vehicles at altM.
   function externalConnect(getSwarm, wsUrl, count, altM) {
     externalDisconnect();
+    ExternalMode.controlMode = 'external';
     let ws;
     try { ws = new WebSocket(wsUrl); }
     catch (e) { setStatus(getSwarm(), 'bad URL: ' + e.message); return; }
@@ -58,7 +60,9 @@
     ws.onclose = () => {
       ExternalMode.connected = false;
       ExternalMode.ready = false;
-      setStatus(getSwarm(), 'disconnected');
+      // Keep controlMode = 'external' so internal physics doesn't take over;
+      // vehicles remain frozen in place until user explicitly disconnects.
+      setStatus(getSwarm(), 'disconnected — positions frozen under external hold (click Disconnect to resume internal physics)');
     };
     ws.onerror = () => setStatus(getSwarm(), 'socket error (is the bridge running?)');
     ws.onmessage = (ev) => {
@@ -96,6 +100,7 @@
   }
 
   function externalDisconnect() {
+    ExternalMode.controlMode = 'internal';
     if (ExternalMode.ws) {
       try { ExternalMode.ws.close(); } catch (e) {}
     }
@@ -108,7 +113,7 @@
   }
 
   function externalActive() {
-    return ExternalMode.ready && ExternalMode.connected;
+    return ExternalMode.controlMode === 'external';
   }
 
   // Called at the TOP of each swarm tick when active: pull real positions into
@@ -116,9 +121,20 @@
   // vehicles. Velocity is estimated from consecutive telemetry so heading
   // arrows and the "moving" battery-drain flag still work.
   function externalPullPositions(s) {
+    if (!ExternalMode.connected || !ExternalMode.ready) {
+      for (const d of s.drones) {
+        d.vx = 0;
+        d.vy = 0;
+      }
+      return;
+    }
     for (const d of s.drones) {
       const t = ExternalMode.telem[d.id];
-      if (!t) continue;
+      if (!t) {
+        d.vx = 0;
+        d.vy = 0;
+        continue;
+      }
       if (!t.connected) {
         // Bridge lost this vehicle's heartbeat. Freeze it in place but keep
         // it recoverable — a brief gap must not permanently kill a drone
@@ -144,6 +160,7 @@
       }
       d.x = t.x;
       d.y = t.y;
+      if (t.alt != null) d.altM = t.alt;
     }
   }
 

@@ -53,6 +53,10 @@ function makeNet(seed) {
     // last-transmission clock per node id — the RF signature a direction-
     // finding adversary can legally sense (js/adversary.js)
     txAt: {},
+    chanBusyUntil: {},
+    nodeTxUntil: {},
+    nodeDutyUntil: {},
+    vidFrameSeq: 0,
   };
 }
 
@@ -67,14 +71,54 @@ function capLog(s, ev) {
   if (s.net.cap.length > CAP_MAX) s.net.cap.shift();
 }
 
+// --- Hardware matching & Channel ID ------------------------------------------
+function txRadioOf(s, from, to) {
+  if (from === 'C2') {
+    const toNode = to ? nodePos(s, to) : null;
+    return (toNode && toNode.radio) ? toNode.radio : s.radio;
+  }
+  const fromNode = from ? nodePos(s, from) : null;
+  return (fromNode && fromNode.radio) ? fromNode.radio : s.radio;
+}
+
+function channelKeyOf(radio) {
+  if (!radio) return 'default';
+  if (radio.band) return String(radio.band);
+  if (radio.freqMHz < 1500) return 'sub1g';
+  if (radio.freqMHz < 3000) return '2.4g';
+  return '5g';
+}
+
 // --- Broadcast flooding -------------------------------------------------------
 // One packet carries the whole swarm's order table. Every node that hears a
 // broadcast with a new sequence number takes its own row and re-transmits
 // the packet ONCE — classic mesh flooding. No routes, no ACKs, no retries:
 // each receiver rolls the packet-error dice exactly once per transmission it
 // can hear, which is honestly how broadcast works.
-function sendBroadcast(s, srcId, payload, bytes) {
-  s.net.bcasts.push({ srcId, payload, bytes, tFire: s.time + hopTimeSec(s.radio, bytes) });
+function sendBroadcast(s, srcId, payload, bytes, radioOverride) {
+  if (srcId !== 'C2') {
+    const d = nodePos(s, srcId);
+    if (!d || !alive(d)) return;
+  }
+  const rad = radioOverride || (srcId === 'C2' ? s.radio : txRadioOf(s, srcId, null));
+  const chan = channelKeyOf(rad);
+  const airRate = (rad && rad.airRateKbps) || 64;
+  const airtime = (bytes * 8) / (airRate * 1000);
+  const tStart = Math.max(
+    s.time,
+    s.net.chanBusyUntil[chan] || 0,
+    s.net.nodeTxUntil[srcId] || 0,
+    s.net.nodeDutyUntil[srcId] || 0
+  );
+  s.net.chanBusyUntil[chan] = tStart + airtime;
+  s.net.nodeTxUntil[srcId] = tStart + airtime;
+  s.net.txAt[srcId] = tStart;
+  s.net.airtimeAccum += airtime;
+  if (rad.dutyCycle && rad.dutyCycle < 1) {
+    const rest = airtime * (1 - rad.dutyCycle) / rad.dutyCycle;
+    s.net.nodeDutyUntil[srcId] = Math.max(tStart + airtime, s.net.nodeDutyUntil[srcId] || 0) + rest;
+  }
+  s.net.bcasts.push({ srcId, payload, bytes, radio: rad, tFire: tStart + airtime });
 }
 
 function stepBcasts(s) {
@@ -87,13 +131,21 @@ function stepBcasts(s) {
   for (let i = 0; i < list.length; i++) {
     const b = list[i];
     if (s.time < b.tFire) { next.push(b); continue; }
-    s.net.airtimeAccum += (b.bytes * 8) / (s.radio.airRateKbps * 1000);
+    if (b.srcId !== 'C2') {
+      const d = nodePos(s, b.srcId);
+      if (!d || !alive(d)) continue; // dead transmitter (B17)
+    }
+    const rad = b.radio || (b.srcId === 'C2' ? s.radio : txRadioOf(s, b.srcId, null));
+    const airRate = (rad && rad.airRateKbps) || 64;
+    s.net.airtimeAccum += (b.bytes * 8) / (airRate * 1000);
     s.net.txAt[b.srcId] = s.time;
     for (const id of nodeIds(s)) {
       if (id === b.srcId || id === 'C2') continue;
       const d = nodePos(s, id);
       if (!d || !alive(d)) continue;
       if (d.bcastSeen >= b.payload.seq) continue;
+      const rxRad = (d && d.radio) || s.radio;
+      if (typeof bandCompatible === 'function' && !bandCompatible(rad, rxRad)) continue;
       const m = liveMarginDb(s, b.srcId, id);
       if (m <= 0) continue;
       if (s.net.rng() >= pktSuccessProb(m)) continue; // one roll, no retry
@@ -102,7 +154,8 @@ function stepBcasts(s) {
       s.net.delivered++;
       capLog(s, { ev: 'bcast', seqNo: b.payload.seq, from: b.srcId, to: id, marginDb: +m.toFixed(1) });
       // this node re-transmits the table once, after its own airtime
-      list.push({ srcId: id, payload: b.payload, bytes: b.bytes, tFire: s.time + hopTimeSec(s.radio, b.bytes) });
+      const nodeRad = txRadioOf(s, id, null);
+      list.push({ srcId: id, payload: b.payload, bytes: b.bytes, radio: nodeRad, tFire: s.time + hopTimeSec(nodeRad, b.bytes) });
     }
   }
   s.net.bcasts = next;
@@ -213,19 +266,32 @@ const C2_TREE_TTL_SEC = 0.5;
 function c2Tree(s) {
   if (s._c2Tree && s.time - s._c2Tree.at < C2_TREE_TTL_SEC) return s._c2Tree;
   const ids = nodeIds(s);
-  const dist = new Map(ids.map(id => [id, Infinity]));
+  const dist = new Map();
+  for (let i = 0; i < ids.length; i++) dist.set(ids[i], Infinity);
   const prev = new Map();
   const done = new Set();
   dist.set('C2', 0);
+  const maxRadio = (s.relayRadio && s.relayRadio.rangeLosM > s.radio.rangeLosM) ? s.relayRadio : s.radio;
+  const maxSpan = usableRangeM(maxRadio, s.envFactor) * 2.5;
   for (;;) {
     let cur = null, best = Infinity;
-    for (const id of ids) {
-      if (!done.has(id) && dist.get(id) < best) { best = dist.get(id); cur = id; }
+    for (let i = 0; i < ids.length; i++) {
+      const id = ids[i];
+      if (!done.has(id)) {
+        const d = dist.get(id);
+        if (d < best) { best = d; cur = id; }
+      }
     }
     if (cur === null || best === Infinity) break; // nothing reachable remains
     done.add(cur);
-    for (const nxt of ids) {
+    const curPos = nodePos(s, cur);
+    for (let i = 0; i < ids.length; i++) {
+      const nxt = ids[i];
       if (done.has(nxt)) continue;
+      if (curPos) {
+        const nxtPos = nodePos(s, nxt);
+        if (nxtPos && (Math.abs(curPos.x - nxtPos.x) > maxSpan || Math.abs(curPos.y - nxtPos.y) > maxSpan)) continue;
+      }
       const c = linkCost(s, cur, nxt);
       if (c === Infinity) continue;
       if (best + c < dist.get(nxt)) { dist.set(nxt, best + c); prev.set(nxt, cur); }
@@ -246,11 +312,78 @@ function pathToC2(s, src) {
 
 // --- Packets ------------------------------------------------------------------
 // bytesOverride lets payload kinds (video chunks) carry their real size.
+function preparePacketHop(s, p) {
+  const from = p.path[p.hop], to = p.path[p.hop + 1];
+  if (!from || !to) return false;
+
+  if (from !== 'C2') {
+    const dFrom = nodePos(s, from);
+    if (!dFrom || !alive(dFrom)) {
+      s.net.dropped++;
+      if (p.kind === 'vid' && !p.frameDropped) {
+        p.frameDropped = true;
+        s.net.vid.droppedFrames++;
+      }
+      capLog(s, { ev: 'drop', reason: 'dead-src', pid: p.pid, kind: p.kind, from, to });
+      return false;
+    }
+  }
+  if (to !== 'C2') {
+    const dTo = nodePos(s, to);
+    if (!dTo || !alive(dTo)) {
+      s.net.dropped++;
+      if (p.kind === 'vid' && !p.frameDropped) {
+        p.frameDropped = true;
+        s.net.vid.droppedFrames++;
+      }
+      capLog(s, { ev: 'drop', reason: 'dead-dst', pid: p.pid, kind: p.kind, from, to });
+      return false;
+    }
+  }
+
+  const rad = txRadioOf(s, from, to);
+  const chan = channelKeyOf(rad);
+  const airRate = (rad && rad.airRateKbps) || 64;
+  const singleTxSec = (p.bytes * 8) / (airRate * 1000);
+
+  const tStart = Math.max(
+    s.time,
+    p.tReady || s.time,
+    s.net.chanBusyUntil[chan] || 0,
+    s.net.nodeTxUntil[from] || 0,
+    s.net.nodeDutyUntil[from] || 0
+  );
+
+  const retries = hopDelivered(s, from, to);
+  const attempts = retries < 0 ? (HOP_RETRIES + 1) : (retries + 1);
+  const totalAirtime = singleTxSec * attempts;
+  const retryGap = 0.02;
+  const hopDuration = totalAirtime + (attempts - 1) * retryGap;
+
+  s.net.chanBusyUntil[chan] = tStart + totalAirtime;
+  s.net.nodeTxUntil[from] = tStart + totalAirtime;
+  s.net.txAt[from] = tStart;
+  s.net.airtimeAccum += totalAirtime;
+
+  if (rad.dutyCycle && rad.dutyCycle < 1) {
+    const dutyRest = totalAirtime * (1 - rad.dutyCycle) / rad.dutyCycle;
+    s.net.nodeDutyUntil[from] = Math.max(tStart + totalAirtime, s.net.nodeDutyUntil[from] || 0) + dutyRest;
+  }
+
+  p.tStart = tStart;
+  p.tArrive = tStart + hopDuration + NET.procDelaySec;
+  p.retries = retries;
+  p.dead = (retries < 0);
+  return true;
+}
+
 function sendPacket(s, kind, src, dst, payload, bytesOverride) {
-  // Upstream traffic (everything toward the ground station — telemetry,
-  // video chunks) rides the shared C2-rooted tree; only rare downstream
-  // unicasts pay a dedicated search.
-  const path = dst === 'C2' ? pathToC2(s, src) : routePath(s, src, dst);
+  let path = null;
+  if (src !== 'C2' && dst !== 'C2' && linkUsable(s, src, dst, 0)) {
+    path = [src, dst];
+  } else {
+    path = dst === 'C2' ? pathToC2(s, src) : routePath(s, src, dst);
+  }
   if (!path || path.length < 2) {
     s.net.dropped++;
     if (kind === 'vid') s.net.vid.droppedFrames++;
@@ -258,28 +391,91 @@ function sendPacket(s, kind, src, dst, payload, bytesOverride) {
     return false; // no route — radio silence
   }
   const bytes = bytesOverride != null ? bytesOverride
-    : kind === 'cmd' ? NET.cmdBytes : NET.tlmBytes;
-  const dt = hopTimeSec(s.radio, bytes);
+    : kind === 'cmd' ? NET.cmdBytes : (kind === 'ack' ? 24 : NET.tlmBytes);
+
+  const rad = txRadioOf(s, path[0], path[1]);
+  const chan = channelKeyOf(rad);
+  const airRate = (rad && rad.airRateKbps) || 64;
+  const queueDelay = Math.max(0, (s.net.chanBusyUntil[chan] || 0) - s.time);
+  const frameAirtime = (bytes * 8) / (airRate * 1000);
+
+  // Video latency bound: drop video frame if channel backlog exceeds 1.0s or frame won't fit
+  if (kind === 'vid' && (queueDelay > 1.0 || queueDelay + frameAirtime > 2.0)) {
+    s.net.dropped++;
+    s.net.vid.droppedFrames++;
+    capLog(s, { ev: 'drop', reason: 'queue-latency', kind, src, dst });
+    return false;
+  }
+
+  const MTU = 256;
+  if (kind === 'vid' && bytes > MTU) {
+    const numFrags = Math.ceil(bytes / MTU);
+    const frameId = 'vf' + (++s.net.vidFrameSeq);
+    for (let i = 0; i < numFrags; i++) {
+      const fragBytes = Math.min(MTU, bytes - i * MTU);
+      const p = {
+        kind, src, dst, payload, path,
+        pid: 'p' + s.net.pktSeq++,
+        hop: 0,
+        bytes: fragBytes,
+        frameId,
+        fragIdx: i,
+        fragCount: numFrags,
+        chunkSec: VID.chunkSec,
+        tSent: s.time,
+        tReady: s.time,
+      };
+      if (preparePacketHop(s, p)) {
+        s.net.packets.push(p);
+      }
+    }
+    capLog(s, { ev: 'send', pid: frameId, kind, src, dst, frags: numFrags, bytes });
+    return true;
+  }
+
   const pid = 'p' + s.net.pktSeq++;
-  s.net.packets.push({
+  const p = {
     kind, src, dst, payload, path,
     pid, hop: 0,
     bytes,
     chunkSec: kind === 'vid' ? VID.chunkSec : null,
-    tHopStart: s.time,
-    tArrive: s.time + dt,
-  });
+    tSent: s.time,
+    tReady: s.time,
+  };
+  if (preparePacketHop(s, p)) {
+    s.net.packets.push(p);
+  }
   capLog(s, { ev: 'send', pid, kind, src, dst, hops: path.length - 1, path: path.join('>') });
   return true;
 }
 
 function deliverPacket(s, p) {
   s.net.delivered++;
-  if (p.kind === 'vid') s.net.vid.framesDelivered++;
+  if (p.kind === 'vid') {
+    if (p.frameId) {
+      if (s.c2) {
+        s.c2.vidReassembly = s.c2.vidReassembly || new Map();
+        let entry = s.c2.vidReassembly.get(p.frameId);
+        if (!entry) {
+          entry = { received: new Set(), total: p.fragCount, at: s.time };
+          s.c2.vidReassembly.set(p.frameId, entry);
+        }
+        entry.received.add(p.fragIdx);
+        if (entry.received.size === entry.total) {
+          s.net.vid.framesDelivered++;
+          s.c2.vidReassembly.delete(p.frameId);
+        }
+      } else {
+        s.net.vid.framesDelivered++;
+      }
+    } else {
+      s.net.vid.framesDelivered++;
+    }
+  }
   if (p.dst === 'C2') {
     // Payload chunks are consumed by the application layer, not the
     // telemetry ingest — C2's belief state only updates from real reports.
-    if (p.kind !== 'vid') s.c2.inbox.push(p);
+    if (p.kind !== 'vid' && s.c2 && s.c2.inbox) s.c2.inbox.push(p);
   }
   else {
     const d = nodePos(s, p.dst);
@@ -291,39 +487,66 @@ function deliverPacket(s, p) {
 function stepNet(s, dt) {
   stepFades(s, dt);
   stepBcasts(s);
-  const bytesOf = p => p.bytes != null ? p.bytes
-    : (p.kind === 'cmd' ? NET.cmdBytes : NET.tlmBytes);
-  const keep = [];
-  for (const p of s.net.packets) {
-    let dead = false;
-    while (s.time >= p.tArrive && !dead) {
-      const from = p.path[p.hop], to = p.path[p.hop + 1];
-      const retries = hopDelivered(s, from, to);
-      const txSec = bytesOf(p) * 8 / (s.radio.airRateKbps * 1000);
-      s.net.airtimeAccum += txSec * (1 + (retries < 0 ? HOP_RETRIES : retries));
-      s.net.txAt[from] = s.time;
-      if (retries < 0) {
-        s.net.dropped++;
-        if (p.kind === 'vid') s.net.vid.droppedFrames++;
-        capLog(s, { ev: 'drop', reason: 'link-fail', pid: p.pid, kind: p.kind, from, to, marginDb: +liveMarginDb(s, from, to).toFixed(1) });
-        dead = true; break;
+
+  // Prune expired video reassembly
+  if (s.c2 && s.c2.vidReassembly) {
+    for (const [fid, ent] of s.c2.vidReassembly) {
+      if (s.time - ent.at > 3.0) {
+        s.c2.vidReassembly.delete(fid);
+        s.net.vid.droppedFrames++;
       }
-      capLog(s, { ev: 'hop', pid: p.pid, kind: p.kind, from, to, retries, marginDb: +liveMarginDb(s, from, to).toFixed(1) });
-      p.hop++;
-      if (p.hop >= p.path.length - 1) {
-        capLog(s, { ev: 'deliver', pid: p.pid, kind: p.kind, src: p.src, dst: p.dst });
-        deliverPacket(s, p); dead = true; break;
-      }
-      p.tHopStart = p.tArrive;
-      // Retransmissions cost extra AIRTIME (tx repeated), but the
-      // store-and-forward processing delay is paid once per hop — not once
-      // per retry — matching the airtime bill above.
-      const txSec2 = (bytesOf(p) * 8) / (s.radio.airRateKbps * 1000);
-      p.tArrive += txSec2 * (1 + retries) + NET.procDelaySec;
     }
-    if (!dead) keep.push(p);
   }
-  s.net.packets = keep;
+
+  let writeIdx = 0;
+  const packets = s.net.packets;
+  const len = packets.length;
+  for (let i = 0; i < len; i++) {
+    const p = packets[i];
+    // Check packet expiration (TTL: 3.0s for video, 6.0s for telemetry, 10.0s for commands)
+    const ttl = p.kind === 'vid' ? 3.0 : (p.kind === 'tlm' ? 6.0 : 10.0);
+    if (s.time - (p.tSent || s.time) > ttl) {
+      s.net.dropped++;
+      if (p.kind === 'vid' && !p.frameDropped) {
+        p.frameDropped = true;
+        s.net.vid.droppedFrames++;
+        if (p.frameId && s.c2 && s.c2.vidReassembly) s.c2.vidReassembly.delete(p.frameId);
+      }
+      capLog(s, { ev: 'drop', reason: 'ttl-expired', pid: p.pid, kind: p.kind });
+      continue;
+    }
+
+    if (s.time < p.tArrive) {
+      packets[writeIdx++] = p;
+      continue;
+    }
+
+    const from = p.path[p.hop], to = p.path[p.hop + 1];
+    if (p.dead) {
+      s.net.dropped++;
+      if (p.kind === 'vid' && !p.frameDropped) {
+        p.frameDropped = true;
+        s.net.vid.droppedFrames++;
+        if (p.frameId && s.c2 && s.c2.vidReassembly) s.c2.vidReassembly.delete(p.frameId);
+      }
+      capLog(s, { ev: 'drop', reason: 'link-fail', pid: p.pid, kind: p.kind, from, to, marginDb: +liveMarginDb(s, from, to).toFixed(1) });
+      continue;
+    }
+
+    capLog(s, { ev: 'hop', pid: p.pid, kind: p.kind, from, to, retries: p.retries, marginDb: +liveMarginDb(s, from, to).toFixed(1) });
+    p.hop++;
+    if (p.hop >= p.path.length - 1) {
+      capLog(s, { ev: 'deliver', pid: p.pid, kind: p.kind, src: p.src, dst: p.dst });
+      deliverPacket(s, p);
+      continue;
+    }
+
+    p.tReady = p.tArrive;
+    if (preparePacketHop(s, p)) {
+      packets[writeIdx++] = p;
+    }
+  }
+  packets.length = writeIdx;
 
   // Sliding channel-utilization estimate: what fraction of the last window
   // was the single shared frequency actually busy?
@@ -359,4 +582,14 @@ function hopDelivered(s, fromId, toId) {
     if (s.net.rng() < p) return t;
   }
   return -1;
+}
+
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = {
+    NET, VID, makeNet, capLog, sendBroadcast, stepBcasts,
+    txRadioOf, channelKeyOf, hopTimeSec, nodeIds, nodePos,
+    linkUsable, linkCost, routePath, c2Tree, pathToC2,
+    sendPacket, deliverPacket, stepNet, exportCaptureJSONL,
+    hopDelivered, HOP_RETRIES,
+  };
 }

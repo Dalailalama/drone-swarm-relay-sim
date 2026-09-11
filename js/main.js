@@ -18,7 +18,18 @@
   const windDirRange = el('windDirRange'), windDirOut = el('windDirOut');
   const spacingRange = el('spacingRange'), spacingOut = el('spacingOut'), spacingInfo = el('spacingInfo');
   const corridorChk = el('corridorChk'), corridorOut = el('corridorOut');
+  const agilityChk = el('agilityChk'), agilityOut = el('agilityOut');
+  const lpiChk = el('lpiChk'), lpiOut = el('lpiOut');
+  const videoChk = el('videoChk'), videoOut = el('videoOut');
+  const videoKbpsRow = el('videoKbpsRow'), videoKbpsRange = el('videoKbpsRange'), videoKbpsOut = el('videoKbpsOut');
+  const payloadInfo = el('payloadInfo');
+  const advChk = el('advChk');
   const terrainSel = el('terrainSel'), coverageChk = el('coverageChk');
+  const cityDensityRange = el('cityDensityRange'), cityDensityOut = el('cityDensityOut');
+  const cityHeightRange = el('cityHeightRange'), cityHeightOut = el('cityHeightOut');
+  const cityNote = el('cityNote');
+  const osmRow = el('osmRow'), osmPlace = el('osmPlace'), osmNote = el('osmNote');
+  const osmRadiusRange = el('osmRadiusRange'), osmRadiusOut = el('osmRadiusOut'), osmLoadBtn = el('osmLoadBtn');
   const bcastChk = el('bcastChk');
   const captureChk = el('captureChk'), captureOut = el('captureOut'), exportBtn = el('exportBtn');
   const wsUrl = el('wsUrl'), extConnectBtn = el('extConnectBtn'), extStatus = el('extStatus');
@@ -30,6 +41,89 @@
   const killBtn = el('killBtn'), resetBtn = el('resetBtn');
   const kpiRelays = el('kpiRelays'), kpiMission = el('kpiMission'), kpiThroughput = el('kpiThroughput'), kpiClock = el('kpiClock');
   const kpiContact = el('kpiContact'), kpiPackets = el('kpiPackets');
+
+  function escHtml(s) {
+    if (s == null) return '';
+    return String(s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
+  function syncExternalBridge() {
+    if (typeof externalActive === 'function' && externalActive() && typeof externalReinit === 'function') {
+      externalReinit(() => swarm, +countRange.value, +altRange.value);
+    }
+  }
+
+  function registerRadioPreset(preset) {
+    if (!preset || !preset.id) return null;
+    let existing = RADIOS.find(r => r.id === preset.id);
+    if (existing) {
+      Object.assign(existing, preset);
+      return existing;
+    }
+    RADIOS.push(preset);
+    [radioSel, relayRadioSel, calRadioSel].forEach(sel => {
+      if (!sel) return;
+      const opt = document.createElement('option');
+      opt.value = preset.id;
+      opt.textContent = preset.name + (preset.calibrated ? ' (Calibrated)' : '');
+      sel.appendChild(opt);
+    });
+    return preset;
+  }
+
+  function resetControlsToDefaults() {
+    radioSel.value = RADIOS[0].id;
+    radio = RADIOS[0];
+    envSel.value = ENVIRONMENTS[0].id;
+    env = ENVIRONMENTS[0];
+    airframeSel.value = AIRFRAMES[1].id;
+    airframe = AIRFRAMES[1];
+    heteroChk.checked = false;
+    wingRange.value = 4;
+    wingOut.textContent = '4';
+    relayAirframeSel.value = 'x8';
+    relayRadioSel.value = 'rfd900x';
+    countRange.value = 10;
+    countOut.textContent = '10';
+    altRange.value = 50;
+    altOut.textContent = '50 m';
+    distRange.value = 100;
+    distOut.textContent = '—';
+    spacingRange.value = 80;
+    spacingOut.textContent = '80%';
+    corridorChk.checked = true;
+    agilityChk.checked = false;
+    lpiChk.checked = false;
+    advChk.checked = false;
+    videoChk.checked = false;
+    videoKbpsRange.value = 500;
+    videoKbpsOut.textContent = '500 kbps';
+    if (videoKbpsRow) videoKbpsRow.style.display = 'none';
+    terrainSel.value = 'flat';
+    cityDensityRange.value = 40;
+    cityHeightRange.value = 40;
+    windSpdRange.value = 0;
+    windSpdOut.textContent = '0 m/s';
+    windDirRange.value = 0;
+    windDirOut.textContent = '0°';
+    coverageChk.checked = true;
+    bcastChk.checked = true;
+    captureChk.checked = false;
+    captureOut.textContent = 'off';
+    exportBtn.disabled = true;
+    if (osmPlace) osmPlace.value = '';
+    if (osmRadiusRange) osmRadiusRange.value = 1200;
+    if (osmRadiusOut) osmRadiusOut.textContent = '1.2 km';
+    osmArea = null;
+    osmLoadToken++;
+    updateHeteroRow();
+    updateOsmRow();
+  }
 
   RADIOS.forEach(r => {
     const o = document.createElement('option');
@@ -75,27 +169,41 @@
 
   let missionSeq = 0;
   let forcedSeed = null; // set by applyScenario so a loaded scenario is exact
-  function resetSwarm() {
-    const dist = +distRange.value / 100 * defaultTargetDist();
+  function resetSwarm(geom) {
+    let tX, tY, baseX = 0, baseY = 0;
+    if (geom && geom.target) {
+      tX = geom.target.x;
+      tY = geom.target.y;
+      if (geom.base) {
+        baseX = geom.base.x;
+        baseY = geom.base.y;
+      }
+      const span = Math.hypot(tX - baseX, tY - baseY);
+      distOut.textContent = fmtDist(span);
+    } else {
+      const dist = +distRange.value / 100 * defaultTargetDist();
+      distOut.textContent = fmtDist(dist);
+      tX = dist;
+      tY = -dist * 0.25;
+    }
     missionSeq += 1;
-    const tX = dist, tY = -dist * 0.25;
     const terrainSeed = forcedSeed != null ? forcedSeed : 42 + missionSeq;
     let terrain;
     if (terrainSel.value === 'osm' && osmArea) {
       // Real place: buildings are centered on the corridor midpoint (like the
       // procedural city), plus small cleared staging areas at the GCS and the
       // objective — you'd stage in a lot, not on somebody's roof.
-      const cx = tX / 2, cy = tY / 2;
+      const cx = (tX + baseX) / 2, cy = (tY + baseY) / 2;
       const bs = osmArea.buildings.map(b => ({ x: b.x + cx, y: b.y + cy, w: b.w, d: b.d, heightM: b.heightM, estimated: b.estimated }));
-      osmArea.cleared = osmClearZones(bs, [{ x: 0, y: 0, rM: 70 }, { x: tX, y: tY, rM: 60 }]);
+      osmArea.cleared = osmClearZones(bs, [{ x: baseX, y: baseY, rM: 70 }, { x: tX, y: tY, rM: 60 }]);
       terrain = indexBuildings({ seed: terrainSeed, groundAmpM: 0, groundScaleM: 1, buildings: bs });
       // Pin the fetched area's geographic center to the corridor midpoint —
       // this is what lets the renderer draw the real map under the mission.
       terrain.geoAnchor = { lat: osmArea.lat, lon: osmArea.lon, x: cx, y: cy };
     } else {
       terrain = makeTerrain(terrainSel.value === 'osm' ? 'flat' : terrainSel.value, {
-        distM: Math.hypot(tX, tY), altM: +altRange.value,
-        targetX: tX, targetY: tY, seed: terrainSeed,
+        distM: Math.hypot(tX - baseX, tY - baseY), altM: +altRange.value,
+        baseX, baseY, targetX: tX, targetY: tY, seed: terrainSeed,
         density: +cityDensityRange.value / 100, heightScale: +cityHeightRange.value / 100,
       });
     }
@@ -115,7 +223,7 @@
       adversaryMode: advChk.checked,
       windX: +windSpdRange.value * Math.cos(+windDirRange.value * Math.PI / 180),
       windY: +windSpdRange.value * Math.sin(+windDirRange.value * Math.PI / 180),
-      targetX: dist, targetY: -dist * 0.25,
+      baseX, baseY, targetX: tX, targetY: tY,
       radio, envFactor: env.factor,
       shadowSigmaDb: env.shadowSigmaDb,
       seed: terrainSeed,
@@ -133,6 +241,7 @@
     if (typeof updateCityLabels === 'function') updateCityLabels();
     updateOsmNote();
     fitView();
+    syncExternalBridge();
     logEvent(swarm, 'Swarm launched: ' + swarm.drones.length + ' drones on ' + radio.name, 'info');
   }
 
@@ -166,28 +275,50 @@
     };
   }
   function applyScenario(sc) {
-    if (sc.radio) { radioSel.value = sc.radio; radio = RADIOS.find(r => r.id === sc.radio) || radio; }
+    resetControlsToDefaults();
+    if (sc.radioPreset) registerRadioPreset(sc.radioPreset);
+    if (typeof sc.radio === 'object' && sc.radio.id) {
+      registerRadioPreset(sc.radio);
+      sc.radio = sc.radio.id;
+    }
+    if (sc.relayRadioPreset) registerRadioPreset(sc.relayRadioPreset);
+    if (typeof sc.relayRadio === 'object' && sc.relayRadio.id) {
+      registerRadioPreset(sc.relayRadio);
+      sc.relayRadio = sc.relayRadio.id;
+    }
+    if (sc.radio) {
+      const match = RADIOS.find(r => r.id === sc.radio);
+      if (match) { radioSel.value = match.id; radio = match; }
+    }
     if (sc.env) { envSel.value = sc.env; env = ENVIRONMENTS.find(e => e.id === sc.env) || env; }
     if (sc.airframe) { airframeSel.value = sc.airframe; airframe = AIRFRAMES.find(a => a.id === sc.airframe) || airframe; }
     if (sc.hetero != null) { heteroChk.checked = !!sc.hetero; updateHeteroRow(); }
-    if (sc.relayWing != null) wingRange.value = sc.relayWing;
+    if (sc.relayWing != null) { wingRange.value = sc.relayWing; wingOut.textContent = sc.relayWing; }
     if (sc.relayAirframe) relayAirframeSel.value = sc.relayAirframe;
     if (sc.relayRadio) relayRadioSel.value = sc.relayRadio;
     if (sc.count != null) { countRange.value = sc.count; countOut.textContent = sc.count; }
     if (sc.altitudeM != null) { altRange.value = sc.altitudeM; altOut.textContent = sc.altitudeM + ' m'; }
-    if (sc.spacingPct != null) spacingRange.value = sc.spacingPct;
+    if (sc.spacingPct != null) { spacingRange.value = sc.spacingPct; spacingOut.textContent = sc.spacingPct + '%'; }
     if (sc.distancePct != null) distRange.value = sc.distancePct;
     if (sc.terrain) terrainSel.value = sc.terrain;
     if (sc.cityDensity != null) cityDensityRange.value = sc.cityDensity;
     if (sc.cityHeight != null) cityHeightRange.value = sc.cityHeight;
-    if (sc.windSpd != null) windSpdRange.value = sc.windSpd;
-    if (sc.windDir != null) windDirRange.value = sc.windDir;
+    if (sc.windSpd != null) { windSpdRange.value = sc.windSpd; windSpdOut.textContent = sc.windSpd + ' m/s'; }
+    if (sc.windDir != null) { windDirRange.value = sc.windDir; windDirOut.textContent = sc.windDir + '°'; }
     if (sc.corridor != null) corridorChk.checked = sc.corridor;
     if (sc.spectrumAgility != null) agilityChk.checked = !!sc.spectrumAgility;
     if (sc.lpiMode != null) lpiChk.checked = !!sc.lpiMode;
     if (sc.adversaryMode != null) { advChk.checked = !!sc.adversaryMode; }
-    if (sc.videoBackhaul != null) videoChk.checked = !!sc.videoBackhaul;
-    if (sc.videoKbps != null && sc.videoKbps > 0) { videoChk.checked = true; videoKbpsRange.value = sc.videoKbps; }
+    if (sc.videoKbps != null) {
+      videoKbpsRange.value = sc.videoKbps;
+      videoKbpsOut.textContent = sc.videoKbps + ' kbps';
+    }
+    if (sc.videoBackhaul != null) {
+      videoChk.checked = !!sc.videoBackhaul;
+    } else if (sc.videoOn != null) {
+      videoChk.checked = !!sc.videoOn;
+    }
+    videoKbpsRow.style.display = videoChk.checked ? 'flex' : 'none';
     if (sc.broadcast != null) bcastChk.checked = sc.broadcast;
     if (sc.coverage != null) coverageChk.checked = sc.coverage;
     if (sc.osm) {
@@ -197,7 +328,7 @@
     updateOsmRow();
     updateSpecCard(); updateAirframeInfo(); applySpacing();
     forcedSeed = sc.seed != null ? sc.seed : null; // exact same map if the file has a seed
-    resetSwarm();
+    resetSwarm({ base: sc.base, target: sc.target });
     forcedSeed = null;
     const applyMissionOverrides = () => {
       if (sc.base) { swarm.base.x = sc.base.x; swarm.base.y = sc.base.y; }
@@ -347,7 +478,6 @@
     corridorOut.textContent = corridorChk.checked ? 'transits follow the chain' : 'straight-line transits';
   });
   // --- EW waveforms: spectrum agility + LPI/LPD --------------------------------
-  const agilityChk = el('agilityChk'), lpiChk = el('lpiChk');
   function applyAgility() {
     if (!swarm) return;
     swarm.spectrumAgility = agilityChk.checked;
@@ -370,10 +500,6 @@
     if (swarm) logEvent(swarm, 'LPI/LPD waveform ' + (swarm.lpiMode ? 'ON — trading link budget for survivability' : 'off'), 'info');
   });
   // --- Video backhaul -----------------------------------------------------------
-  const videoChk = el('videoChk'), videoOut = el('videoOut');
-  const videoKbpsRow = el('videoKbpsRow');
-  const videoKbpsRange = el('videoKbpsRange'), videoKbpsOut = el('videoKbpsOut');
-  const payloadInfo = el('payloadInfo');
   function applyVideo() {
     if (!swarm) return;
     swarm.videoOn = videoChk.checked;
@@ -396,9 +522,6 @@
   // --- City density / height sliders — regenerate the buildings live (same
   // seed, same mission) so you can dial from a couple of buildings to a dense
   // metropolis without relaunching.
-  const cityDensityRange = el('cityDensityRange'), cityDensityOut = el('cityDensityOut');
-  const cityHeightRange = el('cityHeightRange'), cityHeightOut = el('cityHeightOut');
-  const cityNote = el('cityNote');
   function updateCityLabels() {
     const nB = swarm ? swarm.terrain.buildings.length : 0;
     cityDensityOut.textContent = nB ? nB.toLocaleString() : '0';
@@ -431,11 +554,9 @@
   // --- Real areas from OpenStreetMap ------------------------------------------
   // The place box + Load button fetch actual building footprints and heights
   // for anywhere on Earth (js/osm.js) and drop the swarm over them.
-  const osmRow = el('osmRow'), osmPlace = el('osmPlace'), osmNote = el('osmNote');
-  const osmRadiusRange = el('osmRadiusRange'), osmRadiusOut = el('osmRadiusOut');
-  const osmLoadBtn = el('osmLoadBtn');
   let osmArea = null; // { lat, lon, radiusM, name, buildings (centered on 0,0), dropped, cleared }
   const OSM_INTRO = osmNote.innerHTML;
+  let osmLoadToken = 0;
 
   function updateOsmRow() {
     const isOsm = terrainSel.value === 'osm';
@@ -451,7 +572,7 @@
     const n = osmArea.buildings.length;
     const nEst = osmArea.buildings.reduce((a, b) => a + (b.estimated ? 1 : 0), 0);
     const pctMeasured = n ? Math.round(100 * (1 - nEst / n)) : 0;
-    osmNote.innerHTML = '<b>' + osmArea.name + '</b>: <b>' + n.toLocaleString() + '</b> real buildings' +
+    osmNote.innerHTML = '<b>' + escHtml(osmArea.name) + '</b>: <b>' + n.toLocaleString() + '</b> real buildings' +
       (pctMeasured > 0
         ? ' (' + pctMeasured + '% have surveyed heights; the rest are estimated from floor counts)'
         : ' (heights estimated from floor counts — OSM rarely has them surveyed)') +
@@ -461,21 +582,26 @@
   }
 
   async function loadOsmArea(lat, lon, radiusM, name) {
+    const token = ++osmLoadToken;
     osmLoadBtn.disabled = true; osmLoadBtn.textContent = 'Loading…';
     osmNote.innerHTML = 'Fetching real buildings from OpenStreetMap&hellip;';
     try {
       const area = await osmFetchArea(lat, lon, radiusM);
+      if (token !== osmLoadToken) return;
       if (!area.buildings.length) throw new Error('No mapped buildings there — try a bigger radius or a denser place');
       area.name = name || (lat.toFixed(4) + ', ' + lon.toFixed(4));
       osmArea = area;
       resetSwarm();
       syncTakOrigin();
-      logEvent(swarm, 'Real area loaded: ' + area.name + ' — ' + area.buildings.length + ' buildings', 'info');
+      logEvent(swarm, 'Real area loaded: ' + escHtml(area.name) + ' — ' + area.buildings.length + ' buildings', 'info');
     } catch (e) {
-      osmNote.innerHTML = '<b style="color:var(--lost)">' + e.message + '</b> &middot; This feature needs internet, and the free OSM servers are sometimes busy — try again in a minute.';
+      if (token !== osmLoadToken) return;
+      osmNote.innerHTML = '<b style="color:var(--lost)">' + escHtml(e.message) + '</b> &middot; This feature needs internet, and the free OSM servers are sometimes busy — try again in a minute.';
       throw e;
     } finally {
-      osmLoadBtn.disabled = false; osmLoadBtn.textContent = 'Load real area';
+      if (token === osmLoadToken) {
+        osmLoadBtn.disabled = false; osmLoadBtn.textContent = 'Load real area';
+      }
     }
   }
 
@@ -543,7 +669,7 @@
       jammerPowerRange.value = j.erpDbm;
       jammerPowerOut.textContent = j.erpDbm + ' dBm';
       jammerToggleBtn.textContent = on ? 'Turn off' : 'Turn on';
-      jammerPanel.innerHTML = '<b>' + count + '</b> source' + (count === 1 ? '' : 's') + ' placed · editing <b>' + j.id + '</b>: ' +
+      jammerPanel.innerHTML = '<b>' + count + '</b> source' + (count === 1 ? '' : 's') + ' placed · editing <b>' + escHtml(j.id) + '</b>: ' +
         (on ? 'red zone radius <b>' + fmtDist(jammerDenialRadiusM(swarm, j)) + '</b>' : 'off') +
         '. Drag it on the map; raise Strength for a bigger zone.';
     } else if (count) {
@@ -603,7 +729,7 @@
     if (z) {
       zoneToggleBtn.textContent = z.on === false ? 'Turn on' : 'Turn off';
       zonePanel.style.display = 'block';
-      zonePanel.innerHTML = 'Editing <b>' + z.id + '</b> — a <b>' + fmtDist(z.rM) +
+      zonePanel.innerHTML = 'Editing <b>' + escHtml(z.id) + '</b> — a <b>' + fmtDist(z.rM) +
         '</b> radius where GNSS is denied. Drones cross it on dead reckoning: their reported positions drift, and C2 plans around that.';
     } else {
       zonePanel.style.display = count ? 'block' : 'none';
@@ -614,7 +740,6 @@
   window.updateZonePanel = updateZonePanel;
 
   // --- Red-team adversary mode ---------------------------------------------------
-  const advChk = el('advChk');
   advChk.addEventListener('change', () => {
     if (swarm) swarm.adversaryMode = advChk.checked;
     if (swarm && advChk.checked) logEvent(swarm, 'RED TEAM: interference sources now direction-find swarm traffic', 'error');
@@ -747,11 +872,12 @@
     const parsed = parseFlightLogCsv(calText);
     const fit = fitPathLoss(parsed.samples);
     if (!fit.ok) {
-      calResult.innerHTML = '<b style="color:var(--lost)">Fit failed:</b> ' + fit.reason +
-        (parsed.notes.length ? '<br>' + parsed.notes.join('<br>') : '');
+      calResult.innerHTML = '<b style="color:var(--lost)">Fit failed:</b> ' + escHtml(fit.reason) +
+        (parsed.notes.length ? '<br>' + parsed.notes.map(escHtml).join('<br>') : '');
       return;
     }
     const cal = calibratePreset(fit, basePreset);
+    registerRadioPreset(cal);
     calReport = validationReportMd(fit, basePreset, parsed.samples, parsed);
     calPresetJson = JSON.stringify(cal, null, 1);
     const dsN = pathLossExponent(basePreset);
@@ -794,7 +920,9 @@
     // operator-entered origin converts local metres to lat/lon.
     const geo = swarm && swarm.terrain && swarm.terrain.geoAnchor;
     if (geo) return makeTakAnchor(geo.lat, geo.lon, geo.x, geo.y);
-    return makeTakAnchor(parseFloat(takLat.value) || 38.8977, parseFloat(takLon.value) || -77.0365, 0, 0);
+    const lat = parseFloat(takLat.value);
+    const lon = parseFloat(takLon.value);
+    return makeTakAnchor(!isNaN(lat) ? lat : 38.8977, !isNaN(lon) ? lon : -77.0365, 0, 0);
   }
   function syncTakOrigin() {
     const geo = swarm && swarm.terrain && swarm.terrain.geoAnchor;
@@ -821,7 +949,7 @@
     }
     takList.innerHTML = '<b>' + marks.length + '</b> imported mark' + (marks.length === 1 ? '' : 's') + ':<br>' +
       marks.map((m, i) =>
-        '<div>' + m.callsign + ' <button class="tak-obj" data-i="' + i +
+        '<div>' + escHtml(m.callsign) + ' <button class="tak-obj" data-i="' + i +
         '" style="font-size:10px; padding:1px 6px;">objective</button></div>').join('');
   }
   takList.addEventListener('click', ev => {
@@ -1081,23 +1209,23 @@
     }
 
     hopsBody.innerHTML = status.hops.map((h, i) =>
-      '<tr class="' + h.state + '"><td>' + h.a.label + ' → ' + h.b.label + '</td><td>' + fmtDist(h.distM) +
+      '<tr class="' + escHtml(h.state) + '"><td>' + escHtml(h.a.label) + ' → ' + escHtml(h.b.label) + '</td><td>' + fmtDist(h.distM) +
       '</td><td>' + h.marginDb.toFixed(0) + ' dB</td><td>' + (h.lossPct < 1 ? '<1' : h.lossPct.toFixed(0)) + '%</td></tr>'
     ).join('') || '<tr><td colspan="4" class="dim">no links</td></tr>';
 
     fleetBody.innerHTML = swarm.drones.map(d => {
       const sel = d === selected ? ' style="outline:1px solid #e2e8f0;"' : '';
       const role = effRole(d);
-      return '<div class="fleet-row role-' + role + '"' + sel + ' data-id="' + d.id + '">' +
-        '<span class="dot"></span><span class="fid">' + d.id +
+      return '<div class="fleet-row role-' + escHtml(role) + '"' + sel + ' data-id="' + escHtml(d.id) + '">' +
+        '<span class="dot"></span><span class="fid">' + escHtml(d.id) +
         (d.cls === 'relay' ? ' \u25c6' : '') + (swarm.c2.vidGrantee === d.id ? ' \u25cf' : '') + '</span>' +
-        '<span class="frole">' + role + '</span>' +
+        '<span class="frole">' + escHtml(role) + '</span>' +
         '<span class="fbat"><span class="fbat-fill" style="width:' + d.batteryPct.toFixed(0) + '%"></span></span>' +
         '<span class="fpct">' + d.batteryPct.toFixed(0) + '%</span></div>';
     }).join('');
 
     eventLog.innerHTML = swarm.events.slice().reverse().map(ev =>
-      '<div class="ev ev-' + ev.kind + '"><span class="ev-t">' + fmtSimClock(ev.t) + '</span>' + ev.msg + '</div>'
+      '<div class="ev ev-' + escHtml(ev.kind) + '"><span class="ev-t">' + fmtSimClock(ev.t) + '</span>' + escHtml(ev.msg) + '</div>'
     ).join('');
 
     if (swarm.videoOn) {
@@ -1105,7 +1233,7 @@
       const total = v.framesDelivered + v.droppedFrames;
       const loss = total ? (100 * v.droppedFrames / total).toFixed(1) + '% loss' : 'no data yet';
       payloadInfo.innerHTML =
-        '<b>' + (swarm.c2.vidGrantee || 'nobody') + '</b> has the channel at <b>' +
+        '<b>' + escHtml(swarm.c2.vidGrantee || 'nobody') + '</b> has the channel at <b>' +
         swarm.videoKbps + ' kbps</b> · chunks ' + v.framesDelivered.toLocaleString() +
         ' delivered (' + loss + ') · chain busy ' + (swarm.net.utilization * 100).toFixed(0) + '%' +
         '<br><span style="color:var(--dim)">● streaming · ◆ relay wing — one streamer at a time; video eats the same airtime C2 needs.</span>';
@@ -1144,8 +1272,10 @@
 
   let lastT = performance.now();
   let panelAccum = 0;
+  let simAccum = 0;
+  const FIXED_SIM_STEP_SEC = 0.05; // 20 Hz fixed simulation timestep
   function frame(now) {
-    const realDt = Math.min(0.1, (now - lastT) / 1000);
+    const realDt = Math.min(0.2, (now - lastT) / 1000);
     lastT = now;
 
     let status;
@@ -1153,13 +1283,11 @@
       // Real vehicles fly in real time — no fast-forward when a bridge is
       // driving the drones; force 1x so sim time tracks the wall clock.
       const scale = (typeof externalActive === 'function' && externalActive()) ? 1 : timeScale;
-      let simDt = realDt * scale;
-      // substep so physics stays stable at high time scales
-      const maxStep = 0.25;
-      while (simDt > 0) {
-        const step = Math.min(maxStep, simDt);
-        status = stepSwarm(swarm, step);
-        simDt -= step;
+      simAccum += realDt * scale;
+      if (simAccum > 1.0) simAccum = 1.0;
+      while (simAccum >= FIXED_SIM_STEP_SEC) {
+        status = stepSwarm(swarm, FIXED_SIM_STEP_SEC);
+        simAccum -= FIXED_SIM_STEP_SEC;
       }
     }
     if (!status) status = chainStatus(swarm);

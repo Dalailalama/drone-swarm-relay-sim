@@ -17,7 +17,7 @@
 // metres to lat/lon equirectangularly — sub-metre accuracy at the few-km
 // scales this simulator flies, which is far inside CoT's own precision.
 
-const M_PER_DEG_LAT = 111320;
+const M_PER_DEG_LAT = 110540;
 
 function makeTakAnchor(latDeg, lonDeg, xLocal, yLocal) {
   return { lat: latDeg, lon: lonDeg, x: xLocal || 0, y: yLocal || 0 };
@@ -60,10 +60,11 @@ function cotEvent(o) {
   const stale = cotTimestamp((o.nowSec || Date.now() / 1000) + (o.staleSec || 30));
   const ce = o.ceM != null ? o.ceM : 15;
   const le = o.leM != null ? o.leM : 15;
+  const haeAttr = o.haeM != null ? ' hae="' + o.haeM.toFixed(1) + '"' : '';
   let xml = '<event version="2.0" uid="' + esc(o.uid) + '" type="' + o.cotType +
     '" time="' + t + '" start="' + t + '" stale="' + stale + '" how="m-g">' +
-    '<point lat="' + o.lat.toFixed(7) + '" lon="' + o.lon.toFixed(7) +
-    '" hae="' + (o.haeM || 0).toFixed(1) + '" ce="' + ce + '" le="' + le + '"/>' +
+    '<point lat="' + o.lat.toFixed(7) + '" lon="' + o.lon.toFixed(7) + '"' +
+    haeAttr + ' ce="' + ce + '" le="' + le + '"/>' +
     '<detail><contact callsign="' + esc(o.callsign || o.uid) + '"/>';
   if (o.radiusM != null) {
     xml += '<shape><ellipse cx="' + o.radiusM.toFixed(0) + '" cy="' + o.radiusM.toFixed(0) +
@@ -78,6 +79,15 @@ function esc(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
+function unesc(s) {
+  return String(s)
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&');
+}
+
 // The full picture, straight off a live swarm object. Returns an array of
 // atom strings (callers join with \n for file or wire).
 function buildCotFromSwarm(s, anchor, nowSec) {
@@ -86,7 +96,7 @@ function buildCotFromSwarm(s, anchor, nowSec) {
     const ll = localToLatLon(anchor, x, y);
     out.push(cotEvent(Object.assign({
       uid, cotType, lat: ll.lat, lon: ll.lon, haeM: hae,
-      callsign, nowSec: nowSec != null ? nowSec : (s ? s.time : 0),
+      callsign, nowSec: nowSec != null ? nowSec : (Date.now() / 1000),
     }, extra || {})));
   };
   const roleOf = d => d.order && d.order.role ? d.order.role : 'mission';
@@ -122,8 +132,8 @@ function parseCoTFile(text) {
   const marks = [];
   const evRe = /<event\b[^>]*>/g;
   const attr = (tag, name) => {
-    const m = tag.match(new RegExp(name + '="([^"]*)"'));
-    return m ? m[1] : null;
+    const m = tag.match(new RegExp(name + '=["\']([^"\']*)["\']'));
+    return m ? unesc(m[1]) : null;
   };
   let m;
   while ((m = evRe.exec(text)) !== null) {
@@ -135,12 +145,21 @@ function parseCoTFile(text) {
     const scope = text.slice(m.index, end === -1 ? m.index + 2000 : end);
     const pm = scope.match(/<point\b[^>]*\/?>/);
     if (!pm) continue;
-    const lat = parseFloat((pm[0].match(/lat="([^"]*)"/) || [])[1]);
-    const lon = parseFloat((pm[0].match(/lon="([^"]*)"/) || [])[1]);
-    const hae = parseFloat((pm[0].match(/hae="([^"]*)"/) || [])[1]);
+    const latM = pm[0].match(/lat=["']([^"']*)["']/);
+    const lonM = pm[0].match(/lon=["']([^"']*)["']/);
+    const haeM = pm[0].match(/hae=["']([^"']*)["']/);
+    const lat = latM ? parseFloat(latM[1]) : NaN;
+    const lon = lonM ? parseFloat(lonM[1]) : NaN;
+    const hae = haeM ? parseFloat(haeM[1]) : NaN;
     if (!isFinite(lat) || !isFinite(lon)) continue;
-    const cm = scope.match(/callsign="([^"]*)"/);
-    marks.push({ uid: uid || 'cot-' + marks.length, cotType: type, lat, lon, hae: isFinite(hae) ? hae : 0, callsign: cm ? cm[1] : uid || 'marker' });
+    const cm = scope.match(/callsign=["']([^"']*)["']/);
+    marks.push({
+      uid: uid || 'cot-' + marks.length,
+      cotType: type,
+      lat, lon,
+      hae: isFinite(hae) ? hae : null,
+      callsign: cm ? unesc(cm[1]) : uid || 'marker'
+    });
   }
   return marks;
 }

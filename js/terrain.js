@@ -67,27 +67,37 @@ function buildingAt(t, x, y) {
     ? t.bGrid.get(Math.floor(x / BGRID_CELL_M) + ',' + Math.floor(y / BGRID_CELL_M))
     : t.buildings;
   if (!list) return null;
+  let best = null;
   for (const b of list) {
-    if (Math.abs(x - b.x) <= b.w / 2 && Math.abs(y - b.y) <= b.d / 2) return b;
+    if (Math.abs(x - b.x) <= b.w / 2 && Math.abs(y - b.y) <= b.d / 2) {
+      if (!best || b.heightM > best.heightM) best = b;
+    }
   }
-  return null;
+  return best;
 }
 
 // Buildings whose grid cells fall within radiusM of (x, y) — for obstacle
 // queries at scale. Uses the spatial hash so a query stays cheap even with
-// thousands of buildings. May return a building more than once if its
-// footprint spans several cells; callers that accumulate must dedup.
+// thousands of buildings. Deduplicates buildings spanning multiple cells (B24).
 function buildingsNear(t, x, y, radiusM) {
   if (!t || !t.buildings || !t.buildings.length) return [];
   if (!t.bGrid) return t.buildings;
   const c = BGRID_CELL_M;
   const x0 = Math.floor((x - radiusM) / c), x1 = Math.floor((x + radiusM) / c);
   const y0 = Math.floor((y - radiusM) / c), y1 = Math.floor((y + radiusM) / c);
+  const seen = new Set();
   const out = [];
   for (let ix = x0; ix <= x1; ix++) {
     for (let iy = y0; iy <= y1; iy++) {
       const arr = t.bGrid.get(ix + ',' + iy);
-      if (arr) for (const b of arr) out.push(b); // may repeat a boundary-spanning building; callers tolerate it
+      if (arr) {
+        for (const b of arr) {
+          if (!seen.has(b)) {
+            seen.add(b);
+            out.push(b);
+          }
+        }
+      }
     }
   }
   return out;
@@ -101,6 +111,30 @@ function terrainHeightAt(t, x, y) {
   return b ? terrainGroundAt(t, b.x, b.y) + b.heightM : g;
 }
 
+function rayIntersectsAABB(ax, ay, bx, by, minX, maxX, minY, maxY) {
+  const dx = bx - ax, dy = by - ay;
+  let tmin = 0, tmax = 1;
+  if (Math.abs(dx) < 1e-9) {
+    if (ax < minX || ax > maxX) return null;
+  } else {
+    let t1 = (minX - ax) / dx, t2 = (maxX - ax) / dx;
+    if (t1 > t2) { const tmp = t1; t1 = t2; t2 = tmp; }
+    tmin = Math.max(tmin, t1);
+    tmax = Math.min(tmax, t2);
+    if (tmin > tmax) return null;
+  }
+  if (Math.abs(dy) < 1e-9) {
+    if (ay < minY || ay > maxY) return null;
+  } else {
+    let t1 = (minY - ay) / dy, t2 = (maxY - ay) / dy;
+    if (t1 > t2) { const tmp = t1; t1 = t2; t2 = tmp; }
+    tmin = Math.max(tmin, t1);
+    tmax = Math.min(tmax, t2);
+    if (tmin > tmax) return null;
+  }
+  return { tmin, tmax };
+}
+
 // True if the ray from A (absolute altitude aAltM) to B clips ground or a
 // building anywhere along the way. The Fresnel clearance requirement tapers
 // to zero at the endpoints — a ray naturally grazes the ground right at its
@@ -108,16 +142,60 @@ function terrainHeightAt(t, x, y) {
 // ground-level station.
 function losBlocked(t, ax, ay, aAltM, bx, by, bAltM) {
   if (!t || (!t.groundAmpM && (!t.buildings || !t.buildings.length))) return false;
-  const rayLen = Math.hypot(bx - ax, by - ay);
-  const stepM = (t.buildings && t.buildings.length) ? LOS_STEP_BUILDING_M : LOS_STEP_TERRAIN_M;
-  const n = Math.max(LOS_SAMPLES_MIN, Math.min(LOS_SAMPLES_MAX, Math.ceil(rayLen / stepM)));
-  for (let i = 1; i <= n; i++) {
-    const f = i / (n + 1);
-    const x = ax + (bx - ax) * f;
-    const y = ay + (by - ay) * f;
-    const rayAlt = aAltM + (bAltM - aAltM) * f;
-    const clearance = LOS_CLEARANCE_M * Math.min(1, 6 * f, 6 * (1 - f));
-    if (terrainHeightAt(t, x, y) + clearance >= rayAlt) return true;
+
+  const minRayAlt = Math.min(aAltM, bAltM);
+  // O5: If ray altitude at both endpoints is strictly above highest roof and highest ground, it cannot clip
+  if (t._maxRoofAlt != null && minRayAlt > t._maxRoofAlt + LOS_CLEARANCE_M && minRayAlt > (t.groundAmpM || 0) + LOS_CLEARANCE_M) {
+    return false;
+  }
+
+  // Exact 2D segment-AABB check against buildings (B23)
+  if (t.buildings && t.buildings.length) {
+    const minRayX = Math.min(ax, bx), maxRayX = Math.max(ax, bx);
+    const minRayY = Math.min(ay, by), maxRayY = Math.max(ay, by);
+    let bCandidates = t.buildings;
+    if (t.bGrid && ((maxRayX - minRayX) < BGRID_CELL_M * 5 && (maxRayY - minRayY) < BGRID_CELL_M * 5)) {
+      const gx0 = Math.floor(minRayX / BGRID_CELL_M), gx1 = Math.floor(maxRayX / BGRID_CELL_M);
+      const gy0 = Math.floor(minRayY / BGRID_CELL_M), gy1 = Math.floor(maxRayY / BGRID_CELL_M);
+      const set = new Set();
+      for (let ix = gx0; ix <= gx1; ix++) {
+        for (let iy = gy0; iy <= gy1; iy++) {
+          const arr = t.bGrid.get(ix + ',' + iy);
+          if (arr) for (let i = 0; i < arr.length; i++) set.add(arr[i]);
+        }
+      }
+      bCandidates = Array.from(set);
+    }
+    for (const b of bCandidates) {
+      const minBx = b.x - b.w / 2, maxBx = b.x + b.w / 2;
+      const minBy = b.y - b.d / 2, maxBy = b.y + b.d / 2;
+      if (maxRayX < minBx || minRayX > maxBx || maxRayY < minBy || minRayY > maxBy) continue;
+      const isect = rayIntersectsAABB(ax, ay, bx, by, minBx, maxBx, minBy, maxBy);
+      if (isect) {
+        const fPoints = [isect.tmin, isect.tmax, (isect.tmin + isect.tmax) / 2];
+        const bAlt = terrainGroundAt(t, b.x, b.y) + b.heightM;
+        for (const f of fPoints) {
+          const rayAlt = aAltM + (bAltM - aAltM) * f;
+          const clearance = LOS_CLEARANCE_M * Math.min(1, 6 * f, 6 * (1 - f));
+          if (bAlt + clearance >= rayAlt) return true;
+        }
+      }
+    }
+  }
+
+  // Terrain heightfield sampling
+  if (t.groundAmpM > 0) {
+    const rayLen = Math.hypot(bx - ax, by - ay);
+    const stepM = LOS_STEP_TERRAIN_M;
+    const n = Math.max(LOS_SAMPLES_MIN, Math.min(LOS_SAMPLES_MAX, Math.ceil(rayLen / stepM)));
+    for (let i = 1; i <= n; i++) {
+      const f = i / (n + 1);
+      const x = ax + (bx - ax) * f;
+      const y = ay + (by - ay) * f;
+      const rayAlt = aAltM + (bAltM - aAltM) * f;
+      const clearance = LOS_CLEARANCE_M * Math.min(1, 6 * f, 6 * (1 - f));
+      if (terrainGroundAt(t, x, y) + clearance >= rayAlt) return true;
+    }
   }
   return false;
 }
@@ -189,7 +267,9 @@ const BGRID_CELL_M = 120;
 
 function indexBuildings(t) {
   t.bGrid = new Map();
+  let maxH = 0;
   for (const b of t.buildings) {
+    if (b.heightM > maxH) maxH = b.heightM;
     const x0 = Math.floor((b.x - b.w / 2) / BGRID_CELL_M), x1 = Math.floor((b.x + b.w / 2) / BGRID_CELL_M);
     const y0 = Math.floor((b.y - b.d / 2) / BGRID_CELL_M), y1 = Math.floor((b.y + b.d / 2) / BGRID_CELL_M);
     for (let ix = x0; ix <= x1; ix++) {
@@ -201,27 +281,33 @@ function indexBuildings(t) {
       }
     }
   }
+  t._maxRoofAlt = (t.groundAmpM || 0) + maxH;
   return t;
 }
 
 function makeTerrain(name, opts) {
   opts = opts || {};
-  const distM = opts.distM || 1000;
-  const altM = opts.altM || 50;
-  const seed = (opts.seed || 1) | 0;
-  const tX = opts.targetX || distM, tY = opts.targetY || 0;
+  const distM = opts.distM != null ? opts.distM : 1000;
+  const altM = opts.altM != null ? opts.altM : 50;
+  const seed = (opts.seed != null ? opts.seed : 1) | 0;
+  const baseX = (opts.base && opts.base.x != null) ? opts.base.x : (opts.baseX != null ? opts.baseX : 0);
+  const baseY = (opts.base && opts.base.y != null) ? opts.base.y : (opts.baseY != null ? opts.baseY : 0);
+  const tX = (opts.target && opts.target.x != null) ? opts.target.x : (opts.targetX != null ? opts.targetX : distM);
+  const tY = (opts.target && opts.target.y != null) ? opts.target.y : (opts.targetY != null ? opts.targetY : 0);
   const rng = mulberry32(seed ^ 0x5eed);
-  const along = f => ({ x: tX * f, y: tY * f });
+  const along = f => ({ x: baseX + (tX - baseX) * f, y: baseY + (tY - baseY) * f });
 
   if (name === 'rolling') {
+    const groundAmpM = 2.6 * 50 + 40;     // fixed reference baseline so altitude sweeps do not alter topography (B26)
     return {
       seed, buildings: [],
-      groundAmpM: 2.6 * altM + 40,     // ridge tops well above flight level
+      groundAmpM,
+      _maxRoofAlt: groundAmpM,
       groundScaleM: distM * 0.35,      // feature wavelength ~ a few hops
     };
   }
   const keepOut = [
-    { x: 0, y: 0, rM: 130 },      // GCS staging clearing
+    { x: baseX, y: baseY, rM: 130 },      // GCS staging clearing
     { x: tX, y: tY, rM: 110 },    // objective clearing (at generation time)
   ];
   const cityOpts = { density: opts.density, heightScale: opts.heightScale };
@@ -235,7 +321,7 @@ function makeTerrain(name, opts) {
   if (name === 'mixed') {
     const c = along(0.55);
     return indexBuildings({
-      seed, groundAmpM: 2.0 * altM + 30, groundScaleM: distM * 0.45,
+      seed, groundAmpM: 2.0 * 50 + 30, groundScaleM: distM * 0.45,
       buildings: makeCity(c.x, c.y, distM * 2.2, rng, keepOut, cityOpts),
     });
   }
@@ -247,6 +333,6 @@ function makeTerrain(name, opts) {
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     terrainGroundAt, terrainHeightAt, buildingAt, buildingsNear, losBlocked, makeTerrain,
-    fbm, valueNoise, LOS_CLEARANCE_M,
+    indexBuildings, fbm, valueNoise, LOS_CLEARANCE_M,
   };
 }

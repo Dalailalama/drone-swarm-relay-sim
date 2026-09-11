@@ -13,7 +13,9 @@
 // the process for an hour.
 
 const http = require('node:http');
-const { runBatch, validateConfig, LIMITS } = require('./batch.js');
+const { Worker } = require('node:worker_threads');
+const path = require('node:path');
+const { validateConfig, LIMITS } = require('./batch.js');
 
 function readBody(req, maxBytes) {
   return new Promise((resolve, reject) => {
@@ -32,6 +34,28 @@ function readBody(req, maxBytes) {
 function send(res, code, body, type) {
   res.writeHead(code, { 'Content-Type': type || 'application/json' });
   res.end(body);
+}
+
+function runBatchAsync(cfg) {
+  return new Promise((resolve, reject) => {
+    const batchPath = path.resolve(__dirname, 'batch.js').replace(/\\/g, '/');
+    const workerScript = `
+      const { parentPort, workerData } = require('node:worker_threads');
+      const { runBatch } = require('${batchPath}');
+      try {
+        const result = runBatch(workerData);
+        parentPort.postMessage({ ok: true, result });
+      } catch (err) {
+        parentPort.postMessage({ ok: false, error: err.message });
+      }
+    `;
+    const worker = new Worker(workerScript, { eval: true, workerData: cfg });
+    worker.on('message', msg => {
+      if (msg.ok) resolve(msg.result);
+      else reject(new Error(msg.error));
+    });
+    worker.on('error', reject);
+  });
 }
 
 function createApp() {
@@ -71,7 +95,7 @@ function createApp() {
         const invalid = validateConfig(cfg);
         if (invalid) return send(res, 422, JSON.stringify({ error: invalid }));
         const t0 = Date.now();
-        const result = runBatch(cfg);
+        const result = await runBatchAsync(cfg);
         return send(res, 200, JSON.stringify({
           label: cfg.label || '',
           runs: result.rows.length,

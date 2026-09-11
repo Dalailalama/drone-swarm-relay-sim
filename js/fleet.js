@@ -30,6 +30,9 @@ function bandCompatible(ra, rb) {
 // calibrated path-loss exponent/frequency, antenna gains summed from both ends.
 function rssiDirectionalDb(tx, rx, envFactor, dMetres) {
   const d = Math.max(1, dMetres / envFactor);
+  if (tx.refPowerDbm != null) {
+    return tx.refPowerDbm - 10 * pathLossExponent(tx) * Math.log10(d) + (rx.antGainDbi - tx.antGainDbi);
+  }
   const pl = pl1m(tx.freqMHz) + 10 * pathLossExponent(tx) * Math.log10(d);
   return tx.txDbm + tx.antGainDbi + rx.antGainDbi - pl;
 }

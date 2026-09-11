@@ -85,14 +85,20 @@ function reportMd(label, summary, metaLines) {
   return L.join('\n');
 }
 
-// CSV of raw per-run rows (stable column order).
+function escapeCsvField(val) {
+  if (val == null) return '';
+  if (typeof val === 'number') return String(Math.round(val * 1000) / 1000);
+  const s = String(val);
+  if (s.includes(',') || s.includes('"') || s.includes('\n') || s.includes('\r')) {
+    return '"' + s.replace(/"/g, '""') + '"';
+  }
+  return s;
+}
+
 const CSV_COLUMNS = ['cell', 'seed', 'uptimePct', 'freshFrac', 'delivered', 'droppedPct', 'vidLossPct', 'maxNavErrM'];
 function toCsv(rows) {
   const head = CSV_COLUMNS.join(',');
-  const lines = rows.map(r => CSV_COLUMNS.map(c => {
-    const v = r[c];
-    return typeof v === 'number' ? (Math.round(v * 1000) / 1000) : (v == null ? '' : v);
-  }).join(','));
+  const lines = rows.map(r => CSV_COLUMNS.map(c => escapeCsvField(r[c])).join(','));
   return [head, ...lines].join('\n');
 }
 

@@ -152,8 +152,14 @@ function makeDrone(x, y, target, rng, airframe, radio, cls) {
 function makeSwarm(opts) {
   droneSeq = 0;
   const s = {
-    base: { x: 0, y: 0 },
-    target: { x: opts.targetX, y: opts.targetY },  // C2 operator intent
+    base: {
+      x: (opts.base && opts.base.x != null) ? opts.base.x : (opts.baseX != null ? opts.baseX : 0),
+      y: (opts.base && opts.base.y != null) ? opts.base.y : (opts.baseY != null ? opts.baseY : 0),
+    },
+    target: {
+      x: (opts.target && opts.target.x != null) ? opts.target.x : opts.targetX,
+      y: (opts.target && opts.target.y != null) ? opts.target.y : opts.targetY,
+    },
     drones: [],
     time: 0,
     airframe: opts.airframe,
@@ -197,7 +203,7 @@ function makeSwarm(opts) {
     spectrumAgility: !!opts.spectrumAgility,
     lpiMode: !!opts.lpiMode,
     stats: { tSec: 0, connSec: 0 },
-    net: makeNet(opts.seed || 42),
+    net: makeNet(opts.seed != null ? opts.seed : 42),
     c2: { known: {}, relays: [], inbox: [], nextCmd: 0, wasFresh: {}, lost: {}, rescuers: [], unfit: {}, cov: new Map(), slotCache: {}, bcastSeq: 0, everHeard: new Set(), vidGrantee: null, vidIdx: 0 },
   };
   for (let i = 0; i < opts.count; i++) {
@@ -215,6 +221,12 @@ function makeSwarm(opts) {
 function logEvent(s, msg, kind) {
   s.events.push({ t: s.time, msg, kind: kind || 'info' });
   if (s.events.length > 80) s.events.shift();
+  if (s.stats) {
+    s.stats.totalEvents = (s.stats.totalEvents || 0) + 1;
+    if (kind === 'relay') s.stats.relayEvents = (s.stats.relayEvents || 0) + 1;
+    if (/lost C2 link|link timeout|retreating/.test(msg)) s.stats.failsafes = (s.stats.failsafes || 0) + 1;
+    if (msg.includes('swapped') || msg.includes('swap in progress')) s.stats.swaps = (s.stats.swaps || 0) + 1;
+  }
 }
 
 function dist2d(a, b) { return Math.hypot(a.x - b.x, a.y - b.y); }
@@ -452,7 +464,7 @@ function planChain(s) {
     else break;
   }
 
-  const plan = { slots, pathLen, tKey, at: s.time };
+  const plan = { slots, pathLen, tKey, at: s.time, feasible: found };
   s.c2.chainPlan = plan;
   return plan;
 }
@@ -461,7 +473,8 @@ function planChain(s) {
 // beneath them, like a real terrain-following mission. Ridges between two
 // valleys still cut line of sight; buildings are handled as obstacles.
 function nodeAltAbsM(s, id, pos) {
-  const agl = id === 'C2' ? C2_ANTENNA_M : s.altitudeM;
+  const d = id !== 'C2' ? nodePos(s, id) : null;
+  const agl = id === 'C2' ? C2_ANTENNA_M : ((d && d.altM != null) ? d.altM : s.altitudeM);
   return terrainGroundAt(s.terrain, pos.x, pos.y) + agl;
 }
 
@@ -515,13 +528,14 @@ function agilityGainDb(s, radio) {
 function interferenceFloorDbm(s, rxPos, rxAlt, rxRadio) {
   const jams = s.jammers;
   if (!jams || !jams.length) return -Infinity;
-  const n = pathLossExponent(s.radio);
-  const pl1 = pl1m(s.radio.freqMHz);
-  const gainDb = agilityGainDb(s, rxRadio);
+  const rad = rxRadio || s.radio;
+  const n = pathLossExponent(rad);
+  const pl1 = pl1m(rad.freqMHz);
+  const gainDb = agilityGainDb(s, rad);
   let lin = 0;
   for (const j of jams) {
     if (j.on === false) continue;
-    if (j.band !== 'all' && Math.abs(j.band - s.radio.freqMHz) > 150) continue; // out of band
+    if (j.band !== 'all' && Math.abs(j.band - rad.freqMHz) > 150) continue; // out of band
     const ground = Math.hypot(rxPos.x - j.x, rxPos.y - j.y);
     const jAlt = terrainGroundAt(s.terrain, j.x, j.y) + (j.altM || 15);
     if (losBlocked(s.terrain, j.x, j.y, jAlt, rxPos.x, rxPos.y, rxAlt)) continue; // terrain shadows it
@@ -587,12 +601,33 @@ function makeJammer(x, y, erpDbm) {
 }
 
 function liveMarginDb(s, aId, bId) {
+  if (aId === bId) return Infinity;
+  const cacheKey = aId < bId ? aId + ':' + bId : bId + ':' + aId;
+  if (s && s._marginCache) {
+    const cached = s._marginCache.get(cacheKey);
+    if (cached !== undefined) return cached;
+  }
   const a = nodePos(s, aId), b = nodePos(s, bId);
   if (!a || !b) return -Infinity;
+
+  const dx = Math.abs(a.x - b.x);
+  const dy = Math.abs(a.y - b.y);
+  const maxSpan = 60000;
+  if (dx > maxSpan || dy > maxSpan) {
+    if (s && s._marginCache) s._marginCache.set(cacheKey, -Infinity);
+    return -Infinity;
+  }
+
   const altA = nodeAltAbsM(s, aId, a), altB = nodeAltAbsM(s, bId, b);
-  const ground = dist2d(a, b);
-  if (ground > radioHorizonM(altA, altB)) return -Infinity;
-  if (losBlocked(s.terrain, a.x, a.y, altA, b.x, b.y, altB)) return -Infinity;
+  const ground = Math.hypot(dx, dy);
+  if (ground > radioHorizonM(altA, altB)) {
+    if (s && s._marginCache) s._marginCache.set(cacheKey, -Infinity);
+    return -Infinity;
+  }
+  if (losBlocked(s.terrain, a.x, a.y, altA, b.x, b.y, altB)) {
+    if (s && s._marginCache) s._marginCache.set(cacheKey, -Infinity);
+    return -Infinity;
+  }
   // Mixed fleets: each end transmits with its own radio's power, antenna and
   // calibrated path-loss curve; the link carries the worse direction (js/fleet.js).
   // C2 pairs with the far end's radio (the ground station flies a matched
@@ -602,9 +637,11 @@ function liveMarginDb(s, aId, bId) {
   const slant = Math.hypot(ground, altA - altB);
   // LPI/LPD waveform: pay a fixed link-budget cost for the spread spectrum.
   const lpiCost = s.lpiMode ? AGILITY.lpiCostDb : 0;
-  return mixedLinkMarginDb(ra, rb, s.envFactor, slant) + fadeDb(s, aId, bId)
+  const res = mixedLinkMarginDb(ra, rb, s.envFactor, slant) + fadeDb(s, aId, bId)
     - lpiCost
     - interferencePenaltyDb(s, a, altA, b, altB, ra, rb);
+  if (s && s._marginCache) s._marginCache.set(cacheKey, res);
+  return res;
 }
 
 // Comms-corridor transit (methodology from FASTER's safe corridors: keep the
@@ -675,11 +712,12 @@ function c2Step(s) {
     s.c2.known[p.src] = { ...p.payload, at: s.time };
     s.c2.everHeard.add(p.src);
     covMark(s, p.payload.x, p.payload.y, 'good');
-    if (p.payload.deadLog) {
+    if (p.payload.deadLog && p.payload.deadLog.length) {
       // Sitting somewhere in silence is much stronger evidence than one
       // lucky packet — weight dead samples accordingly.
       for (const pt of p.payload.deadLog) covMark(s, pt.x, pt.y, 'bad', 3);
       logEvent(s, 'C2: ' + p.src + ' uploaded ' + p.payload.deadLog.length + ' dead-zone samples — coverage map updated', 'info');
+      sendPacket(s, 'ack', 'C2', p.src, { ackDeadLogSeq: p.payload.deadLogMaxSeq || p.payload.deadLog.length });
     }
   }
   s.c2.inbox = [];
@@ -837,7 +875,11 @@ function c2Step(s) {
       known[id].battery >= RELAY.minBatteryPct && !s.c2.relays.includes(id) &&
       !s.c2.rescuers.includes(id) && !(s.c2.unfit[id] > s.time));
     const tac = base.filter(id => known[id].cls !== 'relay');
-    const candidates = tac.length ? tac : base;
+    const candidates = tac.length ? tac : base.filter(id => {
+      const d = nodePos(s, id);
+      const r = (d && droneRadio(d)) || s.radio;
+      return bandCompatible(r, s.radio);
+    });
     if (candidates.length) {
       const c = lostCentroid(s);
       let best = null, bestD = Infinity;
@@ -920,21 +962,34 @@ function c2Step(s) {
   // One streamer at a time: a store-and-forward relay chain divides its
   // airrate across hops AND users, so C2 hands out the channel in round-robin
   // turns. The grant rides to the drone inside its order packet — no magic.
+  const VID_GRANT_SEC = 20;
   if (s.videoOn && s.videoKbps > 0) {
     const wanters = ids.filter(id => fresh(id) && known[id].role === 'mission').sort();
     if (!wanters.length) {
       s.c2.vidGrantee = null;
+      s.c2.vidGrantAt = null;
     } else {
-      let idx = wanters.indexOf(s.c2.vidGrantee);
-      if (idx < 0) {
-        // previous grantee gone from contact — hand the mic to the next in line
-        idx = s.c2.vidIdx % wanters.length;
-        s.c2.vidIdx = (s.c2.vidIdx + 1) % wanters.length;
+      let expired = false;
+      if (s.c2.vidGrantee && s.c2.vidGrantAt != null && (s.time - s.c2.vidGrantAt >= VID_GRANT_SEC)) {
+        expired = true;
       }
-      s.c2.vidGrantee = wanters[idx];
+      let idx = wanters.indexOf(s.c2.vidGrantee);
+      if (idx < 0 || expired) {
+        // previous grantee gone from contact or grant expired — hand the mic to the next in line
+        if (expired && idx >= 0) {
+          idx = (idx + 1) % wanters.length;
+          s.c2.vidIdx = idx;
+        } else {
+          idx = s.c2.vidIdx % wanters.length;
+          s.c2.vidIdx = (s.c2.vidIdx + 1) % wanters.length;
+        }
+        s.c2.vidGrantee = wanters[idx];
+        s.c2.vidGrantAt = s.time;
+      }
     }
   } else {
     s.c2.vidGrantee = null;
+    s.c2.vidGrantAt = null;
   }
 
   if (s.broadcastC2) {
@@ -942,8 +997,11 @@ function c2Step(s) {
     const orders = {};
     for (const id of ids) orders[id] = orderFor(id);
     s.c2.bcastSeq += 1;
-    sendBroadcast(s, 'C2', { seq: s.c2.bcastSeq, orders },
-      NET.bcastHeaderBytes + NET.bcastRowBytes * ids.length);
+    const bcastBytes = NET.bcastHeaderBytes + NET.bcastRowBytes * ids.length;
+    sendBroadcast(s, 'C2', { seq: s.c2.bcastSeq, orders }, bcastBytes);
+    if (s.relayRadio && !bandCompatible(s.radio, s.relayRadio)) {
+      sendBroadcast(s, 'C2', { seq: s.c2.bcastSeq, orders }, bcastBytes, s.relayRadio);
+    }
   } else {
     // Unicast: one routed packet per drone — best effort, dies without a route
     for (const id of ids) sendPacket(s, 'cmd', 'C2', id, orderFor(id));
@@ -969,6 +1027,11 @@ function lostCentroid(s) {
 // --- Drone onboard logic -------------------------------------------------------
 function droneComms(s, d) {
   for (const p of d.inbox) {
+    if (p.kind === 'ack' && p.payload && p.payload.ackDeadLogSeq != null) {
+      d.deadLogAckedSeq = Math.max(d.deadLogAckedSeq || 0, p.payload.ackDeadLogSeq);
+      d.deadLog = d.deadLog.filter(sample => sample.seq && sample.seq > d.deadLogAckedSeq);
+      continue;
+    }
     if (p.kind !== 'cmd' && p.kind !== 'bcast') continue;
     // Any heard C2 transmission proves the link works here — even a
     // broadcast without a row for us (C2 hasn't met us yet)
@@ -1014,13 +1077,36 @@ function droneComms(s, d) {
 
   // Telemetry beacon — position as the GPS sees it, not as God sees it.
   // Any dead-zone samples collected while disconnected ride along (black box
-  // upload) and are cleared once handed to the radio.
+  // upload) and are retained until network delivery is confirmed by ACK.
   if (s.time >= d.nextTlm) {
     d.nextTlm = s.time + tlmIntervalSec(s);
     // Report what the drone's navigation believes — GNSS denial poisons the
     // position C2 sees, which is exactly how a real jammed airframe lies.
     const repX = d.gpsDenied ? d.belX : d.x + GPS_SIGMA_M * gaussian(s.net.rng);
     const repY = d.gpsDenied ? d.belY : d.y + GPS_SIGMA_M * gaussian(s.net.rng);
+    let unacked = null;
+    let deadLogMaxSeq = 0;
+    if (d.deadLog && d.deadLog.length > 0) {
+      if (!d.deadLogSeq) d.deadLogSeq = 0;
+      for (let i = 0; i < d.deadLog.length; i++) {
+        const sample = d.deadLog[i];
+        if (sample.seq == null) sample.seq = ++d.deadLogSeq;
+      }
+      const acked = d.deadLogAckedSeq || 0;
+      const list = [];
+      let maxSeq = 0;
+      for (let i = 0; i < d.deadLog.length; i++) {
+        const sample = d.deadLog[i];
+        if (!sample.seq || sample.seq > acked) {
+          list.push({ x: sample.x, y: sample.y, seq: sample.seq });
+          if (sample.seq > maxSeq) maxSeq = sample.seq;
+        }
+      }
+      if (list.length > 0) {
+        unacked = list;
+        deadLogMaxSeq = maxSeq;
+      }
+    }
     sendPacket(s, 'tlm', d.id, 'C2', {
       x: repX,
       y: repY,
@@ -1028,7 +1114,8 @@ function droneComms(s, d) {
       battery: d.batteryPct, role: effRole(d),
       cls: d.cls,   // fleet class rides along so C2 assigns roles by capability
       reject: d.rejectedRole || null,
-      deadLog: d.deadLog.length ? d.deadLog.splice(0) : null,
+      deadLog: unacked,
+      deadLogMaxSeq: deadLogMaxSeq,
     });
   }
 
@@ -1036,7 +1123,8 @@ function droneComms(s, d) {
   // Each chunk pays its full airtime on the shared channel — video visibly
   // competes with C2 traffic, and both starve when the chain thins.
   if (!d.nextVid) d.nextVid = 0;
-  if (s.videoOn && d.order.videoOn && d.mode === 'ok' && s.time >= d.nextVid) {
+  const vidGrantValid = d.order.videoOn && (s.time - (d.lastC2 || 0) <= 25);
+  if (s.videoOn && vidGrantValid && d.mode === 'ok' && s.time >= d.nextVid) {
     d.nextVid = Math.max(d.nextVid + VID.chunkSec, s.time);
     sendPacket(s, 'vid', d.id, 'C2', null,
       Math.round(s.videoKbps * 1000 / 8 * VID.chunkSec));
@@ -1047,7 +1135,9 @@ function droneComms(s, d) {
   if (silent && s.time >= d.nextDeadLog) {
     d.nextDeadLog = s.time + COVERAGE.deadLogIntervalSec;
     if (d.deadLog.length < COVERAGE.deadLogMax) {
+      d.deadLogSeq = (d.deadLogSeq || 0) + 1;
       d.deadLog.push({
+        seq: d.deadLogSeq,
         x: d.x + GPS_SIGMA_M * gaussian(s.net.rng),
         y: d.y + GPS_SIGMA_M * gaussian(s.net.rng),
       });
@@ -1133,14 +1223,15 @@ function killDrone(s, d) {
 }
 
 // --- Motion --------------------------------------------------------------------
-function goalFor(s, d) {
+function goalFor(s, d, dt) {
   if (d.mode === 'rtb' || d.mode === 'rtl') return { x: s.base.x, y: s.base.y };
   if (d.mode === 'hold') return { x: d.holdX, y: d.holdY };
   if (d.mode === 'relink') return { x: d.relinkGoalX, y: d.relinkGoalY };
   if (d.order.role === 'rescue' && d.order.goto) return d.order.goto;
   if (d.order.role === 'relay') return slotFromOrder(s, d.order);
   // Mission: loiter ring around the ORDERED target (which may be stale — that's the point)
-  d.orbitPhase += 0.0004 * afOf(s, d).maxSpeedMs;
+  const stepTime = dt != null ? dt : 0.25;
+  d.orbitPhase += (stepTime / 0.25) * 0.0004 * afOf(s, d).maxSpeedMs;
   const flock = s.drones.filter(x => alive(x) && x.mode === 'ok' && x.order.role === 'mission');
   const idx = Math.max(0, flock.indexOf(d));
   const a = d.orbitPhase + (idx / Math.max(1, flock.length)) * Math.PI * 2;
@@ -1187,12 +1278,20 @@ function tetherGoal(s, d, goal) {
 // physics, linear-ish cost.
 function buildSepGrid(s) {
   const cell = DRONE.separationM;
-  const grid = new Map();
-  for (const d of s.drones) {
+  let grid = s._sepGrid;
+  if (!grid) {
+    grid = new Map();
+    s._sepGrid = grid;
+  } else {
+    for (const arr of grid.values()) arr.length = 0;
+  }
+  for (let i = 0; i < s.drones.length; i++) {
+    const d = s.drones[i];
     if (!alive(d)) continue;
     const key = Math.floor(d.x / cell) + ',' + Math.floor(d.y / cell);
-    const arr = grid.get(key);
-    if (arr) arr.push(d); else grid.set(key, [d]);
+    let arr = grid.get(key);
+    if (!arr) { arr = []; grid.set(key, arr); }
+    arr.push(d);
   }
   return grid;
 }
@@ -1201,10 +1300,13 @@ function sepNeighbors(s, x, y) {
   const cell = DRONE.separationM;
   const gx = Math.floor(x / cell), gy = Math.floor(y / cell);
   const out = [];
+  if (!s._sepGrid) return out;
   for (let dx = -1; dx <= 1; dx++) {
     for (let dy = -1; dy <= 1; dy++) {
-      const arr = s._sepGrid && s._sepGrid.get((gx + dx) + ',' + (gy + dy));
-      if (arr) for (const d of arr) out.push(d);
+      const arr = s._sepGrid.get((gx + dx) + ',' + (gy + dy));
+      if (arr) {
+        for (let i = 0; i < arr.length; i++) out.push(arr[i]);
+      }
     }
   }
   return out;
@@ -1219,7 +1321,8 @@ function stepDrone(s, d, dt) {
   if (d.order.upstream) {
     const raw = liveMarginDb(s, d.id, d.order.upstream);
     const capped = Math.max(-20, Math.min(40, raw));
-    d.upMarginEma += (capped - d.upMarginEma) * TETHER.emaAlpha;
+    const alpha = 1 - Math.exp(-dt / 1.54);
+    d.upMarginEma += (capped - d.upMarginEma) * alpha;
     if (d.tethered && d.upMarginEma > plannedHopMarginDb(s, d) - TETHER.slowBelowPlanDb + 1) d.tethered = false;
   }
 
@@ -1247,7 +1350,7 @@ function stepDrone(s, d, dt) {
     s.maxNavErrM = Math.max(s.maxNavErrM || 0, err);
   }
 
-  const goal = tetherGoal(s, d, corridorGoal(s, d, goalFor(s, d)));
+  const goal = tetherGoal(s, d, corridorGoal(s, d, goalFor(s, d, dt)));
   // Cache the vetted goal so external mode ships exactly this one instead of
   // recomputing goalFor (which advances orbitPhase as a side effect — a
   // second call would double-step the loiter and diverge from what we vet).
@@ -1273,8 +1376,16 @@ function stepDrone(s, d, dt) {
     const dx = goal.x - d.belX, dy = goal.y - d.belY;
     const dGoal = Math.hypot(dx, dy);
 
-    const brake = (maxV * maxV) / (2 * DRONE.accelMs2);
-    const desiredSpeed = dGoal > brake ? maxV : maxV * (dGoal / brake);
+    let maxVg = maxV;
+    if (dGoal > 0.01 && s.wind && (s.wind.x || s.wind.y)) {
+      const ux = dx / dGoal, uy = dy / dGoal;
+      const wPar = s.wind.x * ux + s.wind.y * uy;
+      const wPerp = s.wind.x * uy - s.wind.y * ux;
+      const vaRemSq = maxV * maxV - wPerp * wPerp;
+      maxVg = vaRemSq > 0 ? Math.max(0, wPar + Math.sqrt(vaRemSq)) : 0;
+    }
+    const brake = (maxVg * maxVg) / (2 * DRONE.accelMs2);
+    const desiredSpeed = dGoal > brake ? maxVg : maxVg * (dGoal / Math.max(0.1, brake));
     let ax = 0, ay = 0;
     if (dGoal > 0.5) {
       ax = (dx / dGoal) * desiredSpeed - d.vx;
@@ -1285,13 +1396,27 @@ function stepDrone(s, d, dt) {
 
     // Separation: only nearby flockmates matter — 3×3 grid cells around the
     // drone (cell = separation radius), not the whole fleet.
-    for (const o of sepNeighbors(s, d.x, d.y)) {
-      if (o === d || !alive(o)) continue;
-      const sd = dist2d(d, o);
-      if (sd < DRONE.separationM && sd > 0.01) {
-        const push = (DRONE.separationM - sd) / DRONE.separationM * DRONE.accelMs2 * 2;
-        ax += ((d.x - o.x) / sd) * push;
-        ay += ((d.y - o.y) / sd) * push;
+    const sepM = DRONE.separationM;
+    const sepSq = sepM * sepM;
+    const gx = Math.floor(d.x / sepM), gy = Math.floor(d.y / sepM);
+    if (s._sepGrid) {
+      for (let cdx = -1; cdx <= 1; cdx++) {
+        for (let cdy = -1; cdy <= 1; cdy++) {
+          const arr = s._sepGrid.get((gx + cdx) + ',' + (gy + cdy));
+          if (!arr) continue;
+          for (let oi = 0; oi < arr.length; oi++) {
+            const o = arr[oi];
+            if (o === d || !alive(o)) continue;
+            const diffX = d.x - o.x, diffY = d.y - o.y;
+            const sdSq = diffX * diffX + diffY * diffY;
+            if (sdSq < sepSq && sdSq > 0.0001) {
+              const sd = Math.sqrt(sdSq);
+              const push = (sepM - sd) / sepM * DRONE.accelMs2 * 2;
+              ax += (diffX / sd) * push;
+              ay += (diffY / sd) * push;
+            }
+          }
+        }
       }
     }
 
@@ -1406,29 +1531,55 @@ function chainStatus(s) {
   // straight off the shared tree's distance map, no fresh searches.
   const tree = c2Tree(s);
   const connected = flock.some(d => (tree.dist.get(d.id) || Infinity) < Infinity);
+  const fleetConnected = connected;
+  const reach = usableRangeM(s.radio, s.envFactor) * 1.5;
+  const objectiveConnected = flock.some(d => (tree.dist.get(d.id) || Infinity) < Infinity && dist2d(d, s.target) <= Math.max(DRONE.orbitRadiusM * 2.5, reach));
 
   // Operator's view: how many drones does C2 have fresh contact with?
   const freshCount = Object.keys(s.c2.known)
     .filter(id => (s.time - s.c2.known[id].at) <= C2.staleSec).length;
   const aliveCount = s.drones.filter(alive).length;
 
-  return { nodes, hops, connected, missionCount: flock.length, relayCount: relays.length, freshCount, aliveCount };
+  return { nodes, hops, connected, fleetConnected, objectiveConnected, missionCount: flock.length, relayCount: relays.length, freshCount, aliveCount };
 }
 
 // --- Red-team adversaries -----------------------------------------------------
 // Each active source DFs recent transmissions (net.txAt) and crawls toward
 // their recency-weighted centroid at its own ground speed. Sensor-honest:
-// no truth-state access, no route knowledge — just a radio receiver.
+// models reception range, frequency band, terrain LOS, and sensor angular noise (B20).
 function stepAdversaries(s, dt) {
   if (!s.adversaryMode || !s.jammers || !s.jammers.length) return;
   const now = s.time;
   for (const j of s.jammers) {
     if (j.on === false) continue;
     const contacts = [];
+    const jAlt = terrainGroundAt(s.terrain, j.x, j.y) + (j.altM != null ? j.altM : 2);
     for (const [id, t] of Object.entries(s.net.txAt)) {
       const p = nodePos(s, id);
-      if (!p || !alive(p)) continue;
-      contacts.push({ x: p.x, y: p.y, age: t });
+      if (!p || (p !== s.base && !alive(p))) continue;
+      if (typeof ADVERSARY !== 'undefined' && (now - t > ADVERSARY.senseWindowSec)) continue;
+
+      const rad = id === 'C2' ? s.radio : (droneRadio(p) || s.radio);
+      if (j.band && j.band !== 'all') {
+        const jFreq = j.freqMHz || (j.band === '2.4g' ? 2400 : (j.band === '5g' ? 5800 : 915));
+        if (Math.abs(rad.freqMHz - jFreq) > BAND_COMPAT_MHZ) continue;
+      }
+
+      const dist = dist2d(j, p);
+      const maxDetectRange = j.detectRangeM || Math.max(4000, usableRangeM(rad, s.envFactor) * 2.5);
+      if (dist > maxDetectRange) continue;
+
+      const nodeAlt = nodeAltAbsM(s, id, p);
+      if (losBlocked(s.terrain, j.x, j.y, jAlt, p.x, p.y, nodeAlt)) continue;
+
+      const trueBearing = Math.atan2(p.y - j.y, p.x - j.x);
+      const noise = gaussian(s.net.rng) * 0.03; // ~1.7 degree bearing error
+      const bearing = trueBearing + noise;
+      contacts.push({
+        x: j.x + dist * Math.cos(bearing),
+        y: j.y + dist * Math.sin(bearing),
+        age: t,
+      });
     }
     const target = trafficCentroid(contacts, now);
     const speed = j.moveSpeedMs || 9;
@@ -1448,6 +1599,8 @@ function stepAdversaries(s, dt) {
 // --- Tick -------------------------------------------------------------------------
 function stepSwarm(s, dt) {
   s.time += dt;
+  if (!s._marginCache) s._marginCache = new Map();
+  else s._marginCache.clear();
 
   // Moving-mission dynamics: the convoy drives, the fire front creeps. The
   // chain re-plans live behind them — exactly the behaviour a dragged
@@ -1484,6 +1637,7 @@ function stepSwarm(s, dt) {
   // Neighbor grid rebuilt once per tick — the flock moves between ticks.
   s._sepGrid = buildSepGrid(s);
   for (const d of s.drones) stepDrone(s, d, dt);
+  if (s._marginCache) s._marginCache.clear();
   stepNet(s, dt);
 
   // Link-uptime accounting — the denominator of the anti-jam story.
@@ -1511,9 +1665,9 @@ function afterActionReport(s) {
   const dropPct = (deliv + drop) ? (100 * drop / (deliv + drop)).toFixed(1) : '0';
   const activeJam = (s.jammers || []).filter(j => j.on !== false).length;
   const D = dist2d(s.base, s.target);
-  const relayEvents = s.events.filter(e => e.kind === 'relay').length;
-  const failsafes = s.events.filter(e => /lost C2 link|link timeout|retreating/.test(e.msg)).length;
-  const swaps = s.events.filter(e => e.msg.includes('swapped')).length;
+  const relayEvents = (s.stats && s.stats.relayEvents) || s.events.filter(e => e.kind === 'relay').length;
+  const failsafes = (s.stats && s.stats.failsafes) || s.events.filter(e => /lost C2 link|link timeout|retreating/.test(e.msg)).length;
+  const swaps = (s.stats && s.stats.swaps) || s.events.filter(e => e.msg.includes('swapped')).length;
   const L = [];
   L.push('# Mission after-action report');
   L.push('');
