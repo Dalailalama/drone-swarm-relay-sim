@@ -456,10 +456,11 @@
     el('scaleNote').style.display = +countRange.value >= 60 ? 'block' : 'none';
   });
   countRange.addEventListener('change', () => {
+    // resetSwarm ends with syncExternalBridge(), which already re-inits the
+    // bridge to the new count — a second call here sent every slider change
+    // as TWO init messages, and a real init arms and launches vehicles
+    // (finding #24).
     resetSwarm();
-    // If a bridge is flying the swarm, respawn its vehicles to the new count
-    // so DR-1..DR-N stays in lockstep with the sim's drones.
-    if (externalActive()) externalReinit(() => swarm, +countRange.value, +altRange.value);
   });
   airframeSel.addEventListener('change', () => {
     airframe = AIRFRAMES.find(a => a.id === airframeSel.value);

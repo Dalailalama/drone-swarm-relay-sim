@@ -24,8 +24,8 @@ A finding is not closed as SITL-verified until actually flown.
 | 6 | Objective connectivity not wired to consumers | **reproduced**: connected=true at launch w/ objective 1000 km away; 5 km short counted on long-range radio | test/objective.test.js (4) | `connected` = live route to a drone on-station (orbit-ring radius, radio-independent); `fleetConnected` split out; pill shows "en route"; 4 tests re-scoped to their true subject | **fixed** |
 | 7 | Imported radio presets inject HTML | **reproduced**: live `<img>` in specCard; built-in SiK rewritten to 59 dBm; garbage fields registered | test/presetinject.test.js (4) | whitelist+bounds sanitizer (reject lying numbers), built-in ids collide to `-imported`, all preset strings escaped at render | **fixed** |
 | 8 | Stale OSM `.then` overwrites new scenario | **reproduced**: B's target reverted 888→111 on A's late fetch; button stuck | test/osmrace.test.js (4) | generation carried through completion (`applied` result + gen check), button ownership cleanup, geocode + relaunch + terrain-change all cancel | **fixed** |
-| 9 | External telemetry never goes stale | t=1 sample valid at sim t=1000 | — | — | queued (external) |
-| 10 | Old socket callbacks break reconnection | A's onclose cleared B's ready state | — | — | queued (external) |
+| 9 | External telemetry never goes stale | **reproduced**: 30 s-old sample still "current" | test/external.test.js (1) | local receipt-age staleness (3 s) feeds the freeze→dead ladder; stale policy documented | **fixed (mock-verified)** |
+| 10 | Old socket callbacks break reconnection | **reproduced**: ghost onclose un-readied live bridge | test/external.test.js (1) | every handler guarded by socket identity | **fixed (mock-verified)** |
 | 11 | External avoidance/landing unconfirmed | airborne drone marked landed at altM=50 | — | — | queued (external) |
 | 12 | Bridge readiness lacks ack/arm/takeoff check | bridge.py logs success after exception | — | — | queued (bridge; mock vs SITL split) |
 | 13 | Late vehicle start / controller races | no re-init on late heartbeat; shared state | — | — | queued (bridge; mock vs SITL split) |
@@ -39,8 +39,8 @@ A finding is not closed as SITL-verified until actually flown.
 | 21 | Video grants lack expiry | **reproduced**: 13 chunks streamed past expiry on heartbeats alone | test/vidgrant.test.js (3) | orders carry absolute videoUntil + grant id; onboard check uses the deadline, never link freshness | **fixed** |
 | 22 | OSM reload loses saved geometry/seed | seed 7→45, drone at default spawn | — | — | queued |
 | 23 | Calibrated presets not exported in scenario | reload in fresh page silently falls back | — | — | queued |
-| 24 | Count slider double-inits bridge | two init messages per change | — | — | queued |
-| 25 | External altitude datum undefined | -NED.z treated as AGL + terrain | — | — | queued (external) |
+| 24 | Count slider double-inits bridge | **reproduced**: 2 init messages per change | test/external.test.js (1) | handler's duplicate call removed; resetSwarm's central sync is the one path | **fixed (mock-verified)** |
+| 25 | External altitude datum undefined | **reproduced**: 120 m origin-relative read as 120 m AGL over hills | test/external.test.js (1) | contract defined: bridge alt = origin-relative (-NED.z); converted to AGL at the vehicle via ground-height delta | **fixed (mock-verified)** |
 | 26 | TAK export labels AGL as HAE | altM=120, anchor 500 → hae=50.0 | — | — | queued |
 | 27 | CoT regex truncates opposite quotes | O'Brien → "O" | — | — | queued |
 | 28 | Browser dt=0.05 vs batch dt=0.25 | equal seeds diverge | — | — | queued |

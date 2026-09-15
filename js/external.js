@@ -22,6 +22,17 @@
   // Sustained bridge-side heartbeat loss (seconds) before a frozen vehicle is
   // declared down. A brief UDP/SITL gap must not permanently kill a drone.
   const EXT_LOST_DEAD_SEC = 10;
+  // Telemetry freshness by LOCAL receipt age (finding #9): a socket that
+  // stays open while telemetry stops must not leave the last sample "current"
+  // forever. Stale policy, stated plainly: the vehicle freezes at its last
+  // known position (radio keeps computing on that best estimate, battery
+  // bills hover), and a SUSTAINED stall escalates through the same
+  // lost-heartbeat ladder to 'dead'.
+  const EXT_STALE_SEC = 3;
+
+  function wallSec() {
+    return (typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now()) / 1000;
+  }
 
   const ExternalMode = {
     ws: null,
@@ -52,20 +63,29 @@
     ExternalMode.ws = ws;
     setStatus(getSwarm(), 'connecting to ' + wsUrl + '…');
 
+    // Every handler answers for ONE socket (finding #10): a reconnect makes a
+    // new socket, and the old one's delayed close/error/message events must
+    // not touch the state the new connection owns.
     ws.onopen = () => {
+      if (ExternalMode.ws !== ws) return;
       ExternalMode.connected = true;
       ws.send(JSON.stringify({ type: 'init', count, alt: altM }));
       setStatus(getSwarm(), 'connected — initializing ' + count + ' vehicles…');
     };
     ws.onclose = () => {
+      if (ExternalMode.ws !== ws) return; // a ghost of a replaced connection
       ExternalMode.connected = false;
       ExternalMode.ready = false;
       // Keep controlMode = 'external' so internal physics doesn't take over;
       // vehicles remain frozen in place until user explicitly disconnects.
       setStatus(getSwarm(), 'disconnected — positions frozen under external hold (click Disconnect to resume internal physics)');
     };
-    ws.onerror = () => setStatus(getSwarm(), 'socket error (is the bridge running?)');
+    ws.onerror = () => {
+      if (ExternalMode.ws !== ws) return;
+      setStatus(getSwarm(), 'socket error (is the bridge running?)');
+    };
     ws.onmessage = (ev) => {
+      if (ExternalMode.ws !== ws) return;
       let m; try { m = JSON.parse(ev.data); } catch (e) { return; }
       const s = getSwarm();
       if (m.type === 'ready') {
@@ -76,7 +96,7 @@
         for (const v of m.vehicles) {
           const prev = ExternalMode.telem[v.id];
           if (prev) ExternalMode.prev[v.id] = { x: prev.x, y: prev.y, t: prev.t };
-          ExternalMode.telem[v.id] = { x: v.x, y: v.y, alt: v.alt, connected: v.connected, t: m.t };
+          ExternalMode.telem[v.id] = { x: v.x, y: v.y, alt: v.alt, connected: v.connected, t: m.t, rxAt: wallSec() };
         }
       } else if (m.type === 'status') {
         setStatus(s, m.msg);
@@ -135,10 +155,14 @@
         d.vy = 0;
         continue;
       }
-      if (!t.connected) {
-        // Bridge lost this vehicle's heartbeat. Freeze it in place but keep
-        // it recoverable — a brief gap must not permanently kill a drone
-        // that's still flying. Only a SUSTAINED loss escalates to 'dead'.
+      const stale = t.rxAt != null && (wallSec() - t.rxAt) > EXT_STALE_SEC;
+      if (!t.connected || stale) {
+        // Bridge lost this vehicle's heartbeat — or the whole telemetry
+        // stream stalled while the socket idled open (finding #9: freshness
+        // is judged by LOCAL receipt age, never by the last sample's claim).
+        // Freeze in place but keep it recoverable — a brief gap must not
+        // permanently kill a drone that's still flying. Only a SUSTAINED
+        // loss escalates to 'dead'.
         d.vx = d.vy = 0;
         if (d.extLostSince == null) d.extLostSince = s.time;
         else if (alive(d) && s.time - d.extLostSince > EXT_LOST_DEAD_SEC) {
@@ -160,7 +184,15 @@
       }
       d.x = t.x;
       d.y = t.y;
-      if (t.alt != null) d.altM = t.alt;
+      // The bridge reports -LOCAL_POSITION_NED.z: height above the LAUNCH
+      // ORIGIN (MAVLink local NED is origin-relative — see MAV_FRAME). The
+      // RF model wants AGL at the vehicle's CURRENT position; over terrain
+      // the two differ by the ground-height difference (finding #25).
+      if (t.alt != null) {
+        d.altM = t.alt
+          + terrainGroundAt(s.terrain, s.base.x, s.base.y)
+          - terrainGroundAt(s.terrain, d.x, d.y);
+      }
     }
   }
 
