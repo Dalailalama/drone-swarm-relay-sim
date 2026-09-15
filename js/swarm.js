@@ -485,6 +485,60 @@ function buildingObstacleRadiusM(s, b) {
   return Math.hypot(b.w, b.d) / 2 + 18;
 }
 
+// Hard flight envelope (review finding #1 / B6): the avoidance push in
+// stepDrone is a soft force capped by the accel limit — inertia can beat it,
+// and at dt=0.05 a full-speed drone punched ~0.4 m into a footprint. This is
+// the guarantee the push can't make: sweep each step's motion segment against
+// every no-fly building nearby (same exact segment/AABB math LOS uses); a
+// step that would cross into a footprint — inflated by a clearance band —
+// stops at the wall instead, keeping only the velocity that slides along it.
+const OBSTACLE_CLEAR_M = 2.5;
+
+function clampStepToBuildings(s, d, dt) {
+  const sx = d.x, sy = d.y;
+  const ex = sx + d.vx * dt, ey = sy + d.vy * dt;
+  const reach = Math.abs(ex - sx) + Math.abs(ey - sy) + OBSTACLE_CLEAR_M + 40;
+  let best = null; // earliest wall crossing this step: { t, nx, ny }
+  for (const b of buildingsNear(s.terrain, sx, sy, reach)) {
+    if (b.heightM <= s.altitudeM) continue; // scenery below flight level
+    const minX = b.x - b.w / 2 - OBSTACLE_CLEAR_M, maxX = b.x + b.w / 2 + OBSTACLE_CLEAR_M;
+    const minY = b.y - b.d / 2 - OBSTACLE_CLEAR_M, maxY = b.y + b.d / 2 + OBSTACLE_CLEAR_M;
+    if (sx > minX && sx < maxX && sy > minY && sy < maxY) {
+      // Already inside the clearance band (spawn, drift, loaded state):
+      // exit through the nearest face and shed the inward velocity —
+      // never trap, never teleport across the building.
+      const exits = [
+        { pen: sx - minX, nx: -1, ny: 0 }, { pen: maxX - sx, nx: 1, ny: 0 },
+        { pen: sy - minY, nx: 0, ny: -1 }, { pen: maxY - sy, nx: 0, ny: 1 },
+      ];
+      let e = exits[0];
+      for (const c of exits) if (c.pen < e.pen) e = c;
+      d.x = sx + e.nx * (e.pen + 0.05); d.y = sy + e.ny * (e.pen + 0.05);
+      const vn = d.vx * e.nx + d.vy * e.ny;
+      if (vn < 0) { d.vx -= e.nx * vn; d.vy -= e.ny * vn; }
+      return; // this tick's motion is spent resolving the incursion
+    }
+    const hit = rayIntersectsAABB(sx, sy, ex, ey, minX, maxX, minY, maxY);
+    if (hit && hit.tmin > 0 && hit.tmin <= 1 && (!best || hit.tmin < best.t)) {
+      // Wall normal = the face the entry point lies on.
+      const px = sx + (ex - sx) * hit.tmin, py = sy + (ey - sy) * hit.tmin;
+      const faces = [
+        { m: Math.abs(px - minX), nx: -1, ny: 0 }, { m: Math.abs(px - maxX), nx: 1, ny: 0 },
+        { m: Math.abs(py - minY), nx: 0, ny: -1 }, { m: Math.abs(py - maxY), nx: 0, ny: 1 },
+      ];
+      let f = faces[0];
+      for (const c of faces) if (c.m < f.m) f = c;
+      best = { t: hit.tmin, nx: f.nx, ny: f.ny };
+    }
+  }
+  if (!best) { d.x = ex; d.y = ey; return; }
+  const f = Math.max(0, best.t - 1e-3);
+  d.x = sx + (ex - sx) * f;
+  d.y = sy + (ey - sy) * f;
+  const vn = d.vx * best.nx + d.vy * best.ny;
+  if (vn < 0) { d.vx -= best.nx * vn; d.vy -= best.ny * vn; } // slide, don't stall
+}
+
 // Live link margin between two nodes: 3D slant-range path loss plus the
 // link's current shadowing offset, hard-blocked beyond the radio horizon
 // and hard-blocked when terrain cuts the line of sight. This is what
@@ -1455,7 +1509,7 @@ function stepDrone(s, d, dt) {
       vax *= maxV / va; vay *= maxV / va;
       d.vx = vax + s.wind.x; d.vy = vay + s.wind.y;
     }
-    d.x += d.vx * dt; d.y += d.vy * dt;
+    clampStepToBuildings(s, d, dt); // hard no-fly guarantee — soft push above is advisory
 
     updateBattery(s, d, dt, Math.min(va, maxV));
   }

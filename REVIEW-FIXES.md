@@ -16,7 +16,7 @@ A finding is not closed as SITL-verified until actually flown.
 
 | # | Finding (short) | Review evidence | Regression test | Fix commit | Status |
 |---|---|---|---|---|---|
-| 1 | Building collision at dt=0.05 | probe entered 30×30 m footprint at x=85.4 | — | — | in progress |
+| 1 | Building collision at dt=0.05 | **reproduced**: entry t=0.35 s, x=85.399 (reviewer: x=85.394) | test/collision.test.js (4: head-on, corner clip, expel, overfly) | swept segment/AABB clamp + 2.5 m clearance in stepDrone | **fixed** |
 | 2 | Upwind feasibility uses scalar wind | 16 m/s wind, 14 m/s airframe accepted | — | — | queued |
 | 3 | Unicast outcome decided at schedule time | delivery after sender death / 1000 km move | — | — | queued (scheduler cluster) |
 | 4 | Forwarded broadcasts bypass channel/duty | copies at t=3.02 inside t=2 reservation | — | — | queued (scheduler cluster) |
