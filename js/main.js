@@ -292,6 +292,14 @@
   function currentScenario() {
     return {
       version: 1, radio: radio.id, env: env.id, airframe: airframe.id,
+      // A custom/calibrated radio is DATA, not an id a fresh page will
+      // recognize: embed the full definition so the scenario is portable
+      // (finding #23). Built-ins stay id-only; the import path validates.
+      radioPreset: BUILTIN_RADIO_IDS.has(radio.id) ? undefined : { ...radio },
+      relayRadioPreset: (() => {
+        const rr = RADIOS.find(r => r.id === relayRadioSel.value);
+        return rr && !BUILTIN_RADIO_IDS.has(rr.id) ? { ...rr } : undefined;
+      })(),
       hetero: heteroChk.checked,
       relayWing: +wingRange.value, relayAirframe: relayAirframeSel.value, relayRadio: relayRadioSel.value,
       count: +countRange.value, altitudeM: +altRange.value, spacingPct: +spacingRange.value,
