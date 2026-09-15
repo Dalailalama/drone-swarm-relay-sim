@@ -404,6 +404,16 @@ function planChain(s) {
     }
   }
 
+  // No route means NO plan — placing slots along the straight-line fallback
+  // put relays inside the very denial zone the search failed to cross
+  // (review finding #19). C2 gets an empty slot list and says so; drones'
+  // own protections (tether, coverage) handle whatever was already airborne.
+  if (!found) {
+    const failedPlan = { slots: [], pathLen: dist2d(s.base, s.target), tKey, at: s.time, feasible: false };
+    s.c2.chainPlan = failedPlan;
+    return failedPlan;
+  }
+
   // Slots at even arc-length along the path
   const segs = [];
   let pathLen = 0;
@@ -867,6 +877,16 @@ function c2Step(s) {
   const k = s.c2.relays.length;
   const kNeeded = plan.slots.length;
 
+  // Operator warning: the route search failed outright — no chain can be
+  // planned at all. Louder and earlier than the not-enough-relays case,
+  // and announced exactly once per blockage (finding #19).
+  if (!plan.feasible && !s.c2.noRouteWarned) {
+    logEvent(s, 'C2: no feasible route to the objective — corridor blocked, relay plan withheld', 'error');
+    s.c2.noRouteWarned = true;
+  } else if (plan.feasible) {
+    s.c2.noRouteWarned = false;
+  }
+
   // Operator warning: mission demands more relays than the fleet can supply.
   // Drones will still try (and their failsafes will bring them back) — but
   // the operator should know the plan doesn't close.
@@ -1092,6 +1112,7 @@ function c2Step(s) {
 // cells that turned measured-bad since the last replan.
 function adjustedSlotPos(s, slot, k) {
   const plan = s.c2.chainPlan;
+  if (plan && plan.feasible === false) return null; // no route — never mint straight-line slots (finding #19)
   const nominal = (plan && plan.slots[slot])
     || slotFromOrder(s, { slot, k, target: s.target, role: 'relay' });
   return covAdjust(s, nominal);
