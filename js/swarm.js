@@ -566,6 +566,24 @@ function clampStepToBuildings(s, d, dt) {
 // bends the chain around it — no special-case logic anywhere else.
 const JAM_SNR_OFFSET_DB = 10; // gap between raw interference power and the usable-floor scale
 
+// One band representation everywhere (review finding #20): a jammer's band
+// may arrive as a number (MHz), a numeric string, 'all', or a legacy name.
+// Returns the center frequency in MHz, or null for wideband/'all'. The DF
+// branch used to recognize only '2.4g'/'5g' and mapped numeric 2400 to
+// 915 — a 2.4 GHz hunter was deaf to a 2.4 GHz emitter beside it.
+function jammerFreqMHz(j) {
+  if (j.freqMHz != null) return j.freqMHz;
+  const b = j.band;
+  if (b == null || b === 'all') return null;
+  if (typeof b === 'number') return b;
+  const n = parseFloat(b);
+  if (isFinite(n)) return n;
+  if (b === '2.4g') return 2400;
+  if (b === '5g') return 5800;
+  if (b === 'sub1g') return 915;
+  return null;
+}
+
 // Spectrum agility (anti-jam) and LPI/LPD waveform modelling.
 // - Frequency agility: a hopping radio only ever sits in the jammer's band a
 //   small fraction of the time — modelled as processing/escape gain that
@@ -601,7 +619,8 @@ function interferenceFloorDbm(s, rxPos, rxAlt, rxRadio) {
   let lin = 0;
   for (const j of jams) {
     if (j.on === false) continue;
-    if (j.band !== 'all' && Math.abs(j.band - rad.freqMHz) > 150) continue; // out of band
+    const jf = jammerFreqMHz(j);
+    if (jf != null && Math.abs(jf - rad.freqMHz) > 150) continue; // out of band
     const ground = Math.hypot(rxPos.x - j.x, rxPos.y - j.y);
     const jAlt = terrainGroundAt(s.terrain, j.x, j.y) + (j.altM || 15);
     if (losBlocked(s.terrain, j.x, j.y, jAlt, rxPos.x, rxPos.y, rxAlt)) continue; // terrain shadows it
@@ -1683,32 +1702,36 @@ function stepAdversaries(s, dt) {
     if (j.on === false) continue;
     const contacts = [];
     const jAlt = terrainGroundAt(s.terrain, j.x, j.y) + (j.altM != null ? j.altM : 2);
+    // A DF fix is a MEASUREMENT: taken once, at the emission, and kept as
+    // taken (finding #20). Re-deriving bearings from the emitter's live
+    // position every tick let a hunter track targets that had gone silent.
+    j._obs = j._obs || {};
     for (const [id, t] of Object.entries(s.net.txAt)) {
-      const p = nodePos(s, id);
-      if (!p || (p !== s.base && !alive(p))) continue;
-      if (typeof ADVERSARY !== 'undefined' && (now - t > ADVERSARY.senseWindowSec)) continue;
-
-      const rad = id === 'C2' ? s.radio : (droneRadio(p) || s.radio);
-      if (j.band && j.band !== 'all') {
-        const jFreq = j.freqMHz || (j.band === '2.4g' ? 2400 : (j.band === '5g' ? 5800 : 915));
-        if (Math.abs(rad.freqMHz - jFreq) > BAND_COMPAT_MHZ) continue;
+      if (typeof ADVERSARY !== 'undefined' && (now - t > ADVERSARY.senseWindowSec)) {
+        delete j._obs[id]; // emission aged out of the receiver's memory
+        continue;
       }
-
-      const dist = dist2d(j, p);
-      const maxDetectRange = j.detectRangeM || Math.max(4000, usableRangeM(rad, s.envFactor) * 2.5);
-      if (dist > maxDetectRange) continue;
-
-      const nodeAlt = nodeAltAbsM(s, id, p);
-      if (losBlocked(s.terrain, j.x, j.y, jAlt, p.x, p.y, nodeAlt)) continue;
-
-      const trueBearing = Math.atan2(p.y - j.y, p.x - j.x);
-      const noise = gaussian(s.net.rng) * 0.03; // ~1.7 degree bearing error
-      const bearing = trueBearing + noise;
-      contacts.push({
-        x: j.x + dist * Math.cos(bearing),
-        y: j.y + dist * Math.sin(bearing),
-        age: t,
-      });
+      const prev = j._obs[id];
+      if (!prev || prev.t !== t) {
+        // New emission — attempt one measurement now (the emission tick).
+        let fix = null;
+        const p = nodePos(s, id);
+        if (p && (p === s.base || alive(p))) {
+          const rad = id === 'C2' ? s.radio : (droneRadio(p) || s.radio);
+          const jf = jammerFreqMHz(j);
+          const bandOk = jf == null || Math.abs(rad.freqMHz - jf) <= BAND_COMPAT_MHZ;
+          const dist = dist2d(j, p);
+          const maxDetectRange = j.detectRangeM || Math.max(4000, usableRangeM(rad, s.envFactor) * 2.5);
+          if (bandOk && dist <= maxDetectRange &&
+              !losBlocked(s.terrain, j.x, j.y, jAlt, p.x, p.y, nodeAltAbsM(s, id, p))) {
+            const bearing = Math.atan2(p.y - j.y, p.x - j.x) + gaussian(s.net.rng) * 0.03; // ~1.7° error
+            fix = { x: j.x + dist * Math.cos(bearing), y: j.y + dist * Math.sin(bearing), age: t };
+          }
+        }
+        j._obs[id] = { t, fix }; // a failed measurement is recorded too — no retry until the next emission
+      }
+      const ob = j._obs[id];
+      if (ob.fix) contacts.push(ob.fix);
     }
     const target = trafficCentroid(contacts, now);
     const speed = j.moveSpeedMs || 9;

@@ -35,7 +35,7 @@ A finding is not closed as SITL-verified until actually flown.
 | 17 | ACK-replayed coverage samples double-count | **reproduced**: weight 3→6 on replay; 32 B bill for 3 riding samples | test/covdedup.test.js (4) | per-vehicle seq dedup at C2 (restart-aware), duplicates still ACKed, sample rows billed on air | **fixed** |
 | 18 | Disconnected nav reads live truth | black-box logged ~truth in GPS-denied | — | — | queued |
 | 19 | Failed A* still assigns blocked routes | **reproduced**: 12 slots through a solid wall, relays ordered onto them | test/planfail.test.js (3) | no-route → empty slot list + explicit C2 error, straight-line fallbacks guarded | **fixed** |
-| 20 | Adversary band filtering wrong representation | 2400 MHz hunter ignored 2400 MHz emitter | — | — | queued |
+| 20 | Adversary band filtering wrong representation | **reproduced**: in-band hunter moved 0.0 m; silent target tracked live | test/advband.test.js (3) | jammerFreqMHz normalizer everywhere; DF fixes measured once at emission, kept as taken; txAt=actual emission via scheduler rework | **fixed** |
 | 21 | Video grants lack expiry | any C2 message refreshes old grant | — | — | queued |
 | 22 | OSM reload loses saved geometry/seed | seed 7→45, drone at default spawn | — | — | queued |
 | 23 | Calibrated presets not exported in scenario | reload in fresh page silently falls back | — | — | queued |
