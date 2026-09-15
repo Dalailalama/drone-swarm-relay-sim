@@ -26,7 +26,7 @@ A finding is not closed as SITL-verified until actually flown.
 | 8 | Stale OSM `.then` overwrites new scenario | **reproduced**: B's target reverted 888→111 on A's late fetch; button stuck | test/osmrace.test.js (4) | generation carried through completion (`applied` result + gen check), button ownership cleanup, geocode + relaunch + terrain-change all cancel | **fixed** |
 | 9 | External telemetry never goes stale | **reproduced**: 30 s-old sample still "current" | test/external.test.js (1) | local receipt-age staleness (3 s) feeds the freeze→dead ladder; stale policy documented | **fixed (mock-verified)** |
 | 10 | Old socket callbacks break reconnection | **reproduced**: ghost onclose un-readied live bridge | test/external.test.js (1) | every handler guarded by socket identity | **fixed (mock-verified)** |
-| 11 | External avoidance/landing unconfirmed | airborne drone marked landed at altM=50 | — | — | queued (external) |
+| 11 | External avoidance/landing unconfirmed | **reproduced**: landed+swap at 50 m; raw goal shipped through a 300 m tower | test/extgoals.test.js (3) | goals clipped short of no-fly footprints before shipping; RTB-over-pad commands descent; landing requires telemetry-confirmed touchdown (≤2 m) | **fixed (mock-verified)** |
 | 12 | Bridge readiness lacks ack/arm/takeoff check | bridge.py logs success after exception | — | — | queued (bridge; mock vs SITL split) |
 | 13 | Late vehicle start / controller races | no re-init on late heartbeat; shared state | — | — | queued (bridge; mock vs SITL split) |
 | 14 | Batch workers unbounded/uncancellable | worker per request, no queue/timeout | — | — | queued (batch) |

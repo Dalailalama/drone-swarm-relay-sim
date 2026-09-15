@@ -212,7 +212,13 @@
       if (!alive(d) || d.goalX == null) continue;
       // Ship the exact goal stepDrone vetted this tick (cached on the drone),
       // not a fresh goalFor call — recomputing would double-advance orbitPhase.
-      goals.push({ id: d.id, x: d.goalX, y: d.goalY, alt: s.altitudeM });
+      // Two external-only vets (finding #11): the leg is clipped short of any
+      // known no-fly building (the autopilot has no obstacle map), and an
+      // RTB/RTL drone over the pad is commanded to DESCEND — touchdown is
+      // confirmed by telemetry before anyone calls it landed.
+      const g = clipGoalToNoFly(s, d, { x: d.goalX, y: d.goalY });
+      const overPad = (d.mode === 'rtb' || d.mode === 'rtl') && dist2d(d, s.base) < DRONE.landThresholdM * 2;
+      goals.push({ id: d.id, x: g.x, y: g.y, alt: overPad ? 0 : s.altitudeM });
     }
     if (ExternalMode.ws && ExternalMode.connected) {
       ExternalMode.ws.send(JSON.stringify({ type: 'goals', goals }));

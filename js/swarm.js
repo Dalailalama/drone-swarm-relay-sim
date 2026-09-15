@@ -497,6 +497,31 @@ function buildingObstacleRadiusM(s, b) {
   return Math.hypot(b.w, b.d) / 2 + 18;
 }
 
+// External vehicles fly straight at whatever goal they're given — the
+// autopilot doesn't carry our obstacle map, so OUR knowledge must not
+// command it through a tower (review finding #11). Pull a goal back to just
+// short of the first no-fly footprint on its straight line. Vetting re-runs
+// on every goal push (~2 Hz), so capping the scan radius keeps it cheap
+// while the vehicle still never receives a leg that crosses a known building.
+function clipGoalToNoFly(s, from, goal) {
+  if (!s.terrain || !s.terrain.buildings || !s.terrain.buildings.length) return goal;
+  const legM = dist2d(from, goal);
+  if (legM < 1e-6) return goal;
+  const scanM = Math.min(legM + OBSTACLE_CLEAR_M + 40, 600);
+  let firstHit = null;
+  for (const b of buildingsNear(s.terrain, from.x, from.y, scanM)) {
+    if (b.heightM <= s.altitudeM) continue;
+    const minX = b.x - b.w / 2 - OBSTACLE_CLEAR_M, maxX = b.x + b.w / 2 + OBSTACLE_CLEAR_M;
+    const minY = b.y - b.d / 2 - OBSTACLE_CLEAR_M, maxY = b.y + b.d / 2 + OBSTACLE_CLEAR_M;
+    if (from.x > minX && from.x < maxX && from.y > minY && from.y < maxY) continue; // expel logic owns this case
+    const hit = rayIntersectsAABB(from.x, from.y, goal.x, goal.y, minX, maxX, minY, maxY);
+    if (hit && hit.tmin > 0 && hit.tmin <= 1 && (firstHit == null || hit.tmin < firstHit)) firstHit = hit.tmin;
+  }
+  if (firstHit == null) return goal;
+  const f = Math.max(0, firstHit - 0.02);
+  return { x: from.x + (goal.x - from.x) * f, y: from.y + (goal.y - from.y) * f };
+}
+
 // Hard flight envelope (review finding #1 / B6): the avoidance push in
 // stepDrone is a soft force capped by the accel limit — inertia can beat it,
 // and at dt=0.05 a full-speed drone punched ~0.4 m into a footprint. This is
@@ -1611,7 +1636,11 @@ function stepDrone(s, d, dt) {
   }
 
   if ((d.mode === 'rtb' || d.mode === 'rtl') && dist2d(d, s.base) < DRONE.landThresholdM) {
-    if (d.mode === 'rtb') {
+    // Internal physics is a 2D abstraction — touchdown is instantaneous.
+    // A REAL vehicle must CONFIRM it: reported altitude near the ground, or
+    // no swap crew starts work under a hovering aircraft (finding #11).
+    const grounded = !external || (d.altM != null && d.altM <= 2);
+    if (d.mode === 'rtb' && grounded) {
       d.mode = 'landed'; d.vx = d.vy = 0;
       d.swapAt = s.time + BATTERY.swapSec;
       logEvent(s, d.id + ' landed at base — battery swap in progress', 'info');
