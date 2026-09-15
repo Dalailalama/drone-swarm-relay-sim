@@ -46,7 +46,7 @@ A finding is not closed as SITL-verified until actually flown.
 | 28 | Browser dt=0.05 vs batch dt=0.25 | equal seeds diverge | — | — | queued |
 | 29 | Battery swaps counted twice | **reproduced**: full land→swap→relaunch cycle counted 2 | test/swapcount.test.js (1) | counted at the completed relaunch transition, log-text sniffing removed | **fixed** |
 | 30 | Batch validation permissive on types | **reproduced**: count=1.5, seeds='bad', env='toString', null coords all accepted | test/batchvalid.test.js (2) | strict provided-field validation (wrong type ≠ omitted), integer counts, bounded nested cell fields & geometry, drone-second work budget | **fixed** |
-| 31 | Failed tiles never retry | cached failure until eviction | — | — | queued |
+| 31 | Failed tiles never retry | **reproduced**: hole persisted after network recovery | test/tileretry.test.js (2) | bounded exponential backoff (5 s→5 min), successes cached as before | **fixed** |
 | 32 | City sliders bypass geometry/zero handling | **reproduced**: seed 0→42, city centred off the moved corridor | test/rebuild.test.js (1) | regeneration uses base→target geometry and null-safe seed | **fixed** |
 
 Optimizations O1–O9: tracked after the 32 correctness findings; each will be

@@ -61,25 +61,46 @@ function tileZoomFor(lat, pxPerM) {
 }
 
 // --- Fetch cache (browser only) ----------------------------------------------
-const tileCache = new Map(); // 'z/x/y' -> { img, ok, failed }
+const tileCache = new Map(); // 'z/x/y' -> { img, ok, failed, failedAt, attempts }
+
+// A transient network failure must not leave a permanent hole in the map
+// (finding #31): failed tiles retry with bounded exponential backoff —
+// 5 s, 10 s, 20 s … capped at 5 min — instead of caching the failure until
+// eviction. Successes are cached forever as before.
+const TILE_RETRY_BASE_MS = 5000;
+const TILE_RETRY_MAX_MS = 300000;
+
+function tileRetryDelayMs(attempts) {
+  return Math.min(TILE_RETRY_MAX_MS, TILE_RETRY_BASE_MS * Math.pow(2, Math.max(0, attempts - 1)));
+}
+
+function tileNowMs() {
+  return (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+}
 
 function tileGet(z, x, y) {
   const n = Math.pow(2, z);
   if (y < 0 || y >= n) return null;               // off the projection
   const wx = ((x % n) + n) % n;                    // wrap around the antimeridian
   const key = z + '/' + wx + '/' + y;
+  let priorAttempts = 0;
   let e = tileCache.get(key);
-  if (e) return e;
+  if (e) {
+    const retryDue = e.failed && (tileNowMs() - e.failedAt) >= tileRetryDelayMs(e.attempts);
+    if (!retryDue) return e;
+    priorAttempts = e.attempts;                    // backoff keeps growing across retries
+    tileCache.delete(key);
+  }
   if (tileCache.size >= TILE_CACHE_MAX) {
     for (const k of tileCache.keys()) {           // evict oldest inserted
       tileCache.delete(k);
       if (tileCache.size < TILE_CACHE_MAX * 0.9) break;
     }
   }
-  e = { img: new Image(), ok: false, failed: false };
+  e = { img: new Image(), ok: false, failed: false, failedAt: 0, attempts: priorAttempts };
   e.img.crossOrigin = 'anonymous';
-  e.img.onload = () => { e.ok = true; };
-  e.img.onerror = () => { e.failed = true; };
+  e.img.onload = () => { e.ok = true; e.failed = false; };
+  e.img.onerror = () => { e.failed = true; e.failedAt = tileNowMs(); e.attempts += 1; };
   e.img.src = 'https://' + 'abcd'[(wx + y) % 4] + '.basemaps.cartocdn.com/dark_all/' + key + '.png';
   tileCache.set(key, e);
   return e;
