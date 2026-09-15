@@ -225,7 +225,9 @@ function logEvent(s, msg, kind) {
     s.stats.totalEvents = (s.stats.totalEvents || 0) + 1;
     if (kind === 'relay') s.stats.relayEvents = (s.stats.relayEvents || 0) + 1;
     if (/lost C2 link|link timeout|retreating/.test(msg)) s.stats.failsafes = (s.stats.failsafes || 0) + 1;
-    if (msg.includes('swapped') || msg.includes('swap in progress')) s.stats.swaps = (s.stats.swaps || 0) + 1;
+    // Swaps are counted at the COMPLETED state transition (relaunch site),
+    // not by sniffing log text — matching both the landing and the relaunch
+    // message made one physical swap count twice (review finding #29).
   }
 }
 
@@ -1718,6 +1720,7 @@ function stepSwarm(s, dt) {
       d.swapAt = null;
       d.lastC2 = s.time;
       d.order = { role: 'mission', slot: -1, k: 0, upstream: 'C2', target: { x: s.target.x, y: s.target.y } };
+      if (s.stats) s.stats.swaps = (s.stats.swaps || 0) + 1; // one completed swap, counted once
       logEvent(s, d.id + ' battery swapped — relaunching', 'info');
     }
   }

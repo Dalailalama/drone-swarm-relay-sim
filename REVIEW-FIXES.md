@@ -30,7 +30,7 @@ A finding is not closed as SITL-verified until actually flown.
 | 12 | Bridge readiness lacks ack/arm/takeoff check | bridge.py logs success after exception | — | — | queued (bridge; mock vs SITL split) |
 | 13 | Late vehicle start / controller races | no re-init on late heartbeat; shared state | — | — | queued (bridge; mock vs SITL split) |
 | 14 | Batch workers unbounded/uncancellable | worker per request, no queue/timeout | — | — | queued (batch) |
-| 15 | Video loss counts fragments as frames | 1 dropped chunk → droppedFrames=4 | — | — | queued (reporting) |
+| 15 | Video loss counts fragments as frames | **reproduced**: 4-frag chunk → 4 drops (+ expiry double) | test/vidframes.test.js (4) | one lifecycle per frame: tombstone on first loss, stragglers discarded, expiry merges | **fixed** |
 | 16 | Utilization double-bills airtime | **reproduced**: 1 s of air read as 0.4 of a 5 s window | test/netsched.test.js (1) | billed once at actual transmission, per channel; busiest-channel share reported | **fixed** |
 | 17 | ACK-replayed coverage samples double-count | bad-cell weight 3→6 on replay | — | — | queued |
 | 18 | Disconnected nav reads live truth | black-box logged ~truth in GPS-denied | — | — | queued |
@@ -44,7 +44,7 @@ A finding is not closed as SITL-verified until actually flown.
 | 26 | TAK export labels AGL as HAE | altM=120, anchor 500 → hae=50.0 | — | — | queued |
 | 27 | CoT regex truncates opposite quotes | O'Brien → "O" | — | — | queued |
 | 28 | Browser dt=0.05 vs batch dt=0.25 | equal seeds diverge | — | — | queued |
-| 29 | Battery swaps counted twice | one swap → counter 2 | — | — | queued (reporting) |
+| 29 | Battery swaps counted twice | **reproduced**: full land→swap→relaunch cycle counted 2 | test/swapcount.test.js (1) | counted at the completed relaunch transition, log-text sniffing removed | **fixed** |
 | 30 | Batch validation permissive on types | count=1.5, seeds='bad' accepted | — | — | queued (batch) |
 | 31 | Failed tiles never retry | cached failure until eviction | — | — | queued |
 | 32 | City sliders bypass geometry/zero handling | origin-distance, seed 0→42 | — | — | queued |
