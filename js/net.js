@@ -41,8 +41,10 @@ function makeNet(seed) {
   return {
     packets: [], bcasts: [], fades: new Map(), rng: mulberry32(seed),
     dropped: 0, delivered: 0,
-    // shared-channel accounting: every transmission (and retry) occupies air
-    airtimeAccum: 0, utilSince: 0, utilization: 0,
+    // shared-channel accounting: ACTUAL on-air seconds, billed per channel at
+    // the moment of transmission (never at enqueue — see stepNet), plus an
+    // estimate of queued-but-unsent air per channel for latency decisions
+    airAccumByChan: {}, chanPendingSec: {}, utilSince: 0, utilization: 0,
     // rolling capture log (like a Wireshark trace): last CAP_MAX events
     cap: [], capSeq: 0,
     // packet id counter — always advances, independent of capture being on,
@@ -89,56 +91,206 @@ function channelKeyOf(radio) {
   return '5g';
 }
 
+// --- Air bookkeeping ---------------------------------------------------------
+// COMMIT-AT-TRANSMISSION model: nothing reserves the channel in advance.
+// A queued transmission starts the moment the shared-channel, per-node and
+// duty clocks actually free up (retroactively within the elapsed tick, so
+// several short transmissions still pipeline inside one dt), the clocks
+// advance by the ACTUAL duration used, and the airtime bill records what
+// really went on air. Queued work that dies before its turn — expired,
+// superseded, dead sender — simply leaves the queue: there is no phantom
+// reservation to unwind (findings #3/#4/#5/#16). `chanPendingSec` tracks
+// queued-but-unsent air per channel as an estimate for latency decisions
+// (video's freshness guard), not as a reservation.
+function billAir(s, chan, secs) {
+  s.net.airAccumByChan[chan] = (s.net.airAccumByChan[chan] || 0) + secs;
+}
+
+function pendAir(s, chan, secs) {
+  s.net.chanPendingSec[chan] = Math.max(0, (s.net.chanPendingSec[chan] || 0) + secs);
+}
+
 // --- Broadcast flooding -------------------------------------------------------
 // One packet carries the whole swarm's order table. Every node that hears a
 // broadcast with a new sequence number takes its own row and re-transmits
 // the packet ONCE — classic mesh flooding. No routes, no ACKs, no retries:
 // each receiver rolls the packet-error dice exactly once per transmission it
 // can hear, which is honestly how broadcast works.
+//
+// EVERY transmission — original or forwarded — goes through scheduleBcast, so
+// it queues behind the shared channel, the sender's own radio and its legal
+// duty cycle exactly like unicast traffic (finding #4). Queued copies expire
+// by SUPERSESSION: a newer order table makes an unsent older one worthless,
+// so it releases its air instead of jamming the queue (finding #5) — the
+// natural TTL for state-carrying floods, and it doesn't break duty-limited
+// radios whose forwards legitimately wait a long time. A hard cap bounds the
+// queue against pathological fan-out.
+const BCAST_QUEUE_MAX = 64;
+
+function scheduleBcast(s, srcId, payload, bytes, rad) {
+  // Supersession: drop queued (uncommitted) older tables — theirs is dead air.
+  const list = s.net.bcasts;
+  for (let i = list.length - 1; i >= 0; i--) {
+    const q = list[i];
+    if (!q.committed && !q._gone && q.payload.seq < payload.seq) {
+      pendAir(s, q.chan, -q.airtime);
+      capLog(s, { ev: 'drop', reason: 'bcast-superseded', from: q.srcId, seqNo: q.payload.seq });
+      list.splice(i, 1);
+    }
+  }
+  if (list.length >= BCAST_QUEUE_MAX) {
+    capLog(s, { ev: 'drop', reason: 'bcast-backlog', from: srcId, seqNo: payload.seq });
+    return;
+  }
+  const chan = channelKeyOf(rad);
+  const airRate = (rad && rad.airRateKbps) || 64;
+  const airtime = (bytes * 8) / (airRate * 1000);
+  pendAir(s, chan, airtime);
+  list.push({ srcId, payload, bytes, radio: rad, chan, airtime, tQueued: s.time, committed: false, tFire: null });
+}
+
 function sendBroadcast(s, srcId, payload, bytes, radioOverride) {
   if (srcId !== 'C2') {
     const d = nodePos(s, srcId);
     if (!d || !alive(d)) return;
   }
   const rad = radioOverride || (srcId === 'C2' ? s.radio : txRadioOf(s, srcId, null));
-  const chan = channelKeyOf(rad);
-  const airRate = (rad && rad.airRateKbps) || 64;
-  const airtime = (bytes * 8) / (airRate * 1000);
-  const tStart = Math.max(
-    s.time,
-    s.net.chanBusyUntil[chan] || 0,
-    s.net.nodeTxUntil[srcId] || 0,
-    s.net.nodeDutyUntil[srcId] || 0
-  );
-  s.net.chanBusyUntil[chan] = tStart + airtime;
-  s.net.nodeTxUntil[srcId] = tStart + airtime;
-  s.net.txAt[srcId] = tStart;
-  s.net.airtimeAccum += airtime;
-  if (rad.dutyCycle && rad.dutyCycle < 1) {
-    const rest = airtime * (1 - rad.dutyCycle) / rad.dutyCycle;
-    s.net.nodeDutyUntil[srcId] = Math.max(tStart + airtime, s.net.nodeDutyUntil[srcId] || 0) + rest;
+  scheduleBcast(s, srcId, payload, bytes, rad);
+}
+
+// --- Unified commit phase ------------------------------------------------------
+// One shared channel = one timeline. Broadcasts and unicast hops are committed
+// TOGETHER in earliest-eligible order: processing either queue first would let
+// a fresh arrival (eligible only from "now") commit ahead of older work that
+// was eligible earlier — and because the busy-clock is a single scalar that
+// cannot represent a hole, the free air before the late start would be
+// silently forfeited. (Measured: a 3 ms order broadcast committed first-in-
+// tick threw away 0.247 s of channel and halved video throughput.)
+// Ties go to the broadcast — control traffic outranks payload at equal
+// eligibility, which is how real link schedulers treat command frames.
+
+function eligibleStartBcast(s, b) {
+  return Math.max(b.tQueued,
+    s.net.chanBusyUntil[b.chan] || 0,
+    s.net.nodeTxUntil[b.srcId] || 0,
+    s.net.nodeDutyUntil[b.srcId] || 0);
+}
+
+function eligibleStartPkt(s, p) {
+  return Math.max(p.tReady || 0,
+    s.net.chanBusyUntil[p.res.chan] || 0,
+    s.net.nodeTxUntil[p.res.from] || 0,
+    s.net.nodeDutyUntil[p.res.from] || 0);
+}
+
+function commitBcast(s, b, eStart) {
+  pendAir(s, b.chan, -b.airtime);
+  if (b.srcId !== 'C2') {
+    const d = nodePos(s, b.srcId);
+    if (!d || !alive(d)) { b._gone = true; return; } // dead transmitter (B17) — never went on air
   }
-  s.net.bcasts.push({ srcId, payload, bytes, radio: rad, tFire: tStart + airtime });
+  // Advance the clocks by the ACTUAL airtime, bill it once (finding #16),
+  // record real emission for DF sensing.
+  s.net.chanBusyUntil[b.chan] = eStart + b.airtime;
+  s.net.nodeTxUntil[b.srcId] = eStart + b.airtime;
+  const rad0 = b.radio || s.radio;
+  if (rad0.dutyCycle && rad0.dutyCycle < 1) {
+    const rest = b.airtime * (1 - rad0.dutyCycle) / rad0.dutyCycle;
+    s.net.nodeDutyUntil[b.srcId] = Math.max(eStart + b.airtime, s.net.nodeDutyUntil[b.srcId] || 0) + rest;
+  }
+  billAir(s, b.chan, b.airtime);
+  s.net.txAt[b.srcId] = eStart;
+  b.committed = true;
+  b.tFire = eStart + b.airtime; // reception rolls when the last bit lands
+}
+
+function dropPacketBookkeeping(s, p, reason, from, to, marginDb) {
+  s.net.dropped++;
+  if (p.kind === 'vid' && !p.frameDropped) {
+    p.frameDropped = true;
+    s.net.vid.droppedFrames++;
+    if (p.frameId && s.c2 && s.c2.vidReassembly) s.c2.vidReassembly.delete(p.frameId);
+  }
+  capLog(s, { ev: 'drop', reason, pid: p.pid, kind: p.kind, from, to, marginDb });
+}
+
+function commitPacket(s, p, eStart) {
+  // The transmission starts NOW — evaluate the world as it is, not as it
+  // was when the packet was queued (finding #3).
+  pendAir(s, p.res.chan, -p.res.singleTx);
+  const from = p.path[p.hop], to = p.path[p.hop + 1];
+  const dFrom = from === 'C2' ? s.base : nodePos(s, from);
+  if (from !== 'C2' && (!dFrom || !alive(dFrom))) {
+    // A dead sender transmits nothing — it just leaves the queue.
+    dropPacketBookkeeping(s, p, 'dead-src', from, to);
+    p._gone = true;
+    return;
+  }
+  const dTo = to === 'C2' ? s.base : nodePos(s, to);
+  const rxAlive = to === 'C2' || (dTo && alive(dTo));
+  // A dead/vanished receiver still costs the sender every attempt — it
+  // transmits into silence and burns the full retry budget.
+  const r = rxAlive ? hopDelivered(s, from, to) : -1;
+  const attempts = r < 0 ? HOP_RETRIES + 1 : r + 1;
+  const actualAir = attempts * p.res.singleTx;
+  const actualDur = actualAir + (attempts - 1) * HOP_RETRY_GAP_SEC;
+  s.net.chanBusyUntil[p.res.chan] = eStart + actualDur;
+  s.net.nodeTxUntil[p.res.from] = eStart + actualDur;
+  const dc = p.res.rad && p.res.rad.dutyCycle;
+  if (dc && dc < 1) {
+    const rest = actualAir * (1 - dc) / dc;
+    s.net.nodeDutyUntil[p.res.from] = Math.max(eStart + actualDur, s.net.nodeDutyUntil[p.res.from] || 0) + rest;
+  }
+  billAir(s, p.res.chan, actualAir);
+  s.net.txAt[from] = eStart; // actual emission — what a direction-finder senses
+  if (r < 0) {
+    dropPacketBookkeeping(s, p, rxAlive ? 'link-fail' : 'dead-dst', from, to,
+      rxAlive ? +liveMarginDb(s, from, to).toFixed(1) : undefined);
+    p._gone = true;
+    return;
+  }
+  p.retries = r;
+  p.fired = true;
+  p.tHopStart = eStart;
+  p.tArrive = eStart + actualDur + NET.procDelaySec;
+}
+
+function commitTransmissions(s) {
+  for (;;) {
+    let best = null, bestStart = Infinity, bestIsBcast = false;
+    for (const b of s.net.bcasts) {
+      if (b.committed || b._gone) continue;
+      const e = eligibleStartBcast(s, b);
+      if (e < bestStart) { bestStart = e; best = b; bestIsBcast = true; }
+    }
+    for (const p of s.net.packets) {
+      if (p.fired || p._gone) continue;
+      const e = eligibleStartPkt(s, p);
+      if (e < bestStart) { bestStart = e; best = p; bestIsBcast = false; }
+    }
+    if (!best || bestStart > s.time) return;
+    if (bestIsBcast) commitBcast(s, best, bestStart);
+    else commitPacket(s, best, bestStart);
+  }
 }
 
 function stepBcasts(s) {
   const list = s.net.bcasts;
   if (!list.length) return;
   const next = [];
-  // index loop on purpose: firing a broadcast appends rebroadcasts to `list`,
-  // and those must be visited (they're future-scheduled, so they land in
-  // `next` and fire on a later tick)
+  // Reception only — commits happen in commitTransmissions. Index loop on
+  // purpose: a reception appends rebroadcasts to `list` (via scheduleBcast),
+  // and those must be visited (uncommitted, so they land in `next`).
   for (let i = 0; i < list.length; i++) {
     const b = list[i];
+    if (b._gone) continue;
+    if (!b.committed) { next.push(b); continue; }
     if (s.time < b.tFire) { next.push(b); continue; }
     if (b.srcId !== 'C2') {
       const d = nodePos(s, b.srcId);
-      if (!d || !alive(d)) continue; // dead transmitter (B17)
+      if (!d || !alive(d)) continue; // transmitter died mid-air — nobody hears the cut-off table
     }
     const rad = b.radio || (b.srcId === 'C2' ? s.radio : txRadioOf(s, b.srcId, null));
-    const airRate = (rad && rad.airRateKbps) || 64;
-    s.net.airtimeAccum += (b.bytes * 8) / (airRate * 1000);
-    s.net.txAt[b.srcId] = s.time;
     for (const id of nodeIds(s)) {
       if (id === b.srcId || id === 'C2') continue;
       const d = nodePos(s, id);
@@ -153,9 +305,8 @@ function stepBcasts(s) {
       d.inbox.push({ kind: 'bcast', src: 'C2', payload: b.payload });
       s.net.delivered++;
       capLog(s, { ev: 'bcast', seqNo: b.payload.seq, from: b.srcId, to: id, marginDb: +m.toFixed(1) });
-      // this node re-transmits the table once, after its own airtime
-      const nodeRad = txRadioOf(s, id, null);
-      list.push({ srcId: id, payload: b.payload, bytes: b.bytes, radio: nodeRad, tFire: s.time + hopTimeSec(nodeRad, b.bytes) });
+      // this node re-transmits the table once — through the same scheduler
+      scheduleBcast(s, id, b.payload, b.bytes, txRadioOf(s, id, null));
     }
   }
   s.net.bcasts = next;
@@ -341,39 +492,19 @@ function preparePacketHop(s, p) {
     }
   }
 
+  // Enqueue only. Nothing about the OUTCOME or the start time is decided
+  // here — the transmission commits in stepNet when the channel/node/duty
+  // clocks actually free up, and liveness, RF margin and retries are
+  // evaluated at that moment against the world as it then is (finding #3).
   const rad = txRadioOf(s, from, to);
   const chan = channelKeyOf(rad);
   const airRate = (rad && rad.airRateKbps) || 64;
   const singleTxSec = (p.bytes * 8) / (airRate * 1000);
-
-  const tStart = Math.max(
-    s.time,
-    p.tReady || s.time,
-    s.net.chanBusyUntil[chan] || 0,
-    s.net.nodeTxUntil[from] || 0,
-    s.net.nodeDutyUntil[from] || 0
-  );
-
-  const retries = hopDelivered(s, from, to);
-  const attempts = retries < 0 ? (HOP_RETRIES + 1) : (retries + 1);
-  const totalAirtime = singleTxSec * attempts;
-  const retryGap = 0.02;
-  const hopDuration = totalAirtime + (attempts - 1) * retryGap;
-
-  s.net.chanBusyUntil[chan] = tStart + totalAirtime;
-  s.net.nodeTxUntil[from] = tStart + totalAirtime;
-  s.net.txAt[from] = tStart;
-  s.net.airtimeAccum += totalAirtime;
-
-  if (rad.dutyCycle && rad.dutyCycle < 1) {
-    const dutyRest = totalAirtime * (1 - rad.dutyCycle) / rad.dutyCycle;
-    s.net.nodeDutyUntil[from] = Math.max(tStart + totalAirtime, s.net.nodeDutyUntil[from] || 0) + dutyRest;
-  }
-
-  p.tStart = tStart;
-  p.tArrive = tStart + hopDuration + NET.procDelaySec;
-  p.retries = retries;
-  p.dead = (retries < 0);
+  pendAir(s, chan, singleTxSec);
+  p.res = { chan, from, singleTx: singleTxSec, rad };
+  p.fired = false;
+  p.tHopStart = null;
+  p.tArrive = null;
   return true;
 }
 
@@ -396,7 +527,9 @@ function sendPacket(s, kind, src, dst, payload, bytesOverride) {
   const rad = txRadioOf(s, path[0], path[1]);
   const chan = channelKeyOf(rad);
   const airRate = (rad && rad.airRateKbps) || 64;
-  const queueDelay = Math.max(0, (s.net.chanBusyUntil[chan] || 0) - s.time);
+  // Committed busy time plus queued-but-unsent air: the honest backlog estimate.
+  const queueDelay = Math.max(0, (s.net.chanBusyUntil[chan] || 0) - s.time)
+    + (s.net.chanPendingSec[chan] || 0);
   const frameAirtime = (bytes * 8) / (airRate * 1000);
 
   // Video latency bound: drop video frame if channel backlog exceeds 1.0s or frame won't fit
@@ -486,6 +619,7 @@ function deliverPacket(s, p) {
 
 function stepNet(s, dt) {
   stepFades(s, dt);
+  commitTransmissions(s); // shared timeline: earliest-eligible first, both queues
   stepBcasts(s);
 
   // Prune expired video reassembly
@@ -503,36 +637,23 @@ function stepNet(s, dt) {
   const len = packets.length;
   for (let i = 0; i < len; i++) {
     const p = packets[i];
-    // Check packet expiration (TTL: 3.0s for video, 6.0s for telemetry, 10.0s for commands)
+    if (p._gone) continue; // dropped during the commit phase
+    // TTL by kind (3s video, 6s telemetry, 10s commands). `??` not `||`:
+    // a packet sent at t=0 has tSent=0 and must age like any other. An
+    // expired packet that never transmitted hands its queued air back.
     const ttl = p.kind === 'vid' ? 3.0 : (p.kind === 'tlm' ? 6.0 : 10.0);
-    if (s.time - (p.tSent || s.time) > ttl) {
-      s.net.dropped++;
-      if (p.kind === 'vid' && !p.frameDropped) {
-        p.frameDropped = true;
-        s.net.vid.droppedFrames++;
-        if (p.frameId && s.c2 && s.c2.vidReassembly) s.c2.vidReassembly.delete(p.frameId);
-      }
-      capLog(s, { ev: 'drop', reason: 'ttl-expired', pid: p.pid, kind: p.kind });
+    if (s.time - (p.tSent ?? s.time) > ttl) {
+      if (!p.fired && p.res) pendAir(s, p.res.chan, -p.res.singleTx);
+      dropPacketBookkeeping(s, p, 'ttl-expired');
       continue;
     }
 
-    if (s.time < p.tArrive) {
-      packets[writeIdx++] = p;
+    if (!p.fired || s.time < p.tArrive) {
+      packets[writeIdx++] = p; // waiting for its slot, or in flight
       continue;
     }
 
     const from = p.path[p.hop], to = p.path[p.hop + 1];
-    if (p.dead) {
-      s.net.dropped++;
-      if (p.kind === 'vid' && !p.frameDropped) {
-        p.frameDropped = true;
-        s.net.vid.droppedFrames++;
-        if (p.frameId && s.c2 && s.c2.vidReassembly) s.c2.vidReassembly.delete(p.frameId);
-      }
-      capLog(s, { ev: 'drop', reason: 'link-fail', pid: p.pid, kind: p.kind, from, to, marginDb: +liveMarginDb(s, from, to).toFixed(1) });
-      continue;
-    }
-
     capLog(s, { ev: 'hop', pid: p.pid, kind: p.kind, from, to, retries: p.retries, marginDb: +liveMarginDb(s, from, to).toFixed(1) });
     p.hop++;
     if (p.hop >= p.path.length - 1) {
@@ -548,11 +669,20 @@ function stepNet(s, dt) {
   }
   packets.length = writeIdx;
 
-  // Sliding channel-utilization estimate: what fraction of the last window
-  // was the single shared frequency actually busy?
+  // Second commit pass: arrivals above may have enqueued next hops, and
+  // receptions may have queued rebroadcasts — let them claim any air still
+  // free in this tick instead of idling a full dt per hop.
+  commitTransmissions(s);
+
+  // Sliding utilization estimate from ACTUAL on-air seconds, per channel —
+  // independent bands are independent air, so report the busiest one rather
+  // than summing unrelated spectrum into a number that can exceed 1.
   if (s.time - s.net.utilSince >= 5) {
-    s.net.utilization = Math.min(1, s.net.airtimeAccum / (s.time - s.net.utilSince));
-    s.net.airtimeAccum = 0;
+    const w = s.time - s.net.utilSince;
+    let peak = 0;
+    for (const k in s.net.airAccumByChan) peak = Math.max(peak, s.net.airAccumByChan[k] / w);
+    s.net.utilization = Math.min(1, peak);
+    s.net.airAccumByChan = {};
     s.net.utilSince = s.time;
   }
 }
@@ -574,6 +704,7 @@ function exportCaptureJSONL(s) {
 // then each transmission rolls against the packet-error curve. Returns number
 // of retries used (0 = first try), or -1 if all attempts failed.
 const HOP_RETRIES = 2; // SiK, DigiMesh etc. do link-layer retransmits like this
+const HOP_RETRY_GAP_SEC = 0.02; // listen-for-ACK gap between attempts
 
 function hopDelivered(s, fromId, toId) {
   if (!linkUsable(s, fromId, toId)) return -1;

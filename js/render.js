@@ -251,6 +251,7 @@ function drawLinks(ctx, cv, view, hops, timeSec, connected) {
 function drawPackets(ctx, cv, view, s) {
   const U = window.uiScale || 1;
   for (const p of s.net.packets) {
+    if (p.tArrive == null) continue; // still queued — not on the air yet
     const a = nodePos(s, p.path[p.hop]);
     const b = nodePos(s, p.path[p.hop + 1]);
     if (!a || !b) continue;

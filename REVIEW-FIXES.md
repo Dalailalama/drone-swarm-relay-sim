@@ -18,9 +18,9 @@ A finding is not closed as SITL-verified until actually flown.
 |---|---|---|---|---|---|
 | 1 | Building collision at dt=0.05 | **reproduced**: entry t=0.35 s, x=85.399 (reviewer: x=85.394) | test/collision.test.js (4: head-on, corner clip, expel, overfly) | swept segment/AABB clamp + 2.5 m clearance in stepDrone | **fixed** |
 | 2 | Upwind feasibility uses scalar wind | **reproduced** both ways: impossible return accepted AND easy downwind rejected | test/windvector.test.js (4) | groundSpeedAlong (wind vector, matches movement envelope) in orderFeasible + onboard RTH; unflyable leg = explicit reject | **fixed** |
-| 3 | Unicast outcome decided at schedule time | delivery after sender death / 1000 km move | — | — | queued (scheduler cluster) |
-| 4 | Forwarded broadcasts bypass channel/duty | copies at t=3.02 inside t=2 reservation | — | — | queued (scheduler cluster) |
-| 5 | Expired traffic keeps channel reserved | chanBusyUntil=21 with zero packets | — | — | queued (scheduler cluster) |
+| 3 | Unicast outcome decided at schedule time | **reproduced**: dead sender + moved receiver both delivered | test/netsched.test.js (2) | commit-at-transmission: liveness/RF/retries evaluated when air leaves the antenna | **fixed** |
+| 4 | Forwarded broadcasts bypass channel/duty | **reproduced**: two copies overlapped at [1.02, 2.02] | test/netsched.test.js (1) | all transmissions through one earliest-eligible commit phase (control wins ties) | **fixed** |
+| 5 | Expired traffic keeps channel reserved | **reproduced**: fresh cmd starved behind ghost queue; t=0 packet never aged | test/netsched.test.js (2) | no advance reservations to leak; TTL `??` fix; broadcast supersession + backlog cap | **fixed** |
 | 6 | Objective connectivity not wired to consumers | connected=true with objective 1000 km away | — | — | queued (reporting) |
 | 7 | Imported radio presets inject HTML | markup in preset.note rendered in specCard | — | — | queued |
 | 8 | Stale OSM `.then` overwrites new scenario | B's target reverted to A's on late fetch | — | — | queued |
@@ -31,7 +31,7 @@ A finding is not closed as SITL-verified until actually flown.
 | 13 | Late vehicle start / controller races | no re-init on late heartbeat; shared state | — | — | queued (bridge; mock vs SITL split) |
 | 14 | Batch workers unbounded/uncancellable | worker per request, no queue/timeout | — | — | queued (batch) |
 | 15 | Video loss counts fragments as frames | 1 dropped chunk → droppedFrames=4 | — | — | queued (reporting) |
-| 16 | Utilization double-bills airtime | 1 s broadcast counted twice | — | — | queued (scheduler cluster) |
+| 16 | Utilization double-bills airtime | **reproduced**: 1 s of air read as 0.4 of a 5 s window | test/netsched.test.js (1) | billed once at actual transmission, per channel; busiest-channel share reported | **fixed** |
 | 17 | ACK-replayed coverage samples double-count | bad-cell weight 3→6 on replay | — | — | queued |
 | 18 | Disconnected nav reads live truth | black-box logged ~truth in GPS-denied | — | — | queued |
 | 19 | Failed A* still assigns blocked routes | feasible=false with 12 denied-zone slots | — | — | queued |
