@@ -1086,7 +1086,12 @@ function c2Step(s) {
       upstream: slot > 0 ? s.c2.relays[slot - 1] : (slot === 0 ? 'C2' : lastRelay),
       k: s.c2.relays.length,
       slotPos: slot >= 0 ? adjustedSlotPos(s, slot, s.c2.relays.length) : null,
+      // The grant rides in the order with an ABSOLUTE expiry and an id —
+      // the drone stops at the deadline no matter how chatty the link
+      // stays (finding #21). Renewal requires a fresh order, on purpose.
       videoOn: id === s.c2.vidGrantee,
+      videoUntil: id === s.c2.vidGrantee && s.c2.vidGrantAt != null ? s.c2.vidGrantAt + VID_GRANT_SEC : null,
+      videoGrant: id === s.c2.vidGrantee ? (s.c2.vidGrantSeq || 0) : null,
       target: { x: s.target.x, y: s.target.y },
     };
   };
@@ -1120,6 +1125,7 @@ function c2Step(s) {
         }
         s.c2.vidGrantee = wanters[idx];
         s.c2.vidGrantAt = s.time;
+        s.c2.vidGrantSeq = (s.c2.vidGrantSeq || 0) + 1; // fresh grant, fresh identity
       }
     }
   } else {
@@ -1261,7 +1267,11 @@ function droneComms(s, d) {
   // Each chunk pays its full airtime on the shared channel — video visibly
   // competes with C2 traffic, and both starve when the chain thins.
   if (!d.nextVid) d.nextVid = 0;
-  const vidGrantValid = d.order.videoOn && (s.time - (d.lastC2 || 0) <= 25);
+  // Grant validity is the grant's OWN absolute deadline — never general
+  // link freshness, which any broadcast refreshes without carrying a new
+  // grant (finding #21). Orders without a deadline (legacy) get a hard cap.
+  const vidGrantValid = d.order.videoOn &&
+    s.time <= (d.order.videoUntil != null ? d.order.videoUntil : (d.lastC2 || 0) + 25);
   if (s.videoOn && vidGrantValid && d.mode === 'ok' && s.time >= d.nextVid) {
     d.nextVid = Math.max(d.nextVid + VID.chunkSec, s.time);
     sendPacket(s, 'vid', d.id, 'C2', null,

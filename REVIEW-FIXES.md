@@ -36,7 +36,7 @@ A finding is not closed as SITL-verified until actually flown.
 | 18 | Disconnected nav reads live truth | black-box logged ~truth in GPS-denied | — | — | queued |
 | 19 | Failed A* still assigns blocked routes | **reproduced**: 12 slots through a solid wall, relays ordered onto them | test/planfail.test.js (3) | no-route → empty slot list + explicit C2 error, straight-line fallbacks guarded | **fixed** |
 | 20 | Adversary band filtering wrong representation | **reproduced**: in-band hunter moved 0.0 m; silent target tracked live | test/advband.test.js (3) | jammerFreqMHz normalizer everywhere; DF fixes measured once at emission, kept as taken; txAt=actual emission via scheduler rework | **fixed** |
-| 21 | Video grants lack expiry | any C2 message refreshes old grant | — | — | queued |
+| 21 | Video grants lack expiry | **reproduced**: 13 chunks streamed past expiry on heartbeats alone | test/vidgrant.test.js (3) | orders carry absolute videoUntil + grant id; onboard check uses the deadline, never link freshness | **fixed** |
 | 22 | OSM reload loses saved geometry/seed | seed 7→45, drone at default spawn | — | — | queued |
 | 23 | Calibrated presets not exported in scenario | reload in fresh page silently falls back | — | — | queued |
 | 24 | Count slider double-inits bridge | two init messages per change | — | — | queued |
