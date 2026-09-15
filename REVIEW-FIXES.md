@@ -22,7 +22,7 @@ A finding is not closed as SITL-verified until actually flown.
 | 4 | Forwarded broadcasts bypass channel/duty | **reproduced**: two copies overlapped at [1.02, 2.02] | test/netsched.test.js (1) | all transmissions through one earliest-eligible commit phase (control wins ties) | **fixed** |
 | 5 | Expired traffic keeps channel reserved | **reproduced**: fresh cmd starved behind ghost queue; t=0 packet never aged | test/netsched.test.js (2) | no advance reservations to leak; TTL `??` fix; broadcast supersession + backlog cap | **fixed** |
 | 6 | Objective connectivity not wired to consumers | **reproduced**: connected=true at launch w/ objective 1000 km away; 5 km short counted on long-range radio | test/objective.test.js (4) | `connected` = live route to a drone on-station (orbit-ring radius, radio-independent); `fleetConnected` split out; pill shows "en route"; 4 tests re-scoped to their true subject | **fixed** |
-| 7 | Imported radio presets inject HTML | markup in preset.note rendered in specCard | — | — | queued |
+| 7 | Imported radio presets inject HTML | **reproduced**: live `<img>` in specCard; built-in SiK rewritten to 59 dBm; garbage fields registered | test/presetinject.test.js (4) | whitelist+bounds sanitizer (reject lying numbers), built-in ids collide to `-imported`, all preset strings escaped at render | **fixed** |
 | 8 | Stale OSM `.then` overwrites new scenario | B's target reverted to A's on late fetch | — | — | queued |
 | 9 | External telemetry never goes stale | t=1 sample valid at sim t=1000 | — | — | queued (external) |
 | 10 | Old socket callbacks break reconnection | A's onclose cleared B's ready state | — | — | queued (external) |

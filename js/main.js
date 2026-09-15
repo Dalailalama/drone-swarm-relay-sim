@@ -58,11 +58,53 @@
     }
   }
 
-  function registerRadioPreset(preset) {
-    if (!preset || !preset.id) return null;
+  // The ids shipped with the app — a scenario file must never rewrite these
+  // definitions in place (finding #7): imports that collide land beside the
+  // original under a marked id instead of silently corrupting its physics.
+  const BUILTIN_RADIO_IDS = new Set(RADIOS.map(r => r.id));
+
+  // Imported presets are UNTRUSTED scenario data (finding #7): whitelist the
+  // fields, validate every number against loose physical sanity bounds, cap
+  // every string. A preset that lies about a number is rejected whole — a
+  // wrong link budget is worse than a missing radio.
+  const PRESET_NUM_FIELDS = {
+    freqMHz: [30, 60000], txDbm: [-20, 60], sensDbm: [-140, -50],
+    antGainDbi: [-10, 30], airRateKbps: [0.05, 2e6], rangeLosM: [10, 5e6],
+    dutyCycle: [0.0001, 1], refPowerDbm: [-120, 40], nFit: [1.2, 6.5], hopGainDb: [-10, 30],
+  };
+  function sanitizeRadioPreset(raw) {
+    if (!raw || typeof raw !== 'object') return null;
+    const id = String(raw.id || '').trim();
+    if (!/^[A-Za-z0-9_.-]{1,48}$/.test(id)) return null;
+    const p = { id };
+    p.name = String(raw.name || id).slice(0, 60);
+    p.note = String(raw.note || '').slice(0, 400);
+    if (raw.source != null) p.source = String(raw.source).slice(0, 200);
+    if (raw.band != null) p.band = String(raw.band).slice(0, 16);
+    if (raw.calibrated != null) p.calibrated = !!raw.calibrated;
+    for (const k of Object.keys(PRESET_NUM_FIELDS)) {
+      if (raw[k] == null) continue;
+      const v = +raw[k];
+      const lo = PRESET_NUM_FIELDS[k][0], hi = PRESET_NUM_FIELDS[k][1];
+      if (!isFinite(v) || v < lo || v > hi) return null;
+      p[k] = v;
+    }
+    for (const k of ['freqMHz', 'txDbm', 'sensDbm', 'airRateKbps', 'rangeLosM']) {
+      if (p[k] == null) return null; // unusable by the link-budget math
+    }
+    return p;
+  }
+
+  function registerRadioPreset(raw) {
+    const preset = sanitizeRadioPreset(raw);
+    if (!preset) return null;
+    if (BUILTIN_RADIO_IDS.has(preset.id)) {
+      preset.id = preset.id + '-imported';
+      if (!/\(imported\)$/.test(preset.name)) preset.name = preset.name + ' (imported)';
+    }
     let existing = RADIOS.find(r => r.id === preset.id);
     if (existing) {
-      Object.assign(existing, preset);
+      Object.assign(existing, preset); // re-import of a custom preset updates it
       return existing;
     }
     RADIOS.push(preset);
@@ -276,15 +318,24 @@
   }
   function applyScenario(sc) {
     resetControlsToDefaults();
-    if (sc.radioPreset) registerRadioPreset(sc.radioPreset);
-    if (typeof sc.radio === 'object' && sc.radio.id) {
-      registerRadioPreset(sc.radio);
-      sc.radio = sc.radio.id;
+    // Imported presets may be re-id'd (built-in collision) or rejected
+    // (failed validation) — follow what registration actually produced,
+    // never the file's claim (finding #7).
+    if (sc.radioPreset) {
+      const reg = registerRadioPreset(sc.radioPreset);
+      if (reg && sc.radio === sc.radioPreset.id) sc.radio = reg.id;
     }
-    if (sc.relayRadioPreset) registerRadioPreset(sc.relayRadioPreset);
+    if (typeof sc.radio === 'object' && sc.radio.id) {
+      const reg = registerRadioPreset(sc.radio);
+      sc.radio = reg ? reg.id : null;
+    }
+    if (sc.relayRadioPreset) {
+      const reg = registerRadioPreset(sc.relayRadioPreset);
+      if (reg && sc.relayRadio === sc.relayRadioPreset.id) sc.relayRadio = reg.id;
+    }
     if (typeof sc.relayRadio === 'object' && sc.relayRadio.id) {
-      registerRadioPreset(sc.relayRadio);
-      sc.relayRadio = sc.relayRadio.id;
+      const reg = registerRadioPreset(sc.relayRadio);
+      sc.relayRadio = reg ? reg.id : null;
     }
     if (sc.radio) {
       const match = RADIOS.find(r => r.id === sc.radio);
@@ -376,7 +427,7 @@
       '<div class="spec-row"><span>Rated LOS range</span><b>' + fmtDist(radio.rangeLosM) + '</b></div>' +
       '<div class="spec-row"><span>Usable here (' + env.name.split(' ')[0].toLowerCase() + ', ' + FADE_MARGIN_DB + ' dB fade)</span><b>' + fmtDist(u) + '</b></div>' +
       '<div class="spec-row"><span>Radio horizon (C2 &rarr; ' + (altRange ? altRange.value : 50) + ' m)</span><b>' + fmtDist(radioHorizonM(2, +altRange.value)) + '</b></div>' +
-      '<p class="spec-note">' + radio.note + '</p>';
+      '<p class="spec-note">' + escHtml(radio.note) + '</p>'; // preset strings are data, never markup (finding #7)
     applySpacing(); // hop-margin readout depends on radio + environment
   }
 
@@ -429,10 +480,10 @@
     if (waf && wr) {
       const bandOk = bandCompatible(wr, radio);
       heteroInfo.innerHTML =
-        '<b>Relay wing:</b> ' + waf.name + ' (~' + Math.round(hoverEnduranceMin(waf)) +
-        ' min hover) on <b>' + wr.name + '</b> — usable ' + fmtDist(usableRangeM(wr, env.factor)) +
+        '<b>Relay wing:</b> ' + escHtml(waf.name) + ' (~' + Math.round(hoverEnduranceMin(waf)) +
+        ' min hover) on <b>' + escHtml(wr.name) + '</b> — usable ' + fmtDist(usableRangeM(wr, env.factor)) +
         (bandOk ? '' : ' <b style="color:var(--lost)">· different band from the tactical radio: the wing can bridge C2↔wing and wing↔wing, but tactical drones only link to their own kind</b>') +
-        '.<br><b>Tactical:</b> ' + airframe.name + ' on ' + radio.name + ' — usable ' + fmtDist(usableRangeM(radio, env.factor)) + '.';
+        '.<br><b>Tactical:</b> ' + escHtml(airframe.name) + ' on ' + escHtml(radio.name) + ' — usable ' + fmtDist(usableRangeM(radio, env.factor)) + '.';
     }
   }
   heteroChk.addEventListener('change', () => { updateHeteroRow(); resetSwarm(); });
