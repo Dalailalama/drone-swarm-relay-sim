@@ -1,3 +1,5 @@
+[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20me%20a%20coffee-dawgog-FFDD00?logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/dawgog) https://buymeacoffee.com/dawgog
+
 # drone/sitl — browser swarm sim <-> real/mock vehicles bridge
 
 This folder lets a browser-based drone-swarm command-and-control sim command
@@ -73,6 +75,44 @@ and stream back `telemetry` from the vehicle's real position.
 
 `pymavlink` is only required for this real path — see `requirements.txt`.
 
+### (C) MOCK-LEVEL TESTS for the bridge itself — nothing installed
+
+```
+python sitl/test_bridge.py
+```
+
+Runs `bridge.py`'s per-vehicle init state machine against stub
+`pymavlink`/`websockets` modules and a scripted fake autopilot: no firmware,
+no sockets, no dependencies, plain asserts (exit code 0/1). It covers
+confirmed readiness, arm rejection, a takeoff that is ACKed but never
+climbs, a vehicle that boots long after `ready` was sent, and the
+controller-ownership rules. It proves protocol/state-machine behaviour only
+— **not** that anything flies.
+
+## What the real bridge confirms before saying "ready"
+
+Each vehicle gets one asyncio task that is the sole reader of its MAVLink
+socket. That task streams telemetry from its first poll (a slow vehicle
+never delays anyone else's) and drives this sequence, per vehicle:
+
+| Step | Confirmed by |
+|---|---|
+| `wait-heartbeat` | a HEARTBEAT arriving on that vehicle's UDP port |
+| `confirm-mode` | HEARTBEAT `custom_mode` == the firmware's own `GUIDED` id |
+| `confirm-arm` | `COMMAND_ACK(MAV_CMD_COMPONENT_ARM_DISARM)` = ACCEPTED **and** HEARTBEAT `base_mode` carrying `MAV_MODE_FLAG_SAFETY_ARMED` |
+| `confirm-takeoff` | `COMMAND_ACK(MAV_CMD_NAV_TAKEOFF)` = ACCEPTED **and** `LOCAL_POSITION_NED` showing the vehicle above 1 m |
+
+Nothing is reported as done that wasn't confirmed this way. A step that
+times out leaves the vehicle in `failed:<step>` (`failed:no-heartbeat`,
+`failed:mode`, `failed:arm`, `failed:takeoff`), which is what the `ready`
+reply reports for it — while its task keeps polling and restarts the
+sequence from the earliest unsatisfied step if the vehicle later shows up.
+
+**Ownership**: the socket whose `init` built the current fleet controls it.
+While that socket is open, `init`/`goals` from any other client are refused
+with a `status` line and change nothing. If the controller disconnects the
+fleet keeps flying and the next `init` from anyone takes over.
+
 ## Coordinate frame contract
 
 Shared by the browser sim, `mock_vehicles.py`, and `bridge.py`:
@@ -100,6 +140,7 @@ are ignored gracefully by both servers. Vehicle IDs are `"DR-1".."DR-N"`.
 |---|---|---|
 | client -> server | `{"type":"init","count":N,"alt":50}` | Spawn/prepare `N` vehicles at the origin, target altitude in metres. |
 | server -> client | `{"type":"ready","ids":["DR-1",...,"DR-N"]}` | Reply to `init` once vehicles are prepared (or connection attempts have resolved, for the real bridge). |
+| server -> client | `bridge.py` adds `"vehicles":[{"id":"DR-1","ready":true,"state":"ready"}, ...]` to that same `ready` message | Per-vehicle truth: `ready` is true only for confirmed GUIDED + armed + climbing vehicles, `state` is the init-machine state (`ready` or `failed:<step>`). `ids` still lists every vehicle, ready or not; clients that only read `ids` are unaffected. |
 | client -> server | `{"type":"goals","goals":[{"id":"DR-1","x":<m East>,"y":<m South>,"alt":<m>}, ...]}` | Commanded setpoints for each drone. Sent ~2 Hz by the browser. |
 | server -> client | `{"type":"telemetry","t":<server seconds>,"vehicles":[{"id":"DR-1","x":<m East>,"y":<m South>,"alt":<m>,"connected":true}, ...]}` | Actual positions. Streamed ~10 Hz. |
 | server -> client | `{"type":"status","msg":"..."}` | Human-readable status lines (arming, takeoff, connection issues, etc). |
@@ -110,6 +151,8 @@ are ignored gracefully by both servers. Vehicle IDs are `"DR-1".."DR-N"`.
   physics. Only dependency: `websockets`.
 - `bridge.py` — real WebSocket <-> MAVLink/UDP bridge. Depends on
   `websockets` and `pymavlink`.
+- `test_bridge.py` — mock-level tests for `bridge.py` (stubbed MAVLink and
+  WebSocket layers; no dependencies, no firmware). `python test_bridge.py`.
 - `requirements.txt` — Python dependencies for `bridge.py` (and
   `mock_vehicles.py`, which only needs the `websockets` half of it).
 - `run_ardupilot_sitl.sh` — convenience launcher for N ArduCopter SITL
