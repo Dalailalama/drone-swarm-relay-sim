@@ -804,10 +804,26 @@ function c2Step(s) {
     covMark(s, p.payload.x, p.payload.y, 'good');
     if (p.payload.deadLog && p.payload.deadLog.length) {
       // Sitting somewhere in silence is much stronger evidence than one
-      // lucky packet — weight dead samples accordingly.
-      for (const pt of p.payload.deadLog) covMark(s, pt.x, pt.y, 'bad', 3);
-      logEvent(s, 'C2: ' + p.src + ' uploaded ' + p.payload.deadLog.length + ' dead-zone samples — coverage map updated', 'info');
-      sendPacket(s, 'ack', 'C2', p.src, { ackDeadLogSeq: p.payload.deadLogMaxSeq || p.payload.deadLog.length });
+      // lucky packet — weight dead samples accordingly. But apply each
+      // sample ONCE, deduped by the vehicle's own sequence: a lost ACK makes
+      // the sender replay, and replays used to stack weight 3→6→9 of
+      // phantom certainty into the coverage map (finding #17). A sequence
+      // moving BACKWARD means the vehicle reinitialized — accept the new
+      // session's numbering rather than silencing it.
+      s.c2.covSeqApplied = s.c2.covSeqApplied || {};
+      const maxSeq = p.payload.deadLogMaxSeq || 0;
+      let appliedUpTo = s.c2.covSeqApplied[p.src] || 0;
+      if (maxSeq && maxSeq < appliedUpTo) appliedUpTo = 0; // restarted vehicle
+      let freshSamples = 0;
+      for (const pt of p.payload.deadLog) {
+        if (pt.seq != null && pt.seq <= appliedUpTo) continue; // replayed evidence
+        covMark(s, pt.x, pt.y, 'bad', 3);
+        freshSamples++;
+      }
+      s.c2.covSeqApplied[p.src] = Math.max(appliedUpTo, maxSeq);
+      if (freshSamples) logEvent(s, 'C2: ' + p.src + ' uploaded ' + freshSamples + ' dead-zone samples — coverage map updated', 'info');
+      // ACK duplicates too — a replay means the sender never heard us.
+      sendPacket(s, 'ack', 'C2', p.src, { ackDeadLogSeq: maxSeq || p.payload.deadLog.length });
     }
   }
   s.c2.inbox = [];
@@ -1217,7 +1233,9 @@ function droneComms(s, d) {
       reject: d.rejectedRole || null,
       deadLog: unacked,
       deadLogMaxSeq: deadLogMaxSeq,
-    });
+      // Riding samples aren't free: each packed {x, y, seq} row costs real
+      // bytes on the air on top of the base telemetry frame (finding #17).
+    }, NET.tlmBytes + (unacked ? unacked.length * 10 : 0));
   }
 
   // Payload stream: emit real video chunks only while C2's grant says so.

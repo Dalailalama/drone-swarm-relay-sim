@@ -32,7 +32,7 @@ A finding is not closed as SITL-verified until actually flown.
 | 14 | Batch workers unbounded/uncancellable | worker per request, no queue/timeout | — | — | queued (batch) |
 | 15 | Video loss counts fragments as frames | **reproduced**: 4-frag chunk → 4 drops (+ expiry double) | test/vidframes.test.js (4) | one lifecycle per frame: tombstone on first loss, stragglers discarded, expiry merges | **fixed** |
 | 16 | Utilization double-bills airtime | **reproduced**: 1 s of air read as 0.4 of a 5 s window | test/netsched.test.js (1) | billed once at actual transmission, per channel; busiest-channel share reported | **fixed** |
-| 17 | ACK-replayed coverage samples double-count | bad-cell weight 3→6 on replay | — | — | queued |
+| 17 | ACK-replayed coverage samples double-count | **reproduced**: weight 3→6 on replay; 32 B bill for 3 riding samples | test/covdedup.test.js (4) | per-vehicle seq dedup at C2 (restart-aware), duplicates still ACKed, sample rows billed on air | **fixed** |
 | 18 | Disconnected nav reads live truth | black-box logged ~truth in GPS-denied | — | — | queued |
 | 19 | Failed A* still assigns blocked routes | **reproduced**: 12 slots through a solid wall, relays ordered onto them | test/planfail.test.js (3) | no-route → empty slot list + explicit C2 error, straight-line fallbacks guarded | **fixed** |
 | 20 | Adversary band filtering wrong representation | 2400 MHz hunter ignored 2400 MHz emitter | — | — | queued |
