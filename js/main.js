@@ -1007,19 +1007,23 @@
   });
 
   // --- ATAK / TAK (Cursor-on-Target) --------------------------------------------
-  const takLat = el('takLat'), takLon = el('takLon');
+  const takLat = el('takLat'), takLon = el('takLon'), takHae = el('takHae');
   const takExportBtn = el('takExportBtn'), takImportBtn = el('takImportBtn'), takImportInput = el('takImportInput');
   const takClearBtn = el('takClearBtn'), takList = el('takList');
   const takWsInput = el('takWs'), takConnectBtn = el('takConnectBtn'), takStatus = el('takStatus');
 
   function takAnchor() {
     // A loaded real area pins the exact geographic anchor; otherwise the
-    // operator-entered origin converts local metres to lat/lon.
+    // operator-entered origin converts local metres to lat/lon. The origin
+    // HAE is the vertical datum for every exported altitude (finding #26) —
+    // left blank, exports omit hae rather than invent one.
+    const hae = takHae ? parseFloat(takHae.value) : NaN;
+    const haeM = isNaN(hae) ? null : hae;
     const geo = swarm && swarm.terrain && swarm.terrain.geoAnchor;
-    if (geo) return makeTakAnchor(geo.lat, geo.lon, geo.x, geo.y);
+    if (geo) return makeTakAnchor(geo.lat, geo.lon, geo.x, geo.y, haeM);
     const lat = parseFloat(takLat.value);
     const lon = parseFloat(takLon.value);
-    return makeTakAnchor(!isNaN(lat) ? lat : 38.8977, !isNaN(lon) ? lon : -77.0365, 0, 0);
+    return makeTakAnchor(!isNaN(lat) ? lat : 38.8977, !isNaN(lon) ? lon : -77.0365, 0, 0, haeM);
   }
   function syncTakOrigin() {
     const geo = swarm && swarm.terrain && swarm.terrain.geoAnchor;

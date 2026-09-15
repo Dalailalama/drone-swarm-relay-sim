@@ -41,8 +41,8 @@ A finding is not closed as SITL-verified until actually flown.
 | 23 | Calibrated presets not exported in scenario | **reproduced**: fresh page fell back to default radio | test/presetexport.test.js (2) | custom/calibrated definitions embedded in exports (built-ins stay id-only), validated on import | **fixed** |
 | 24 | Count slider double-inits bridge | **reproduced**: 2 init messages per change | test/external.test.js (1) | handler's duplicate call removed; resetSwarm's central sync is the one path | **fixed (mock-verified)** |
 | 25 | External altitude datum undefined | **reproduced**: 120 m origin-relative read as 120 m AGL over hills | test/external.test.js (1) | contract defined: bridge alt = origin-relative (-NED.z); converted to AGL at the vehicle via ground-height delta | **fixed (mock-verified)** |
-| 26 | TAK export labels AGL as HAE | altM=120, anchor 500 → hae=50.0 | — | — | queued |
-| 27 | CoT regex truncates opposite quotes | O'Brien → "O" | — | — | queued |
+| 26 | TAK export labels AGL as HAE | **reproduced**: hae=50.0 for 120 m AGL @ 500 m origin | test/takhae.test.js (3) | anchor carries a real vertical datum (origin HAE, UI field); exports = HAE + terrain + AGL; unknown origin omits hae | **fixed** |
+| 27 | CoT regex truncates opposite quotes | **reproduced**: O'Brien → "O" | test/cotquotes.test.js (3) | backreference-matched quote delimiters in all attribute parsing; entity round-trips covered | **fixed** |
 | 28 | Browser dt=0.05 vs batch dt=0.25 | equal seeds diverge | — | — | queued |
 | 29 | Battery swaps counted twice | **reproduced**: full land→swap→relaunch cycle counted 2 | test/swapcount.test.js (1) | counted at the completed relaunch transition, log-text sniffing removed | **fixed** |
 | 30 | Batch validation permissive on types | **reproduced**: count=1.5, seeds='bad', env='toString', null coords all accepted | test/batchvalid.test.js (2) | strict provided-field validation (wrong type ≠ omitted), integer counts, bounded nested cell fields & geometry, drone-second work budget | **fixed** |

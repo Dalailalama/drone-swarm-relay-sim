@@ -19,8 +19,12 @@
 
 const M_PER_DEG_LAT = 110540;
 
-function makeTakAnchor(latDeg, lonDeg, xLocal, yLocal) {
-  return { lat: latDeg, lon: lonDeg, x: xLocal || 0, y: yLocal || 0 };
+// haeM: height above ellipsoid of the LOCAL FRAME's zero-ground reference —
+// the vertical datum for every exported altitude (finding #26). null means
+// the operator hasn't supplied one, and exports then OMIT hae rather than
+// stamping a number in the wrong datum.
+function makeTakAnchor(latDeg, lonDeg, xLocal, yLocal, haeM) {
+  return { lat: latDeg, lon: lonDeg, x: xLocal || 0, y: yLocal || 0, haeM: haeM != null ? haeM : null };
 }
 
 // Sim frame: x east-positive, y SOUTH-positive (screen style). South is
@@ -100,25 +104,38 @@ function buildCotFromSwarm(s, anchor, nowSec) {
     }, extra || {})));
   };
   const roleOf = d => d.order && d.order.role ? d.order.role : 'mission';
-  put('SIM-GCS', TAK_TYPES.gcs, s.base.x, s.base.y, 2, 'C2 GROUND STATION',
+  // Vertical datum (finding #26): every exported altitude is the anchor's
+  // HAE plus the local ABSOLUTE altitude (terrain under the object + its
+  // height above ground). With no anchor HAE, hae is omitted — TAK treats
+  // a missing hae as unknown, which is the truth.
+  const groundAt = (x, y) => (typeof terrainGroundAt === 'function' && s.terrain)
+    ? terrainGroundAt(s.terrain, x, y) : 0;
+  const haeOf = absAltM => (anchor.haeM != null ? anchor.haeM + absAltM : null);
+  put('SIM-GCS', TAK_TYPES.gcs, s.base.x, s.base.y,
+    haeOf(groundAt(s.base.x, s.base.y) + 2), 'C2 GROUND STATION',
     { remarks: 'relay chain hops=' + (s.c2 && s.c2.relays ? s.c2.relays.length : 0) });
   for (const d of s.drones) {
     if (!alive(d)) continue;
-    put('SIM-' + d.id, TAK_TYPES.drone, d.x, d.y, s.altitudeM,
+    const aglM = d.altM != null ? d.altM : s.altitudeM; // external telemetry AGL wins
+    put('SIM-' + d.id, TAK_TYPES.drone, d.x, d.y,
+      haeOf(groundAt(d.x, d.y) + aglM),
       d.id + ' ' + roleOf(d),
       { remarks: 'bat ' + d.batteryPct.toFixed(0) + '% mode ' + d.mode, staleSec: 20, ceM: 10 });
   }
-  put('SIM-TGT', TAK_TYPES.gcs, s.target.x, s.target.y, 0, 'OBJECTIVE',
+  put('SIM-TGT', TAK_TYPES.gcs, s.target.x, s.target.y,
+    haeOf(groundAt(s.target.x, s.target.y)), 'OBJECTIVE',
     { remarks: 'mission objective' });
   for (const j of (s.jammers || [])) {
     const r = jammerDenialRadiusM(s, j);
     if (!(r > 0)) continue;
-    put('SIM-' + j.id, TAK_TYPES.hazard, j.x, j.y, 0, 'RF DENIAL ' + j.id.replace('JX-', ''),
+    put('SIM-' + j.id, TAK_TYPES.hazard, j.x, j.y,
+      haeOf(groundAt(j.x, j.y) + (j.altM || 0)), 'RF DENIAL ' + j.id.replace('JX-', ''),
       { radiusM: r, remarks: 'denial ~' + Math.round(r) + ' m @ ' + j.erpDbm + ' dBm', staleSec: 60 });
   }
   for (const z of (s.gpsZones || [])) {
     if (z.on === false) continue;
-    put('SIM-' + z.id, TAK_TYPES.hazard, z.x, z.y, 0, 'GPS DENIED ' + z.id.replace('GZ-', ''),
+    put('SIM-' + z.id, TAK_TYPES.hazard, z.x, z.y,
+      haeOf(groundAt(z.x, z.y)), 'GPS DENIED ' + z.id.replace('GZ-', ''),
       { radiusM: z.rM, remarks: 'GNSS denied zone r=' + Math.round(z.rM) + ' m', staleSec: 60 });
   }
   return out;
@@ -131,9 +148,16 @@ function buildCotFromSwarm(s, anchor, nowSec) {
 function parseCoTFile(text) {
   const marks = [];
   const evRe = /<event\b[^>]*>/g;
+  // Quotes match their OPENING delimiter via backreference (finding #27):
+  // the old ["']...["'] class let either quote end either style, truncating
+  // callsign="O'Brien" to "O". The opposite quote inside is data.
+  const attrRaw = (str, name) => {
+    const m = str.match(new RegExp(name + '=(["\'])([\\s\\S]*?)\\1'));
+    return m ? m[2] : null;
+  };
   const attr = (tag, name) => {
-    const m = tag.match(new RegExp(name + '=["\']([^"\']*)["\']'));
-    return m ? unesc(m[1]) : null;
+    const v = attrRaw(tag, name);
+    return v == null ? null : unesc(v);
   };
   let m;
   while ((m = evRe.exec(text)) !== null) {
@@ -145,20 +169,17 @@ function parseCoTFile(text) {
     const scope = text.slice(m.index, end === -1 ? m.index + 2000 : end);
     const pm = scope.match(/<point\b[^>]*\/?>/);
     if (!pm) continue;
-    const latM = pm[0].match(/lat=["']([^"']*)["']/);
-    const lonM = pm[0].match(/lon=["']([^"']*)["']/);
-    const haeM = pm[0].match(/hae=["']([^"']*)["']/);
-    const lat = latM ? parseFloat(latM[1]) : NaN;
-    const lon = lonM ? parseFloat(lonM[1]) : NaN;
-    const hae = haeM ? parseFloat(haeM[1]) : NaN;
+    const lat = parseFloat(attrRaw(pm[0], 'lat'));
+    const lon = parseFloat(attrRaw(pm[0], 'lon'));
+    const hae = parseFloat(attrRaw(pm[0], 'hae'));
     if (!isFinite(lat) || !isFinite(lon)) continue;
-    const cm = scope.match(/callsign=["']([^"']*)["']/);
+    const cs = attrRaw(scope, 'callsign');
     marks.push({
       uid: uid || 'cot-' + marks.length,
       cotType: type,
       lat, lon,
       hae: isFinite(hae) ? hae : null,
-      callsign: cm ? unesc(cm[1]) : uid || 'marker'
+      callsign: cs != null ? unesc(cs) : uid || 'marker'
     });
   }
   return marks;
