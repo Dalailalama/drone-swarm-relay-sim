@@ -1,0 +1,53 @@
+# Review-fix tracker — external review of `ffb35e6`
+
+Working through the 32 findings of the 2026-09-15 external implementation
+review (issue #6). Method: **failing regression first**, then the fix, then
+green, one coherent commit per finding (or per tightly-coupled cluster).
+A finding whose probe does not reproduce is investigated and marked
+*disputed* with the evidence, never silently "fixed".
+
+Corrected plan-item tally at review time: **19 present / 22 partial /
+12 open** (of B1–B53). Optimizations O1–O9: mostly absent; handled as a
+separate pass after correctness.
+
+Bridge/SITL findings carry two verification states: *mock-verified*
+(WebSocket mock, no autopilot) and *SITL-verified* (real ArduPilot flight).
+A finding is not closed as SITL-verified until actually flown.
+
+| # | Finding (short) | Review evidence | Regression test | Fix commit | Status |
+|---|---|---|---|---|---|
+| 1 | Building collision at dt=0.05 | probe entered 30×30 m footprint at x=85.4 | — | — | in progress |
+| 2 | Upwind feasibility uses scalar wind | 16 m/s wind, 14 m/s airframe accepted | — | — | queued |
+| 3 | Unicast outcome decided at schedule time | delivery after sender death / 1000 km move | — | — | queued (scheduler cluster) |
+| 4 | Forwarded broadcasts bypass channel/duty | copies at t=3.02 inside t=2 reservation | — | — | queued (scheduler cluster) |
+| 5 | Expired traffic keeps channel reserved | chanBusyUntil=21 with zero packets | — | — | queued (scheduler cluster) |
+| 6 | Objective connectivity not wired to consumers | connected=true with objective 1000 km away | — | — | queued (reporting) |
+| 7 | Imported radio presets inject HTML | markup in preset.note rendered in specCard | — | — | queued |
+| 8 | Stale OSM `.then` overwrites new scenario | B's target reverted to A's on late fetch | — | — | queued |
+| 9 | External telemetry never goes stale | t=1 sample valid at sim t=1000 | — | — | queued (external) |
+| 10 | Old socket callbacks break reconnection | A's onclose cleared B's ready state | — | — | queued (external) |
+| 11 | External avoidance/landing unconfirmed | airborne drone marked landed at altM=50 | — | — | queued (external) |
+| 12 | Bridge readiness lacks ack/arm/takeoff check | bridge.py logs success after exception | — | — | queued (bridge; mock vs SITL split) |
+| 13 | Late vehicle start / controller races | no re-init on late heartbeat; shared state | — | — | queued (bridge; mock vs SITL split) |
+| 14 | Batch workers unbounded/uncancellable | worker per request, no queue/timeout | — | — | queued (batch) |
+| 15 | Video loss counts fragments as frames | 1 dropped chunk → droppedFrames=4 | — | — | queued (reporting) |
+| 16 | Utilization double-bills airtime | 1 s broadcast counted twice | — | — | queued (scheduler cluster) |
+| 17 | ACK-replayed coverage samples double-count | bad-cell weight 3→6 on replay | — | — | queued |
+| 18 | Disconnected nav reads live truth | black-box logged ~truth in GPS-denied | — | — | queued |
+| 19 | Failed A* still assigns blocked routes | feasible=false with 12 denied-zone slots | — | — | queued |
+| 20 | Adversary band filtering wrong representation | 2400 MHz hunter ignored 2400 MHz emitter | — | — | queued |
+| 21 | Video grants lack expiry | any C2 message refreshes old grant | — | — | queued |
+| 22 | OSM reload loses saved geometry/seed | seed 7→45, drone at default spawn | — | — | queued |
+| 23 | Calibrated presets not exported in scenario | reload in fresh page silently falls back | — | — | queued |
+| 24 | Count slider double-inits bridge | two init messages per change | — | — | queued |
+| 25 | External altitude datum undefined | -NED.z treated as AGL + terrain | — | — | queued (external) |
+| 26 | TAK export labels AGL as HAE | altM=120, anchor 500 → hae=50.0 | — | — | queued |
+| 27 | CoT regex truncates opposite quotes | O'Brien → "O" | — | — | queued |
+| 28 | Browser dt=0.05 vs batch dt=0.25 | equal seeds diverge | — | — | queued |
+| 29 | Battery swaps counted twice | one swap → counter 2 | — | — | queued (reporting) |
+| 30 | Batch validation permissive on types | count=1.5, seeds='bad' accepted | — | — | queued (batch) |
+| 31 | Failed tiles never retry | cached failure until eviction | — | — | queued |
+| 32 | City sliders bypass geometry/zero handling | origin-distance, seed 0→42 | — | — | queued |
+
+Optimizations O1–O9: tracked after the 32 correctness findings; each will be
+implemented against a measured benchmark, not marked done by adjacency.

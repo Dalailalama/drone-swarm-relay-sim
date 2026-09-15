@@ -1,3 +1,5 @@
+[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20me%20a%20coffee-dawgog-FFDD00?logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/dawgog) https://buymeacoffee.com/dawgog
+
 # Drone swarm relay simulator
 
 **[▶ Live demo](https://dalailalama.github.io/drone-swarm-relay-sim/)** — no
