@@ -29,7 +29,7 @@ A finding is not closed as SITL-verified until actually flown.
 | 11 | External avoidance/landing unconfirmed | **reproduced**: landed+swap at 50 m; raw goal shipped through a 300 m tower | test/extgoals.test.js (3) | goals clipped short of no-fly footprints before shipping; RTB-over-pad commands descent; landing requires telemetry-confirmed touchdown (≤2 m) | **fixed (mock-verified)** |
 | 12 | Bridge readiness lacks ack/arm/takeoff check | bridge.py logs success after exception | — | — | queued (bridge; mock vs SITL split) |
 | 13 | Late vehicle start / controller races | no re-init on late heartbeat; shared state | — | — | queued (bridge; mock vs SITL split) |
-| 14 | Batch workers unbounded/uncancellable | worker per request, no queue/timeout | — | — | queued (batch) |
+| 14 | Batch workers unbounded/uncancellable | **reproduced**: 3 simultaneous requests → 3 workers, 200/200/200; no timeout | test/batchvalid.test.js (3) | bounded pool (2 workers, queue 8→429), per-run time budget (504+terminate), client-disconnect reaps the worker, exit-without-result handled | **fixed** |
 | 15 | Video loss counts fragments as frames | **reproduced**: 4-frag chunk → 4 drops (+ expiry double) | test/vidframes.test.js (4) | one lifecycle per frame: tombstone on first loss, stragglers discarded, expiry merges | **fixed** |
 | 16 | Utilization double-bills airtime | **reproduced**: 1 s of air read as 0.4 of a 5 s window | test/netsched.test.js (1) | billed once at actual transmission, per channel; busiest-channel share reported | **fixed** |
 | 17 | ACK-replayed coverage samples double-count | **reproduced**: weight 3→6 on replay; 32 B bill for 3 riding samples | test/covdedup.test.js (4) | per-vehicle seq dedup at C2 (restart-aware), duplicates still ACKed, sample rows billed on air | **fixed** |
@@ -45,7 +45,7 @@ A finding is not closed as SITL-verified until actually flown.
 | 27 | CoT regex truncates opposite quotes | O'Brien → "O" | — | — | queued |
 | 28 | Browser dt=0.05 vs batch dt=0.25 | equal seeds diverge | — | — | queued |
 | 29 | Battery swaps counted twice | **reproduced**: full land→swap→relaunch cycle counted 2 | test/swapcount.test.js (1) | counted at the completed relaunch transition, log-text sniffing removed | **fixed** |
-| 30 | Batch validation permissive on types | count=1.5, seeds='bad' accepted | — | — | queued (batch) |
+| 30 | Batch validation permissive on types | **reproduced**: count=1.5, seeds='bad', env='toString', null coords all accepted | test/batchvalid.test.js (2) | strict provided-field validation (wrong type ≠ omitted), integer counts, bounded nested cell fields & geometry, drone-second work budget | **fixed** |
 | 31 | Failed tiles never retry | cached failure until eviction | — | — | queued |
 | 32 | City sliders bypass geometry/zero handling | origin-distance, seed 0→42 | — | — | queued |
 

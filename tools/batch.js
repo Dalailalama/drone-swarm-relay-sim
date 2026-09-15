@@ -20,13 +20,18 @@ const R = require('../js/radios.js');
 const A = require('../js/airframes.js');
 
 // Guardrails so a stray config can't wedge the server for an hour.
+// The work budget is measured in DRONE-SECONDS of simulation (runs × sim
+// duration × fleet size) — the quantity that actually predicts compute.
+// The old runs×duration cap was redundant with the run/duration caps and
+// let a max-fleet sweep through at 12× the intended budget (finding #30).
 const LIMITS = {
   maxCells: 40,
   maxSeedsPerCell: 20,
   maxTotalRuns: 200,
   maxDurationSec: 1800,
   maxDrones: 120,
-  maxTotalWorkSec: 360000,
+  maxCoordM: 100000,
+  maxTotalWorkDroneSec: 600000, // ~10 min of wall clock at the measured ~1 ms per drone-sim-second
 };
 
 function normalizeConfig(cfg) {
@@ -46,45 +51,75 @@ function normalizeConfig(cfg) {
   };
 }
 
+// Strict on purpose (finding #30): a field the caller PROVIDED must be
+// valid — treating a wrong type as "omitted" silently runs a different
+// experiment than the one requested, which is worse than an error.
+function finiteNum(v) { return typeof v === 'number' && isFinite(v); }
+function numIn(v, lo, hi) { return finiteNum(v) && v >= lo && v <= hi; }
+
 function validateConfig(cfg) {
-  if (!cfg || typeof cfg !== 'object') return 'config must be a JSON object';
+  if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) return 'config must be a JSON object';
   if (!R.RADIOS.some(r => r.id === cfg.radio)) return 'unknown radio: ' + cfg.radio;
-  const envs = { open: [1, 2.5], suburban: [0.45, 4.5], urban: [0.2, 6.5] };
-  if (!envs[cfg.env]) return 'env must be open|suburban|urban';
-  if (!A.AIRFRAMES.some(a => a.id === (cfg.airframe || 'q450'))) return 'unknown airframe';
+  // hasOwnProperty guard: inherited keys like 'toString' are truthy lookups
+  // on a plain object literal and used to sail through as an "env".
+  const ENVS = ['open', 'suburban', 'urban'];
+  if (typeof cfg.env !== 'string' || ENVS.indexOf(cfg.env) < 0) return 'env must be open|suburban|urban';
+  if (cfg.airframe != null && !A.AIRFRAMES.some(a => a.id === cfg.airframe)) return 'unknown airframe';
+  if (cfg.terrain != null && ['flat', 'rolling', 'urban', 'mixed'].indexOf(cfg.terrain) < 0) return 'unknown terrain';
+
+  if (cfg.sweep != null && !Array.isArray(cfg.sweep)) return 'sweep must be an array of cells';
   const cells = Array.isArray(cfg.sweep) ? cfg.sweep : [{ name: 'base' }];
   if (!cells.length || cells.length > LIMITS.maxCells) return 'sweep must have 1..' + LIMITS.maxCells + ' cells';
   const names = new Set();
   for (const c of cells) {
-    if (!c || typeof c !== 'object' || !c.name) return 'every sweep cell needs a name';
+    if (!c || typeof c !== 'object' || typeof c.name !== 'string' || !c.name || c.name.length > 40) {
+      return 'every sweep cell needs a name (string, <=40 chars)';
+    }
     if (names.has(c.name)) return 'duplicate sweep cell name: ' + c.name;
     names.add(c.name);
+    if (c.altitudeM != null && !numIn(c.altitudeM, 5, 1000)) return 'cell "' + c.name + '": altitudeM must be 5..1000';
+    if (c.spacingPct != null && !numIn(c.spacingPct, 30, 150)) return 'cell "' + c.name + '": spacingPct must be 30..150';
   }
+
+  if (cfg.seeds != null && !Array.isArray(cfg.seeds)) return 'seeds must be an array of integers';
   const seeds = Array.isArray(cfg.seeds) ? cfg.seeds : [101, 102, 103];
   if (!seeds.length || seeds.length > LIMITS.maxSeedsPerCell) {
     return 'seeds must be a non-empty array of at most ' + LIMITS.maxSeedsPerCell;
   }
   for (const s of seeds) {
-    if (typeof s !== 'number' || !Number.isInteger(s)) return 'seeds must be integers';
+    if (!finiteNum(s) || !Number.isInteger(s)) return 'seeds must be integers';
   }
+
   const totalRuns = cells.length * seeds.length;
   if (totalRuns > LIMITS.maxTotalRuns) {
     return 'total runs (' + totalRuns + ') exceeds cap ' + LIMITS.maxTotalRuns;
   }
+  if (cfg.durationSec != null && !numIn(cfg.durationSec, 30, LIMITS.maxDurationSec)) {
+    return 'durationSec must be a number between 30 and ' + LIMITS.maxDurationSec;
+  }
   const dur = cfg.durationSec != null ? cfg.durationSec : 300;
-  if (typeof dur !== 'number' || dur < 30 || dur > LIMITS.maxDurationSec) {
-    return 'durationSec must be between 30 and ' + LIMITS.maxDurationSec;
+  if (cfg.count != null && !(Number.isInteger(cfg.count) && cfg.count >= 1 && cfg.count <= LIMITS.maxDrones)) {
+    return 'count must be an integer between 1 and ' + LIMITS.maxDrones;
   }
   const count = cfg.count != null ? cfg.count : 10;
-  if (typeof count !== 'number' || count < 1 || count > LIMITS.maxDrones) {
-    return 'count must be between 1 and ' + LIMITS.maxDrones;
+  if (cfg.altitudeM != null && !numIn(cfg.altitudeM, 5, 1000)) return 'altitudeM must be 5..1000';
+  if (cfg.spacingPct != null && !numIn(cfg.spacingPct, 30, 150)) return 'spacingPct must be 30..150';
+  if (cfg.cityDensity != null && !numIn(cfg.cityDensity, 0, 100)) return 'cityDensity must be 0..100';
+  if (cfg.cityHeight != null && !numIn(cfg.cityHeight, 0, 100)) return 'cityHeight must be 0..100';
+
+  // Work budget in drone-seconds — the quantity that predicts compute.
+  if (totalRuns * dur * count > LIMITS.maxTotalWorkDroneSec) {
+    return 'total workload (' + (totalRuns * dur * count) + ' drone-seconds) exceeds the ' +
+      LIMITS.maxTotalWorkDroneSec + ' budget — fewer runs, shorter duration, or a smaller fleet';
   }
-  if (totalRuns * dur > LIMITS.maxTotalWorkSec) {
-    return 'total workload exceeds safety cap';
-  }
-  // Mission geometry sanity
+
+  // Mission geometry: finite NUMBERS (isFinite alone coerces null to 0),
+  // bounded so the terrain/search grids stay sane.
   const t = cfg.mission || {};
-  if (!isFinite(t.targetX) || !isFinite(t.targetY)) return 'mission.targetX/targetY required (metres)';
+  if (!finiteNum(t.targetX) || !finiteNum(t.targetY)) return 'mission.targetX/targetY required (numbers, metres)';
+  if (Math.abs(t.targetX) > LIMITS.maxCoordM || Math.abs(t.targetY) > LIMITS.maxCoordM) {
+    return 'mission coordinates must be within ±' + LIMITS.maxCoordM + ' m';
+  }
   return null;
 }
 
