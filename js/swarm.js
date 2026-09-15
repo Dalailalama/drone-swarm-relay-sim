@@ -88,6 +88,7 @@ const COVERAGE = {
   deadLogIntervalSec: 5,  // while disconnected, log a dead-zone sample this often
   deadLogMax: 20,         // onboard black-box capacity
   searchRadiusCells: 5,   // how far C2 will shift a relay slot out of a bad cell
+  maxCells: 20000,        // learned-map bound: beyond this, forget oldest-touched first (O9)
 };
 
 // Regulatory duty cycle stretches how often a node may transmit at all.
@@ -258,8 +259,20 @@ function covKey(s, x, y) {
 function covMark(s, x, y, kind, weight) {
   const key = covKey(s, x, y);
   let e = s.c2.cov.get(key);
-  if (!e) { e = { good: 0, bad: 0 }; s.c2.cov.set(key, e); }
+  if (!e) {
+    e = { good: 0, bad: 0 };
+    s.c2.cov.set(key, e);
+    // O9: bound the learned map so memory can't grow with mission length —
+    // past ~20k measured cells, forget the tenth that went longest without
+    // a fresh measurement. Knowledge decays oldest-first, never newest.
+    if (s.c2.cov.size > COVERAGE.maxCells) {
+      const entries = [...s.c2.cov.entries()].sort((a, b) => (a[1].at || 0) - (b[1].at || 0));
+      const drop = Math.ceil(entries.length / 10);
+      for (let i = 0; i < drop; i++) s.c2.cov.delete(entries[i][0]);
+    }
+  }
   e[kind] += weight || 1;
+  e.at = s.time;
 }
 
 function covState(s, x, y) {
@@ -360,13 +373,42 @@ function planChain(s) {
 
   // A* (8-connected); measured-good cells slightly cheaper so proven space wins ties
   const gCost = new Map(), from = new Map();
+  // O4: binary min-heap on f — the old linear scan + splice made each pop
+  // O(n), which is quadratic over a big denial-zone search box. Stale
+  // duplicates are lazily skipped via the gCost check below, as before.
   const open = [{ ix: sIx, iy: sIy, g: 0, f: 0 }];
+  const heapPush = e => {
+    open.push(e);
+    let i = open.length - 1;
+    while (i > 0) {
+      const p = (i - 1) >> 1;
+      if (open[p].f <= open[i].f) break;
+      const t = open[p]; open[p] = open[i]; open[i] = t;
+      i = p;
+    }
+  };
+  const heapPop = () => {
+    const top = open[0];
+    const last = open.pop();
+    if (open.length) {
+      open[0] = last;
+      let i = 0;
+      for (;;) {
+        const l = 2 * i + 1, r = l + 1;
+        let m2 = i;
+        if (l < open.length && open[l].f < open[m2].f) m2 = l;
+        if (r < open.length && open[r].f < open[m2].f) m2 = r;
+        if (m2 === i) break;
+        const t = open[m2]; open[m2] = open[i]; open[i] = t;
+        i = m2;
+      }
+    }
+    return top;
+  };
   gCost.set(idx(sIx, sIy), 0);
   let found = false;
   while (open.length) {
-    let bi = 0;
-    for (let i = 1; i < open.length; i++) if (open[i].f < open[bi].f) bi = i;
-    const cur = open.splice(bi, 1)[0];
+    const cur = heapPop();
     if (cur.ix === gIx && cur.iy === gIy) { found = true; break; }
     if (gCost.get(idx(cur.ix, cur.iy)) < cur.g) continue;
     for (let dx = -1; dx <= 1; dx++) {
@@ -383,7 +425,7 @@ function planChain(s) {
         gCost.set(key, g);
         from.set(key, idx(cur.ix, cur.iy));
         const h = Math.hypot(ix - gIx, iy - gIy) * 0.9;
-        open.push({ ix, iy, g, f: g + h });
+        heapPush({ ix, iy, g, f: g + h });
       }
     }
   }
@@ -1437,7 +1479,15 @@ function goalFor(s, d, dt) {
   // Mission: loiter ring around the ORDERED target (which may be stale — that's the point)
   const stepTime = dt != null ? dt : 0.25;
   d.orbitPhase += (stepTime / 0.25) * 0.0004 * afOf(s, d).maxSpeedMs;
-  const flock = s.drones.filter(x => alive(x) && x.mode === 'ok' && x.order.role === 'mission');
+  // O5: one flock snapshot per tick — filtering the fleet inside every
+  // drone's goal computation made loiter spacing O(N²) per tick, and a
+  // consistent per-tick ring is better geometry anyway.
+  let flock = s._missionFlock;
+  if (!flock || s._missionFlockAt !== s.time) {
+    flock = s.drones.filter(x => alive(x) && x.mode === 'ok' && x.order.role === 'mission');
+    s._missionFlock = flock;
+    s._missionFlockAt = s.time;
+  }
   const idx = Math.max(0, flock.indexOf(d));
   const a = d.orbitPhase + (idx / Math.max(1, flock.length)) * Math.PI * 2;
   return {
@@ -1487,6 +1537,10 @@ function buildSepGrid(s) {
   if (!grid) {
     grid = new Map();
     s._sepGrid = grid;
+  } else if (grid.size > s.drones.length * 4) {
+    // O9: a long moving mission visits thousands of cells; keeping every
+    // empty array makes this clear pass grow with HISTORY, not fleet size.
+    grid.clear();
   } else {
     for (const arr of grid.values()) arr.length = 0;
   }

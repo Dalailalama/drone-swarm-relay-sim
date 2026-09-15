@@ -51,3 +51,21 @@ A finding is not closed as SITL-verified until actually flown.
 
 Optimizations O1–O9: tracked after the 32 correctness findings; each will be
 implemented against a measured benchmark, not marked done by adjacency.
+
+## Optimization pass (O1-O9)
+
+| Opt | Status | Notes |
+|---|---|---|
+| O1 drone id map | **done** | nodePos Map (self-healing) replaces per-hop linear find |
+| O2 per-step RF/LOS caches | **substantially covered** | per-tick margin cache (pre-existing) + O9 ray-walk LOS; further caching deferred until a profile demands it |
+| O3 browser sim worker | **deferred, deliberately** | swarm state is shared live with the renderer and mutated by UI drags; a worker port means snapshot serialization every frame — measured budget (sub-realtime only >=140 drones at 20 Hz) does not justify the redesign yet |
+| O4 A* binary heap | **done** | open list linear-scan+splice -> min-heap, lazy stale-skip kept |
+| O5 cached mission membership | **done** | one flock snapshot per tick (was per-drone O(N^2)) |
+| O6 3D static-scene cache | **done** | ground+building projections reused while camera/terrain/canvas hold; textures stream by reference |
+| O7 incremental DOM rows | **done** | hops/fleet/event panels assign innerHTML only on change |
+| O8 city-slider debounce | **done** | 150 ms debounce; labels track live |
+| O9 ring/pruning family | **done** | capture batch-trim, coverage-map bound (oldest-first), sep-grid history purge, LOS candidates by ray-walk (was full-list for long links) |
+
+Interleaved A/B at n=100 under identical machine load: ~10.6->9.4 ms/tick median
+(the wall-clock numbers in any single bench run vary +/-20% with background
+load — BASELINE.md is only regenerated on an idle machine).

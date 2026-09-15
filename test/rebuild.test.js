@@ -65,7 +65,8 @@ test('regression #32: city sliders regenerate around the real corridor with the 
   const s = ui.ctx.sim.swarm;
   assert.strictEqual(s._terrainSeed, 0, 'precondition: scenario seed 0 must load as 0');
   ui.el('cityDensityRange').value = '80';
-  ui.fire('cityDensityRange', 'input'); // live regeneration
+  ui.fire('cityDensityRange', 'input'); // live regeneration…
+  ui.ctx.__timers.run();               // …debounced 150 ms (O8) — fire it
   assert.strictEqual(s.terrain.seed, 0,
     'regeneration replaced seed 0 with ' + s.terrain.seed);
   const bs = s.terrain.buildings;

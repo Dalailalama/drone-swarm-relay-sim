@@ -623,8 +623,16 @@
     });
     updateCityLabels();
   }
-  cityDensityRange.addEventListener('input', regenerateCity);
-  cityHeightRange.addEventListener('input', regenerateCity);
+  // O8: dragging a slider fires dozens of input events per second, and each
+  // regeneration builds thousands of buildings plus their spatial index.
+  // Rebuild once the hand pauses (150 ms); the readouts still track live.
+  let cityRegenTimer = null;
+  function regenerateCityDebounced() {
+    if (cityRegenTimer != null) clearTimeout(cityRegenTimer);
+    cityRegenTimer = setTimeout(() => { cityRegenTimer = null; regenerateCity(); }, 150);
+  }
+  cityDensityRange.addEventListener('input', regenerateCityDebounced);
+  cityHeightRange.addEventListener('input', regenerateCityDebounced);
 
   // --- Real areas from OpenStreetMap ------------------------------------------
   // The place box + Load button fetch actual building footprints and heights
@@ -1121,6 +1129,7 @@
   // --- Canvas interaction ---------------------------------------------------
   let dragMode = null; // 'target' | 'pan' | 'orbit' | 'jammer' | 'pinch'
   let lastMouse = null;
+  let lastHopsHtml = null, lastFleetHtml = null, lastEvHtml = null; // O7 panel-diff caches
   const pointers = new Map(); // active pointers on the canvas — 2 fingers = pinch zoom
   let lastPinch = null;       // { dist, mid } of the previous pinch frame
 
@@ -1314,12 +1323,16 @@
       statusPill.className = 'pill lost';
     }
 
-    hopsBody.innerHTML = status.hops.map((h, i) =>
+    // O7: assign innerHTML only when the rendered string actually changed —
+    // re-parsing identical panels at 5 Hz was pure layout churn (a 100-row
+    // fleet list is the panel path's dominant cost).
+    const hopsHtml = status.hops.map((h, i) =>
       '<tr class="' + escHtml(h.state) + '"><td>' + escHtml(h.a.label) + ' → ' + escHtml(h.b.label) + '</td><td>' + fmtDist(h.distM) +
       '</td><td>' + h.marginDb.toFixed(0) + ' dB</td><td>' + (h.lossPct < 1 ? '<1' : h.lossPct.toFixed(0)) + '%</td></tr>'
     ).join('') || '<tr><td colspan="4" class="dim">no links</td></tr>';
+    if (hopsHtml !== lastHopsHtml) { hopsBody.innerHTML = hopsHtml; lastHopsHtml = hopsHtml; }
 
-    fleetBody.innerHTML = swarm.drones.map(d => {
+    const fleetHtml = swarm.drones.map(d => {
       const sel = d === selected ? ' style="outline:1px solid #e2e8f0;"' : '';
       const role = effRole(d);
       return '<div class="fleet-row role-' + escHtml(role) + '"' + sel + ' data-id="' + escHtml(d.id) + '">' +
@@ -1329,10 +1342,12 @@
         '<span class="fbat"><span class="fbat-fill" style="width:' + d.batteryPct.toFixed(0) + '%"></span></span>' +
         '<span class="fpct">' + d.batteryPct.toFixed(0) + '%</span></div>';
     }).join('');
+    if (fleetHtml !== lastFleetHtml) { fleetBody.innerHTML = fleetHtml; lastFleetHtml = fleetHtml; }
 
-    eventLog.innerHTML = swarm.events.slice().reverse().map(ev =>
+    const evHtml = swarm.events.slice().reverse().map(ev =>
       '<div class="ev ev-' + escHtml(ev.kind) + '"><span class="ev-t">' + fmtSimClock(ev.t) + '</span>' + escHtml(ev.msg) + '</div>'
     ).join('');
+    if (evHtml !== lastEvHtml) { eventLog.innerHTML = evHtml; lastEvHtml = evHtml; }
 
     if (swarm.videoOn) {
       const v = swarm.net.vid;

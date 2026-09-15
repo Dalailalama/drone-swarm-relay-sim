@@ -153,6 +153,9 @@ function wallAlpha(lambert) {
 // when the scene square changes, or briefly re-tries while tiles stream in.
 const GROUND_TEX_PX = 1280;
 let groundTex = { key: '', canvas: null, complete: false, builtAt: 0 };
+// O6: projected static scene (ground + buildings), reused while the camera,
+// canvas, terrain and flight level stay put.
+let view3dScene = { key: '', items: null, terrain: null, tex: null };
 
 function buildGroundTexture(anchor, x0, y0, x1, y1, nowMs) {
   if (typeof tileGet !== 'function' || typeof document === 'undefined') return null;
@@ -279,6 +282,20 @@ function renderView3D(ctx, cv, s, status, cam, selected) {
   const gridN = s.terrain.groundAmpM > 0 ? 48 : (gTex ? 18 : 24);
   const stride = gridN + 1;
 
+  // O6: the STATIC scene (ground + buildings) only changes when the camera,
+  // canvas, terrain or flight level does — a parked camera was re-projecting
+  // and re-sorting thousands of quads every frame for identical output.
+  // Texture pixels stream through by reference, so a tile finishing loading
+  // shows up without invalidating the cache.
+  const sceneKey = [cam.yaw.toFixed(5), cam.pitch.toFixed(5), cam.dist.toFixed(1),
+    cam.cx.toFixed(1), cam.cy.toFixed(1), cv.width, cv.height, gridN,
+    (s.terrain.buildings || []).length, s.altitudeM, U].join('|');
+  const sceneCached = !!(view3dScene.items && view3dScene.key === sceneKey &&
+    view3dScene.terrain === s.terrain && view3dScene.tex === gTex);
+
+  const items = sceneCached ? view3dScene.items : [];
+  if (!sceneCached) {
+
   // Sample every grid corner exactly once per call and cache it — each
   // interior corner is shared by up to 4 quads, so this is ~1/4 the
   // terrainGroundAt calls a naive per-quad sample would cost.
@@ -290,8 +307,6 @@ function renderView3D(ctx, cv, s, status, cam, selected) {
       heights[j * stride + i] = terrainGroundAt(s.terrain, wx, wy);
     }
   }
-
-  const items = [];
 
   for (let j = 0; j < gridN; j++) {
     for (let i = 0; i < gridN; i++) {
@@ -370,6 +385,9 @@ function renderView3D(ctx, cv, s, status, cam, selected) {
 
   // Painter's algorithm: farthest first, nearest last.
   items.sort((a, b) => b.depth - a.depth);
+  view3dScene = { key: sceneKey, items, terrain: s.terrain, tex: gTex };
+  } // end !sceneCached build (O6)
+
   for (const it of items) {
     if (it.tex) {
       const t = it.tex, P = it.pts;

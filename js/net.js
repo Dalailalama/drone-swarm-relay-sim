@@ -73,7 +73,9 @@ function capLog(s, ev) {
   ev.seq = s.net.capSeq++;
   ev.t = +s.time.toFixed(3);
   s.net.cap.push(ev);
-  if (s.net.cap.length > CAP_MAX) s.net.cap.shift();
+  // O9: shift() per event is O(n) — trim in batches so the rolling window
+  // costs amortized O(1) while consumers still see a plain ordered array.
+  if (s.net.cap.length > CAP_MAX + 512) s.net.cap.splice(0, s.net.cap.length - CAP_MAX);
 }
 
 // --- Hardware matching & Channel ID ------------------------------------------
@@ -360,7 +362,15 @@ function nodeIds(s) {
 
 function nodePos(s, id) {
   if (id === 'C2') return s.base;
-  return s.drones.find(d => d.id === id) || null;
+  // O1: this lookup is the hottest in the network layer at scale — a linear
+  // find() per packet-hop turned N drones into N² work per round. The map
+  // self-heals if the drones array is ever rebuilt.
+  let m = s._droneById;
+  if (!m || m.size !== s.drones.length) {
+    m = s._droneById = new Map();
+    for (const d of s.drones) m.set(d.id, d);
+  }
+  return m.get(id) || null;
 }
 
 const LINK_MIN_MARGIN_DB = 0; // an in-flight packet uses whatever exists

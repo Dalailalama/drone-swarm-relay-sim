@@ -154,17 +154,31 @@ function losBlocked(t, ax, ay, aAltM, bx, by, bAltM) {
     const minRayX = Math.min(ax, bx), maxRayX = Math.max(ax, bx);
     const minRayY = Math.min(ay, by), maxRayY = Math.max(ay, by);
     let bCandidates = t.buildings;
-    if (t.bGrid && ((maxRayX - minRayX) < BGRID_CELL_M * 5 && (maxRayY - minRayY) < BGRID_CELL_M * 5)) {
-      const gx0 = Math.floor(minRayX / BGRID_CELL_M), gx1 = Math.floor(maxRayX / BGRID_CELL_M);
-      const gy0 = Math.floor(minRayY / BGRID_CELL_M), gy1 = Math.floor(maxRayY / BGRID_CELL_M);
+    if (t.bGrid) {
+      // O9: gather candidates by WALKING THE RAY through the spatial hash
+      // (with a one-cell margin) instead of boxing the whole span — the old
+      // 5-cell fallback made every long link (a 40 km RFD hop) scan the
+      // entire building list. Cells are ~120 m; half-cell steps can't skip
+      // one, and the walk is clipped to the ray's own extent.
       const set = new Set();
-      for (let ix = gx0; ix <= gx1; ix++) {
-        for (let iy = gy0; iy <= gy1; iy++) {
-          const arr = t.bGrid.get(ix + ',' + iy);
-          if (arr) for (let i = 0; i < arr.length; i++) set.add(arr[i]);
+      const c = BGRID_CELL_M;
+      const rayLen2 = Math.hypot(bx - ax, by - ay);
+      const steps = Math.max(1, Math.ceil(rayLen2 / (c / 2)));
+      let px = null, py = null;
+      for (let i = 0; i <= steps; i++) {
+        const f = i / steps;
+        const gx = Math.floor((ax + (bx - ax) * f) / c);
+        const gy = Math.floor((ay + (by - ay) * f) / c);
+        if (gx === px && gy === py) continue;
+        px = gx; py = gy;
+        for (let ix = gx - 1; ix <= gx + 1; ix++) {
+          for (let iy = gy - 1; iy <= gy + 1; iy++) {
+            const arr = t.bGrid.get(ix + ',' + iy);
+            if (arr) for (let k = 0; k < arr.length; k++) set.add(arr[k]);
+          }
         }
       }
-      bCandidates = Array.from(set);
+      bCandidates = set;
     }
     for (const b of bCandidates) {
       const minBx = b.x - b.w / 2, maxBx = b.x + b.w / 2;
