@@ -1607,13 +1607,21 @@ function chainStatus(s) {
     });
   }
 
-  // Ground truth connectivity: any mission drone reachable from C2 — read
-  // straight off the shared tree's distance map, no fresh searches.
+  // Ground-truth connectivity, two grades (review finding #6):
+  //   fleetConnected — C2 can reach at least one mission drone SOMEWHERE;
+  //   connected      — the metric every consumer reads (status pill, uptime,
+  //                    batch reports): C2 has a live route to a mission drone
+  //                    ON STATION at the objective. On-station is an explicit
+  //                    mission radius — the orbit ring plus slack — never a
+  //                    function of radio range, which used to make a drone
+  //                    45 km short of the target count as "at the objective"
+  //                    on a long-range radio.
   const tree = c2Tree(s);
-  const connected = flock.some(d => (tree.dist.get(d.id) || Infinity) < Infinity);
-  const fleetConnected = connected;
-  const reach = usableRangeM(s.radio, s.envFactor) * 1.5;
-  const objectiveConnected = flock.some(d => (tree.dist.get(d.id) || Infinity) < Infinity && dist2d(d, s.target) <= Math.max(DRONE.orbitRadiusM * 2.5, reach));
+  const fleetConnected = flock.some(d => (tree.dist.get(d.id) || Infinity) < Infinity);
+  const onStationM = DRONE.orbitRadiusM * 2.5;
+  const connected = flock.some(d =>
+    (tree.dist.get(d.id) || Infinity) < Infinity && dist2d(d, s.target) <= onStationM);
+  const objectiveConnected = connected;
 
   // Operator's view: how many drones does C2 have fresh contact with?
   const freshCount = Object.keys(s.c2.known)

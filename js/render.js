@@ -435,7 +435,7 @@ function render(ctx, cv, view, s, status, selected, usable) {
     if (node.kind !== 'mission') drawRangeRing(ctx, cv, view, node, usable);
   }
 
-  drawLinks(ctx, cv, view, status.hops, s.time, status.connected);
+  drawLinks(ctx, cv, view, status.hops, s.time, status.fleetConnected); // the drawn chain is the physical fleet link
   drawPackets(ctx, cv, view, s);
   drawLostMarkers(ctx, cv, view, s);
   drawTakMarkers(ctx, cv, view, s);

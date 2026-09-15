@@ -41,9 +41,11 @@ function miniConfig() {
     airframe: 'q450',
     terrain: 'flat',
     count: 6,
-    durationSec: 60,
+    // Long enough for the flock to REACH the objective and hold: uptimePct
+    // is objective uptime (finding #6) — a run ending mid-transit reads 0%.
+    durationSec: 150,
     seeds: [11, 12],
-    mission: { targetX: 1800, targetY: -400 },
+    mission: { targetX: 700, targetY: -150 },
     features: { videoOn: true, videoKbps: 250 },
     sweep: [
       { name: 'low', altitudeM: 45 },

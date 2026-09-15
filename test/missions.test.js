@@ -76,11 +76,14 @@ test('wildfire overwatch: objective drifts downwind and the flock follows', () =
   });
   const startT = { x: s.target.x, y: s.target.y };
   let st = null;
-  while (s.time < 120) st = ctx.stepSwarm(s, 0.25);
+  // 4.3 km at X8 speed needs ~270 s of transit — run long enough that the
+  // ring genuinely reaches the front, then holds ON it (finding #6:
+  // `connected` now means on-station at the objective, not merely linked).
+  while (s.time < 420) st = ctx.stepSwarm(s, 0.25);
   const drift = Math.hypot(s.target.x - startT.x, s.target.y - startT.y);
-  assert.ok(Math.abs(drift - Math.hypot(tv.x, tv.y) * 120) < 5,
-    'front must creep |v|·t = ' + (Math.hypot(tv.x, tv.y) * 120).toFixed(0) + ' m, got ' + drift.toFixed(0));
-  assert.ok(st.connected, 'overwatch ring stays linked to the drifting front');
+  assert.ok(Math.abs(drift - Math.hypot(tv.x, tv.y) * 420) < 5,
+    'front must creep |v|·t = ' + (Math.hypot(tv.x, tv.y) * 420).toFixed(0) + ' m, got ' + drift.toFixed(0));
+  assert.ok(st.connected, 'overwatch ring stays linked ON the drifting front');
 });
 
 test('perimeter patrol launches a large short-range ring that heals', () => {

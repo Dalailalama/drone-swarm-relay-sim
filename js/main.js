@@ -1186,7 +1186,7 @@
     // burning, capped by any legal duty cycle.
     const effKbps = chainThroughputKbps(radio, status.hops.length)
       * Math.max(0, 1 - swarm.net.utilization) * (radio.dutyCycle ?? 1);
-    kpiThroughput.textContent = status.connected
+    kpiThroughput.textContent = status.fleetConnected
       ? (effKbps >= 1000 ? (effKbps / 1000).toFixed(1) + ' Mbps'
         : effKbps.toFixed(effKbps < 10 ? 1 : 0) + ' kbps')
       : '—';
@@ -1200,6 +1200,11 @@
     } else if (status.connected) {
       statusPill.textContent = 'Connected — ' + status.hops.length + ' hop' + (status.hops.length > 1 ? 's' : '');
       statusPill.className = 'pill ok';
+    } else if (status.fleetConnected) {
+      // Fleet is linked but nobody is on station yet — say so, don't claim
+      // the objective link exists before it does (finding #6).
+      statusPill.textContent = 'Linked — en route to objective';
+      statusPill.className = 'pill warn';
     } else if (status.freshCount > 0) {
       statusPill.textContent = 'Flock out of contact — C2 sees ' + status.freshCount + '/' + status.aliveCount;
       statusPill.className = 'pill warn';

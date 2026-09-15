@@ -104,7 +104,9 @@ test('longer mission densifies the backhaul with multiple wing relays', () => {
     targetX: 9000, targetY: -1800,
     relayRadio: DOODLE,
   }, 240);
-  assert.ok(status.connected, 'multi-hop wing chain must close');
+  // 9 km at wing speed is still in transit at T+240 — the subject here is
+  // the multi-hop BACKHAUL (relay densification), not objective arrival.
+  assert.ok(status.fleetConnected, 'multi-hop wing backhaul must close');
   assert.ok(status.relayCount >= 2, 'expected >=2 relays, got ' + status.relayCount);
   for (const id of s.c2.relays) {
     const d = s.drones.find(x => x.id === id);

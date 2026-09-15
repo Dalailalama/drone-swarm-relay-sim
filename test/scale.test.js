@@ -47,7 +47,10 @@ test('100-drone fleet flies a real mission and closes the chain', () => {
   const wallS = (Date.now() - t0) / 1000;
 
   assert.strictEqual(st.aliveCount, 100, 'whole fleet alive at T+90 s');
-  assert.ok(st.connected, 'chain must close for a 100-node fleet');
+  // T+90 s is mid-transit on a 2.4 km corridor — this test is about the
+  // BACKHAUL closing at 100-node scale, not objective arrival (finding #6
+  // split the two: `connected` now means on-station at the objective).
+  assert.ok(st.fleetConnected, 'backhaul chain must close for a 100-node fleet');
   assert.ok(st.freshCount >= 80, 'C2 should be in contact with most of the fleet, got ' + st.freshCount);
   assert.ok(s.net.vid.framesDelivered > 10, 'payload stream survives at scale');
   // Loose perf guard: ~360 ticks of a 100-drone sim must not take minutes.
