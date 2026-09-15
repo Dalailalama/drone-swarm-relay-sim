@@ -12,6 +12,14 @@
 // hold position first, then fly home until contact returns (regain-link RTL —
 // the behavior that lets a broken chain heal itself).
 
+// The canonical simulation timestep — ONE step policy for the browser loop,
+// the batch engine and the benchmark (review finding #28): equal seeds and
+// settings must produce identical trajectories in every runtime, and a
+// benchmark number is only comparable to the product it claims to measure
+// if both step the same dt. 20 Hz keeps the collision sweep and tether
+// margins honest at full flight speed.
+const SIM_DT_SEC = 0.05;
+
 const DRONE = {
   accelMs2: 4,
   separationM: 25,
@@ -209,11 +217,15 @@ function makeSwarm(opts) {
   for (let i = 0; i < opts.count; i++) {
     const a = (i / opts.count) * Math.PI * 2;
     const isWing = s.relayIdx.includes(i);
-    s.drones.push(makeDrone(
+    const dr = makeDrone(
       s.base.x + 60 * Math.cos(a), s.base.y + 60 * Math.sin(a), s.target, s.net.rng,
       isWing && opts.relayAirframe ? opts.relayAirframe : opts.airframe,
       isWing && opts.relayRadio ? opts.relayRadio : opts.radio,
-      isWing ? 'relay' : 'mission'));
+      isWing ? 'relay' : 'mission');
+    // Launch briefing: every drone knows where the base is at takeoff;
+    // later updates arrive only by received C2 packets (finding #18).
+    dr.baseKnown = { x: s.base.x, y: s.base.y, at: 0 };
+    s.drones.push(dr);
   }
   return s;
 }
@@ -1117,6 +1129,7 @@ function c2Step(s) {
       videoOn: id === s.c2.vidGrantee,
       videoUntil: id === s.c2.vidGrantee && s.c2.vidGrantAt != null ? s.c2.vidGrantAt + VID_GRANT_SEC : null,
       videoGrant: id === s.c2.vidGrantee ? (s.c2.vidGrantSeq || 0) : null,
+      c2: { x: s.base.x, y: s.base.y }, // the GCS streams its own position (finding #18)
       target: { x: s.target.x, y: s.target.y },
     };
   };
@@ -1164,9 +1177,9 @@ function c2Step(s) {
     for (const id of ids) orders[id] = orderFor(id);
     s.c2.bcastSeq += 1;
     const bcastBytes = NET.bcastHeaderBytes + NET.bcastRowBytes * ids.length;
-    sendBroadcast(s, 'C2', { seq: s.c2.bcastSeq, orders }, bcastBytes);
+    sendBroadcast(s, 'C2', { seq: s.c2.bcastSeq, orders, c2: { x: s.base.x, y: s.base.y } }, bcastBytes);
     if (s.relayRadio && !bandCompatible(s.radio, s.relayRadio)) {
-      sendBroadcast(s, 'C2', { seq: s.c2.bcastSeq, orders }, bcastBytes, s.relayRadio);
+      sendBroadcast(s, 'C2', { seq: s.c2.bcastSeq, orders, c2: { x: s.base.x, y: s.base.y } }, bcastBytes, s.relayRadio);
     }
   } else {
     // Unicast: one routed packet per drone — best effort, dies without a route
@@ -1206,6 +1219,13 @@ function droneComms(s, d) {
     d.lastLinkX = d.x; d.lastLinkY = d.y;
     d.relinkUntil = null;
     d.relinkAttempt = 0;
+    // C2's own position rides in every packet it sends (a real GCS streams
+    // its location). This is the ONLY way a drone learns the base moved
+    // (finding #18) — knowledge arrives by radio, never by telepathy.
+    const c2pos = p.payload && p.payload.c2;
+    if (c2pos && isFinite(c2pos.x) && isFinite(c2pos.y)) {
+      d.baseKnown = { x: c2pos.x, y: c2pos.y, at: s.time };
+    }
     if (d.mode === 'hold' || d.mode === 'relink' || d.mode === 'rtl') {
       d.mode = 'ok';
       logEvent(s, d.id + ' link restored — resuming orders', 'info');
@@ -1311,8 +1331,11 @@ function droneComms(s, d) {
       d.deadLogSeq = (d.deadLogSeq || 0) + 1;
       d.deadLog.push({
         seq: d.deadLogSeq,
-        x: d.x + GPS_SIGMA_M * gaussian(s.net.rng),
-        y: d.y + GPS_SIGMA_M * gaussian(s.net.rng),
+        // The black box records where the drone THINKS it is (finding #18):
+        // GPS-denied, that's the drifted dead-reckoning belief — writing the
+        // truth would be data the vehicle doesn't possess.
+        x: d.gpsDenied ? d.belX : d.x + GPS_SIGMA_M * gaussian(s.net.rng),
+        y: d.gpsDenied ? d.belY : d.y + GPS_SIGMA_M * gaussian(s.net.rng),
       });
     }
   }
@@ -1344,7 +1367,8 @@ function droneComms(s, d) {
       else if (s.time > d.relinkUntil) {
         // Attempt failed. Fall back one radio-range step toward base and
         // listen again; after the last attempt, go home for real.
-        const dHome = dist2d(d, s.base);
+        const homeK = d.baseKnown || s.base; // last KNOWN base — never live truth (finding #18)
+        const dHome = dist2d(d, homeK);
         const step = usableRangeM(droneRadio(d) || s.radio, s.envFactor) * FAILSAFE.relinkStepFrac;
         if (d.relinkAttempt >= FAILSAFE.relinkAttempts || dHome <= step) {
           d.mode = 'rtl';
@@ -1352,8 +1376,8 @@ function droneComms(s, d) {
         } else {
           d.relinkAttempt += 1;
           const f = step / dHome;
-          d.relinkGoalX = d.x + (s.base.x - d.x) * f;
-          d.relinkGoalY = d.y + (s.base.y - d.y) * f;
+          d.relinkGoalX = d.x + (homeK.x - d.x) * f;
+          d.relinkGoalY = d.y + (homeK.y - d.y) * f;
           d.relinkUntil = null;
           logEvent(s, d.id + ' still silent — falling back toward C2 (attempt ' + d.relinkAttempt + '/' + FAILSAFE.relinkAttempts + ')', 'warn');
         }
@@ -1373,8 +1397,9 @@ function updateBattery(s, d, dt, vAirMs) {
     // finding #2). A home leg that can't be flown at all reads as infinite
     // cost — alarm and turn back NOW rather than burn battery pretending a
     // floored "1 m/s" return exists.
-    const gHome = groundSpeedAlong(af, s.wind, d, s.base);
-    const secsHome = gHome > 0.05 ? dist2d(d, s.base) / gHome : Infinity;
+    const homeK = d.baseKnown || s.base; // the drone plans against what it KNOWS (finding #18)
+    const gHome = groundSpeedAlong(af, s.wind, d, homeK);
+    const secsHome = gHome > 0.05 ? dist2d(d, homeK) / gHome : Infinity;
     const whHome = flightPowerW(af, af.maxSpeedMs) * secsHome / 3600 * BATTERY.homeMargin;
     if (d.energyWh <= whHome + usableWh(af) * BATTERY.reserveFrac) {
       d.mode = 'rtb';
@@ -1399,7 +1424,12 @@ function killDrone(s, d) {
 
 // --- Motion --------------------------------------------------------------------
 function goalFor(s, d, dt) {
-  if (d.mode === 'rtb' || d.mode === 'rtl') return { x: s.base.x, y: s.base.y };
+  if (d.mode === 'rtb' || d.mode === 'rtl') {
+    // Home is where the drone last LEARNED the base to be (finding #18) —
+    // an operator who moves in radio silence is honestly not followed.
+    const homeK = d.baseKnown || s.base;
+    return { x: homeK.x, y: homeK.y };
+  }
   if (d.mode === 'hold') return { x: d.holdX, y: d.holdY };
   if (d.mode === 'relink') return { x: d.relinkGoalX, y: d.relinkGoalY };
   if (d.order.role === 'rescue' && d.order.goto) return d.order.goto;
@@ -1840,6 +1870,7 @@ function stepSwarm(s, dt) {
 
   const st = chainStatus(s);
   if (st.connected) s.stats.connSec += dt;
+  if (st.fleetConnected) s.stats.fleetConnSec = (s.stats.fleetConnSec || 0) + dt;
   return st;
 }
 
@@ -1926,4 +1957,10 @@ function afterActionReport(s) {
   L.push('');
   L.push('_This is a simulation result, not a flight-tested outcome. Model calibration and assumptions are documented in the project README._');
   return L.join('\n');
+}
+
+// UMD-lite: only the cross-runtime policy constant — the sim itself runs as
+// browser globals / inside the vm harness.
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = { SIM_DT_SEC };
 }
