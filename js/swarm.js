@@ -728,18 +728,42 @@ function orderGoal(s, order) {
   return order.target;
 }
 
+// Ground speed achievable along the track from -> to against the wind
+// VECTOR (review finding #2 / B21). The crosswind component must be crabbed
+// out of the airspeed budget; what's left projects onto the track:
+//   g = wind·û + sqrt(maxV² − wind⊥²)
+// Same envelope math the movement integrator flies, so the planner promises
+// only what the physics can deliver. Returns 0 when the leg cannot be flown
+// at all (crosswind exceeds airspeed, or the wind blows the drone backward
+// at full throttle) — infeasible is an answer, not a slow speed.
+function groundSpeedAlong(af, wind, fromP, toP) {
+  const dx = toP.x - fromP.x, dy = toP.y - fromP.y;
+  const L = Math.hypot(dx, dy);
+  if (L < 1e-6) return af.maxSpeedMs;
+  const ux = dx / L, uy = dy / L;
+  const wPar = wind.x * ux + wind.y * uy;
+  const wPerp = wind.x * uy - wind.y * ux;
+  const rem = af.maxSpeedMs * af.maxSpeedMs - wPerp * wPerp;
+  if (rem <= 0) return 0;
+  return Math.max(0, wPar + Math.sqrt(rem));
+}
+
 // FASTER-style commitment rule (methodology from MIT ACL's FASTER planner:
 // never commit to a plan unless a backup plan provably closes). Here the
 // backup plan is energetic: fly to the goal, then still make it home against
-// the wind with the pessimism margin and reserve intact.
+// the wind with the pessimism margin and reserve intact. Each leg is solved
+// against the wind vector; an unflyable leg rejects the order outright — a
+// scalar "max(1, maxV − |wind|)" floor used to accept short impossible
+// returns on battery cost and reject easy downwind runs at stall speed.
 function orderFeasible(s, d, order) {
   const af = afOf(s, d);
   const goal = orderGoal(s, order);
-  const windMs = Math.hypot(s.wind.x, s.wind.y);
-  const speed = Math.max(1, af.maxSpeedMs - windMs);
+  const gOut = groundSpeedAlong(af, s.wind, d, goal);
+  const gHome = groundSpeedAlong(af, s.wind, goal, s.base);
+  if (gOut < 0.5 || gHome < 0.5) return false; // a leg that can't be flown fails every backup plan
   const pw = flightPowerW(af, af.maxSpeedMs);
-  const whToGoal = pw * (dist2d(d, goal) / speed) / 3600;
-  const whGoalHome = pw * (dist2d(goal, s.base) / speed) / 3600 * BATTERY.homeMargin;
+  const whToGoal = pw * (dist2d(d, goal) / gOut) / 3600;
+  const whGoalHome = pw * (dist2d(goal, s.base) / gHome) / 3600 * BATTERY.homeMargin;
   return d.energyWh > whToGoal + whGoalHome + usableWh(af) * BATTERY.reserveFrac;
 }
 
@@ -1249,11 +1273,13 @@ function updateBattery(s, d, dt, vAirMs) {
   d.batteryPct = d.energyWh / usableWh(af) * 100;
 
   if (d.mode === 'ok' || d.mode === 'hold' || d.mode === 'relink') {
-    // Onboard smart-RTH: energy to fly home at cruise, with pessimism + reserve.
-    // Assumes the whole trip could be upwind — conservative, like real firmware.
-    const windMs = Math.hypot(s.wind.x, s.wind.y);
-    const homeSpeed = Math.max(1, af.maxSpeedMs - windMs);
-    const secsHome = dist2d(d, s.base) / homeSpeed;
+    // Onboard smart-RTH: energy to fly home at cruise, with pessimism +
+    // reserve, along the ACTUAL home track against the wind vector (review
+    // finding #2). A home leg that can't be flown at all reads as infinite
+    // cost — alarm and turn back NOW rather than burn battery pretending a
+    // floored "1 m/s" return exists.
+    const gHome = groundSpeedAlong(af, s.wind, d, s.base);
+    const secsHome = gHome > 0.05 ? dist2d(d, s.base) / gHome : Infinity;
     const whHome = flightPowerW(af, af.maxSpeedMs) * secsHome / 3600 * BATTERY.homeMargin;
     if (d.energyWh <= whHome + usableWh(af) * BATTERY.reserveFrac) {
       d.mode = 'rtb';
