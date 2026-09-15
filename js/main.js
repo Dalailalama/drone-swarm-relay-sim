@@ -403,7 +403,8 @@
     // scenario's mission onto whatever the user loaded next is exactly the
     // bug the early-return alone didn't fix.
     if (sc.terrain === 'osm' && sc.osm) {
-      const p = loadOsmArea(sc.osm.lat, sc.osm.lon, sc.osm.radiusM || 1200, sc.osm.name || null);
+      const p = loadOsmArea(sc.osm.lat, sc.osm.lon, sc.osm.radiusM || 1200, sc.osm.name || null,
+        { seed: sc.seed, base: sc.base, target: sc.target });
       const gen = osmLoadToken; // the generation this load belongs to
       p.then(applied => { if (applied && gen === osmLoadToken) applyMissionOverrides(); })
         .catch(() => {}); // the note already explains the failure
@@ -601,10 +602,15 @@
   window.updateCityLabels = updateCityLabels;
   function regenerateCity() {
     if (!swarm || terrainSel.value === 'osm') return; // real buildings aren't dialable
+    // Live regeneration uses the swarm's REAL geometry — the moved base, the
+    // corridor length between base and target — and preserves seed 0, which
+    // `|| 42` used to erase (finding #32).
     const tX = swarm.target.x, tY = swarm.target.y;
+    const bX = swarm.base.x, bY = swarm.base.y;
     swarm.terrain = makeTerrain(terrainSel.value, {
-      distM: Math.hypot(tX, tY), altM: swarm.altitudeM,
-      targetX: tX, targetY: tY, seed: swarm._terrainSeed || 42,
+      distM: Math.hypot(tX - bX, tY - bY), altM: swarm.altitudeM,
+      baseX: bX, baseY: bY, targetX: tX, targetY: tY,
+      seed: swarm._terrainSeed != null ? swarm._terrainSeed : 42,
       density: +cityDensityRange.value / 100, heightScale: +cityHeightRange.value / 100,
     });
     updateCityLabels();
@@ -645,8 +651,11 @@
 
   // Resolves true only when the fetched area was actually installed; a
   // superseded call resolves false so no completion callback can mistake it
-  // for success (finding #8).
-  async function loadOsmArea(lat, lon, radiusM, name) {
+  // for success (finding #8). `rebuild` carries the saved scenario's seed and
+  // geometry so the post-fetch swarm is built ONCE, correctly — without it
+  // the rebuild used a fresh seed and the default origin, and the later
+  // overrides merely repainted the target (finding #22).
+  async function loadOsmArea(lat, lon, radiusM, name, rebuild) {
     const token = ++osmLoadToken;
     osmBtnOwner = token; // whoever owns the button restores it — exactly once
     osmLoadBtn.disabled = true; osmLoadBtn.textContent = 'Loading…';
@@ -657,7 +666,9 @@
       if (!area.buildings.length) throw new Error('No mapped buildings there — try a bigger radius or a denser place');
       area.name = name || (lat.toFixed(4) + ', ' + lon.toFixed(4));
       osmArea = area;
-      resetSwarm();
+      if (rebuild && rebuild.seed != null) forcedSeed = rebuild.seed;
+      resetSwarm(rebuild && rebuild.target ? { base: rebuild.base, target: rebuild.target } : undefined);
+      forcedSeed = null;
       syncTakOrigin();
       logEvent(swarm, 'Real area loaded: ' + escHtml(area.name) + ' — ' + area.buildings.length + ' buildings', 'info');
       return true;

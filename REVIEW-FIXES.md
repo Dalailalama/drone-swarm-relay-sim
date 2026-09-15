@@ -37,7 +37,7 @@ A finding is not closed as SITL-verified until actually flown.
 | 19 | Failed A* still assigns blocked routes | **reproduced**: 12 slots through a solid wall, relays ordered onto them | test/planfail.test.js (3) | no-route → empty slot list + explicit C2 error, straight-line fallbacks guarded | **fixed** |
 | 20 | Adversary band filtering wrong representation | **reproduced**: in-band hunter moved 0.0 m; silent target tracked live | test/advband.test.js (3) | jammerFreqMHz normalizer everywhere; DF fixes measured once at emission, kept as taken; txAt=actual emission via scheduler rework | **fixed** |
 | 21 | Video grants lack expiry | **reproduced**: 13 chunks streamed past expiry on heartbeats alone | test/vidgrant.test.js (3) | orders carry absolute videoUntil + grant id; onboard check uses the deadline, never link freshness | **fixed** |
-| 22 | OSM reload loses saved geometry/seed | seed 7→45, drone at default spawn | — | — | queued |
+| 22 | OSM reload loses saved geometry/seed | **reproduced**: seed 7→45, drones spawned at origin | test/rebuild.test.js (1) | post-fetch rebuild carries the scenario's seed+base+target — built once, correctly | **fixed** |
 | 23 | Calibrated presets not exported in scenario | reload in fresh page silently falls back | — | — | queued |
 | 24 | Count slider double-inits bridge | **reproduced**: 2 init messages per change | test/external.test.js (1) | handler's duplicate call removed; resetSwarm's central sync is the one path | **fixed (mock-verified)** |
 | 25 | External altitude datum undefined | **reproduced**: 120 m origin-relative read as 120 m AGL over hills | test/external.test.js (1) | contract defined: bridge alt = origin-relative (-NED.z); converted to AGL at the vehicle via ground-height delta | **fixed (mock-verified)** |
@@ -47,7 +47,7 @@ A finding is not closed as SITL-verified until actually flown.
 | 29 | Battery swaps counted twice | **reproduced**: full land→swap→relaunch cycle counted 2 | test/swapcount.test.js (1) | counted at the completed relaunch transition, log-text sniffing removed | **fixed** |
 | 30 | Batch validation permissive on types | **reproduced**: count=1.5, seeds='bad', env='toString', null coords all accepted | test/batchvalid.test.js (2) | strict provided-field validation (wrong type ≠ omitted), integer counts, bounded nested cell fields & geometry, drone-second work budget | **fixed** |
 | 31 | Failed tiles never retry | cached failure until eviction | — | — | queued |
-| 32 | City sliders bypass geometry/zero handling | origin-distance, seed 0→42 | — | — | queued |
+| 32 | City sliders bypass geometry/zero handling | **reproduced**: seed 0→42, city centred off the moved corridor | test/rebuild.test.js (1) | regeneration uses base→target geometry and null-safe seed | **fixed** |
 
 Optimizations O1–O9: tracked after the 32 correctness findings; each will be
 implemented against a measured benchmark, not marked done by adjacency.
