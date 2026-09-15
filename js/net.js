@@ -50,8 +50,11 @@ function makeNet(seed) {
     // packet id counter — always advances, independent of capture being on,
     // so pids are unique in a trace even for packets that predate capture
     pktSeq: 0,
-    // payload/video accounting (Feature: Tier-1 #4)
+    // payload/video accounting (Feature: Tier-1 #4). vidDropped holds
+    // tombstones for frames already counted as lost, so a frame terminates
+    // exactly once no matter how many of its fragments die (finding #15).
     vid: { framesDelivered: 0, droppedFrames: 0 },
+    vidDropped: new Map(),
     // last-transmission clock per node id — the RF signature a direction-
     // finding adversary can legally sense (js/adversary.js)
     txAt: {},
@@ -204,13 +207,20 @@ function commitBcast(s, b, eStart) {
   b.tFire = eStart + b.airtime; // reception rolls when the last bit lands
 }
 
+// One lifecycle per FRAME (finding #15): a frame terminates exactly once —
+// delivered when its last fragment lands, dropped the FIRST time any of it
+// is lost (fragment TTL, dead hop, failed link, or reassembly expiry).
+// Late fragments of an already-dead frame are discarded without effect.
+function markVidFrameDropped(s, id) {
+  if (id == null || s.net.vidDropped.has(id)) return;
+  s.net.vidDropped.set(id, s.time);
+  s.net.vid.droppedFrames++;
+  if (s.c2 && s.c2.vidReassembly) s.c2.vidReassembly.delete(id);
+}
+
 function dropPacketBookkeeping(s, p, reason, from, to, marginDb) {
   s.net.dropped++;
-  if (p.kind === 'vid' && !p.frameDropped) {
-    p.frameDropped = true;
-    s.net.vid.droppedFrames++;
-    if (p.frameId && s.c2 && s.c2.vidReassembly) s.c2.vidReassembly.delete(p.frameId);
-  }
+  if (p.kind === 'vid') markVidFrameDropped(s, p.frameId || p.pid);
   capLog(s, { ev: 'drop', reason, pid: p.pid, kind: p.kind, from, to, marginDb });
 }
 
@@ -469,27 +479,11 @@ function preparePacketHop(s, p) {
 
   if (from !== 'C2') {
     const dFrom = nodePos(s, from);
-    if (!dFrom || !alive(dFrom)) {
-      s.net.dropped++;
-      if (p.kind === 'vid' && !p.frameDropped) {
-        p.frameDropped = true;
-        s.net.vid.droppedFrames++;
-      }
-      capLog(s, { ev: 'drop', reason: 'dead-src', pid: p.pid, kind: p.kind, from, to });
-      return false;
-    }
+    if (!dFrom || !alive(dFrom)) { dropPacketBookkeeping(s, p, 'dead-src', from, to); return false; }
   }
   if (to !== 'C2') {
     const dTo = nodePos(s, to);
-    if (!dTo || !alive(dTo)) {
-      s.net.dropped++;
-      if (p.kind === 'vid' && !p.frameDropped) {
-        p.frameDropped = true;
-        s.net.vid.droppedFrames++;
-      }
-      capLog(s, { ev: 'drop', reason: 'dead-dst', pid: p.pid, kind: p.kind, from, to });
-      return false;
-    }
+    if (!dTo || !alive(dTo)) { dropPacketBookkeeping(s, p, 'dead-dst', from, to); return false; }
   }
 
   // Enqueue only. Nothing about the OUTCOME or the start time is decided
@@ -585,6 +579,11 @@ function sendPacket(s, kind, src, dst, payload, bytesOverride) {
 function deliverPacket(s, p) {
   s.net.delivered++;
   if (p.kind === 'vid') {
+    if (s.net.vidDropped.has(p.frameId || p.pid)) {
+      // Straggler of a frame already counted as lost: the RF delivery
+      // happened, but the frame is dead — discard, never resurrect.
+      return;
+    }
     if (p.frameId) {
       if (s.c2) {
         s.c2.vidReassembly = s.c2.vidReassembly || new Map();
@@ -622,13 +621,17 @@ function stepNet(s, dt) {
   commitTransmissions(s); // shared timeline: earliest-eligible first, both queues
   stepBcasts(s);
 
-  // Prune expired video reassembly
+  // Reassembly that never completes is one lost frame (via the tombstone,
+  // so fragment-level drops of the same frame never double it — finding #15).
   if (s.c2 && s.c2.vidReassembly) {
     for (const [fid, ent] of s.c2.vidReassembly) {
-      if (s.time - ent.at > 3.0) {
-        s.c2.vidReassembly.delete(fid);
-        s.net.vid.droppedFrames++;
-      }
+      if (s.time - ent.at > 3.0) markVidFrameDropped(s, fid);
+    }
+  }
+  // Tombstones outlive any straggler fragment (max TTL 10 s), then go.
+  if (s.net.vidDropped.size) {
+    for (const [fid, at] of s.net.vidDropped) {
+      if (s.time - at > 12) s.net.vidDropped.delete(fid);
     }
   }
 
