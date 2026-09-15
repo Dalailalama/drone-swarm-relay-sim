@@ -398,9 +398,14 @@
     logEvent(swarm, 'Scenario loaded', 'info');
     // A real-area scenario stores coordinates, not buildings: refetch from OSM
     // (needs internet), then re-pin the mission on the refreshed swarm.
+    // The generation check rides through the COMPLETION too (finding #8): a
+    // superseded fetch resolves without applying, and replaying this
+    // scenario's mission onto whatever the user loaded next is exactly the
+    // bug the early-return alone didn't fix.
     if (sc.terrain === 'osm' && sc.osm) {
-      loadOsmArea(sc.osm.lat, sc.osm.lon, sc.osm.radiusM || 1200, sc.osm.name || null)
-        .then(applyMissionOverrides)
+      const p = loadOsmArea(sc.osm.lat, sc.osm.lon, sc.osm.radiusM || 1200, sc.osm.name || null);
+      const gen = osmLoadToken; // the generation this load belongs to
+      p.then(applied => { if (applied && gen === osmLoadToken) applyMissionOverrides(); })
         .catch(() => {}); // the note already explains the failure
     }
   }
@@ -568,7 +573,11 @@
     videoKbpsOut.textContent = videoKbpsRange.value + ' kbps';
     applyVideo();
   });
-  terrainSel.addEventListener('change', () => { updateOsmRow(); resetSwarm(); });
+  terrainSel.addEventListener('change', () => {
+    osmLoadToken++; // switching terrain abandons any in-flight area fetch (finding #8)
+    updateOsmRow();
+    resetSwarm();
+  });
 
   // --- City density / height sliders — regenerate the buildings live (same
   // seed, same mission) so you can dial from a couple of buildings to a dense
@@ -608,6 +617,7 @@
   let osmArea = null; // { lat, lon, radiusM, name, buildings (centered on 0,0), dropped, cleared }
   const OSM_INTRO = osmNote.innerHTML;
   let osmLoadToken = 0;
+  let osmBtnOwner = 0; // which load call currently owns the Load button's state
 
   function updateOsmRow() {
     const isOsm = terrainSel.value === 'osm';
@@ -632,25 +642,35 @@
       '. Ground is flat in this version. Buildings &copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener" style="color:var(--accent)">OpenStreetMap</a> contributors (ODbL).';
   }
 
+  // Resolves true only when the fetched area was actually installed; a
+  // superseded call resolves false so no completion callback can mistake it
+  // for success (finding #8).
   async function loadOsmArea(lat, lon, radiusM, name) {
     const token = ++osmLoadToken;
+    osmBtnOwner = token; // whoever owns the button restores it — exactly once
     osmLoadBtn.disabled = true; osmLoadBtn.textContent = 'Loading…';
     osmNote.innerHTML = 'Fetching real buildings from OpenStreetMap&hellip;';
     try {
       const area = await osmFetchArea(lat, lon, radiusM);
-      if (token !== osmLoadToken) return;
+      if (token !== osmLoadToken) return false; // superseded while fetching
       if (!area.buildings.length) throw new Error('No mapped buildings there — try a bigger radius or a denser place');
       area.name = name || (lat.toFixed(4) + ', ' + lon.toFixed(4));
       osmArea = area;
       resetSwarm();
       syncTakOrigin();
       logEvent(swarm, 'Real area loaded: ' + escHtml(area.name) + ' — ' + area.buildings.length + ' buildings', 'info');
+      return true;
     } catch (e) {
-      if (token !== osmLoadToken) return;
+      if (token !== osmLoadToken) return false;
       osmNote.innerHTML = '<b style="color:var(--lost)">' + escHtml(e.message) + '</b> &middot; This feature needs internet, and the free OSM servers are sometimes busy — try again in a minute.';
       throw e;
     } finally {
-      if (token === osmLoadToken) {
+      // Restore the button unless a NEWER load has taken it over — an
+      // external cancellation (scenario load, relaunch, terrain change)
+      // bumps the token without claiming the button, and the old code's
+      // token-equality check left it stuck on 'Loading…' forever.
+      if (osmBtnOwner === token) {
+        osmBtnOwner = 0;
         osmLoadBtn.disabled = false; osmLoadBtn.textContent = 'Load real area';
       }
     }
@@ -663,11 +683,14 @@
     let ll = osmParseLatLon(txt), name = null;
     if (!ll) {
       osmNote.innerHTML = 'Finding the place&hellip;';
+      const gen = osmLoadToken; // geocoding is cancellable too (finding #8)
       try {
         const g = await osmGeocode(txt);
+        if (gen !== osmLoadToken) return; // user moved on while we searched
         ll = g; name = (g.name || txt).split(',').slice(0, 2).join(',');
       } catch (e) {
-        osmNote.innerHTML = '<b style="color:var(--lost)">' + e.message + '</b> &middot; Check the spelling, or paste coordinates as <b>lat, lon</b>.';
+        if (gen !== osmLoadToken) return;
+        osmNote.innerHTML = '<b style="color:var(--lost)">' + escHtml(e.message) + '</b> &middot; Check the spelling, or paste coordinates as <b>lat, lon</b>.';
         return;
       }
     }
@@ -958,7 +981,10 @@
   killBtn.addEventListener('click', () => {
     if (selected && alive(selected)) { killDrone(swarm, selected); }
   });
-  resetBtn.addEventListener('click', resetSwarm);
+  resetBtn.addEventListener('click', () => {
+    osmLoadToken++; // a manual relaunch abandons any in-flight area fetch (finding #8)
+    resetSwarm();
+  });
 
   // --- ATAK / TAK (Cursor-on-Target) --------------------------------------------
   const takLat = el('takLat'), takLon = el('takLon');
