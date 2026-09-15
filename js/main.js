@@ -1379,7 +1379,7 @@
   let lastT = performance.now();
   let panelAccum = 0;
   let simAccum = 0;
-  const FIXED_SIM_STEP_SEC = 0.05; // 20 Hz fixed simulation timestep
+  const FIXED_SIM_STEP_SEC = SIM_DT_SEC; // ONE step policy across browser/batch/bench (finding #28)
   function frame(now) {
     const realDt = Math.min(0.2, (now - lastT) / 1000);
     lastT = now;

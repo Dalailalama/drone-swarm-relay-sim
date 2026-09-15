@@ -15,6 +15,9 @@ const { loadCore } = require('../test/helpers/sim.js');
 
 const R = require('../js/radios.js');
 const A = require('../js/airframes.js');
+// Benchmark the SAME step the product runs (finding #28) — a ms/tick number
+// at a different dt measures a different simulator.
+const { SIM_DT_SEC } = require('../js/swarm.js');
 
 const SIM_SECONDS = 90;
 const FLEET_SIZES = [10, 50, 100, 140];
@@ -34,16 +37,18 @@ function runOnce(n) {
   });
   let st = null;
   const t0 = process.hrtime.bigint();
-  while (s.time < SIM_SECONDS) st = ctx.stepSwarm(s, 0.25);
+  while (s.time < SIM_SECONDS) st = ctx.stepSwarm(s, SIM_DT_SEC);
   const wallMs = Number(process.hrtime.bigint() - t0) / 1e6;
   return {
     n,
     wallMs,
-    msPerTick: wallMs / (SIM_SECONDS / 0.25),
+    msPerTick: wallMs / (SIM_SECONDS / SIM_DT_SEC),
     speedup: SIM_SECONDS / (wallMs / 1000),
     delivered: s.net.delivered,
     droppedPct: 100 * s.net.dropped / Math.max(1, s.net.delivered + s.net.dropped),
-    uptimePct: 100 * s.stats.connSec / s.stats.tSec,
+    // Fleet-link uptime: this benchmark measures SCALE cost mid-mission, and
+    // objective uptime is honestly 0% while a 2.4 km transit is under way.
+    uptimePct: 100 * (s.stats.fleetConnSec || 0) / s.stats.tSec,
   };
 }
 
@@ -72,10 +77,11 @@ function main() {
     '',
     '- Node ' + process.version + ' · ' + os.platform() + ' ' + os.arch() +
       ' · ' + os.cpus()[0].model.trim(),
-    '- Mission: RFD900x mesh @ 250 kbps video backhaul, 2.4 km objective, 90 sim-seconds, dt 0.25',
+    '- Mission: RFD900x mesh @ 250 kbps video backhaul, 2.4 km objective, ' +
+      SIM_SECONDS + ' sim-seconds, dt ' + SIM_DT_SEC + ' (the browser\'s own step)',
     '- The binding constraint at scale is the SHARED CHANNEL (broadcast row grows with N), not the physics.',
     '',
-    '| Fleet | ms/tick | × realtime | packets | link uptime | drop |',
+    '| Fleet | ms/tick | × realtime | packets | fleet-link uptime | drop |',
     '|---|---|---|---|---|---|',
     ...rows.map(fmtRow),
     '',

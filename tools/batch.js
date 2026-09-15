@@ -18,6 +18,9 @@ const stats = require('../js/batchstats.js');
 
 const R = require('../js/radios.js');
 const A = require('../js/airframes.js');
+// The browser's exact timestep — equal seeds must replay identically here
+// (finding #28), or batch results describe a different simulator.
+const { SIM_DT_SEC } = require('../js/swarm.js');
 
 // Guardrails so a stray config can't wedge the server for an hour.
 // The work budget is measured in DRONE-SECONDS of simulation (runs × sim
@@ -156,7 +159,7 @@ function runOne(ctx, cfg, cell, seed) {
   let st = null;
   let freshSum = 0, ticks = 0;
   while (s.time < cfg.durationSec) {
-    st = ctx.stepSwarm(s, 0.25);
+    st = ctx.stepSwarm(s, SIM_DT_SEC);
     freshSum += st.freshCount; ticks++;
   }
   const vidTotal = s.net.vid.framesDelivered + s.net.vid.droppedFrames;
