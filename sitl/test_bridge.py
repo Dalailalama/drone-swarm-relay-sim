@@ -43,6 +43,7 @@ import sys
 import traceback
 import types
 from collections import deque
+from unittest.mock import patch
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
@@ -59,6 +60,7 @@ VERBOSE = "--verbose" in sys.argv or "-v" in sys.argv
 # MAVLink enum values used by the bridge (real numbers from the MAVLink
 # common dialect, so the stub can't drift into agreeing with a typo).
 MAV_CMD_NAV_TAKEOFF = 22
+MAV_CMD_NAV_LAND = 21
 MAV_CMD_COMPONENT_ARM_DISARM = 400
 MAV_CMD_SET_MESSAGE_INTERVAL = 511
 MAV_RESULT_ACCEPTED = 0
@@ -101,6 +103,10 @@ def pos_msg(north: float, east: float, down: float) -> FakeMsg:
     return FakeMsg("LOCAL_POSITION_NED", x=north, y=east, z=down)
 
 
+def ext_state_msg(landed_state: int = 1) -> FakeMsg:
+    return FakeMsg("EXTENDED_SYS_STATE", landed_state=landed_state)
+
+
 class FakeMav:
     """The `.mav` send interface of a pymavlink connection."""
 
@@ -110,6 +116,8 @@ class FakeMav:
     def command_long_send(self, target_system, target_component, command, confirmation, *params):
         if command == MAV_CMD_NAV_TAKEOFF:
             self.conn.sent.append(("takeoff", params[6]))  # param7 = target altitude
+        elif command == MAV_CMD_NAV_LAND:
+            self.conn.sent.append(("land", params))
         elif command == MAV_CMD_SET_MESSAGE_INTERVAL:
             self.conn.sent.append(("msg_interval", (params[0], params[1])))
         else:  # pragma: no cover - the bridge sends nothing else
@@ -476,7 +484,16 @@ async def scenario_happy_path() -> None:
     assert isinstance(telem["t"], float)
     by_id = {v["id"]: v for v in telem["vehicles"]}
     assert set(by_id) == {"DR-1", "DR-2"}, by_id
-    assert set(by_id["DR-1"]) == {"id", "x", "y", "alt", "connected"}, by_id["DR-1"]
+    assert set(by_id["DR-1"]) == {
+        "id", "x", "y", "alt", "connected", "ready", "state", "positionAge", "positionSeq",
+        "armed", "heartbeatAge", "landed", "landedAge", "landedSeq", "serviceId",
+        "servicePhase", "origin",
+    }, by_id["DR-1"]
+    assert by_id["DR-1"]["ready"] is True and by_id["DR-1"]["state"] == "ready"
+    assert 0 <= by_id["DR-1"]["positionAge"] < bridge.POSITION_STALE_S
+    assert by_id["DR-1"]["positionSeq"] > 0
+    assert by_id["DR-2"]["ready"] is False and by_id["DR-2"]["state"] == "wait-heartbeat"
+    assert by_id["DR-2"]["positionAge"] is None and by_id["DR-2"]["positionSeq"] == 0
     assert by_id["DR-1"]["connected"] is True
     assert by_id["DR-1"]["alt"] > 1.0, by_id["DR-1"]
     assert abs(by_id["DR-1"]["x"] - 12.0) < 1e-9 and abs(by_id["DR-1"]["y"] - 8.0) < 1e-9, by_id["DR-1"]
@@ -488,7 +505,8 @@ async def scenario_happy_path() -> None:
     assert c1.count("arm") == 1, c1.sent
     assert c1.count("takeoff") == 1, c1.sent
     assert c1.details("takeoff") == [30.0], c1.sent
-    assert c1.count("msg_interval") == 1, c1.sent
+    assert c1.count("msg_interval") == 2 and (32, 100000) in c1.details("msg_interval") \
+        and (245, 100000) in c1.details("msg_interval"), c1.sent
     kinds = c1.kinds()
     assert kinds.index("set_mode") < kinds.index("arm") < kinds.index("takeoff"), kinds
     v1 = vehicle("DR-1")
@@ -581,6 +599,7 @@ async def scenario_takeoff_never_climbs() -> None:
 async def scenario_late_vehicle_recovers() -> None:
     h = Harness()
     ws = h.client("browser-1")
+    h.telemetry()
     bridge.HEARTBEAT_WAIT_TIMEOUT_S = 0.1  # fail the first pass quickly
     bridge.INIT_EXTRA_WAIT_S = 0.5
 
@@ -594,6 +613,13 @@ async def scenario_late_vehicle_recovers() -> None:
     assert ws.said("DR-1: NO heartbeat"), ws.statuses()
     assert conn_for(14550).count("arm") == 0, "nothing may be commanded to a silent vehicle"
     assert ws.said("0/1 vehicles confirmed ready"), ws.statuses()
+    assert await wait_until(lambda: any(
+        m["vehicles"][0].get("state") == "failed:no-heartbeat"
+        for m in ws.of_type("telemetry")
+    ))
+    telem = ws.of_type("telemetry")[-1]["vehicles"][0]
+    assert telem["ready"] is False and telem["state"] == "failed:no-heartbeat"
+    assert telem["positionAge"] is None and telem["positionSeq"] == 0, telem
 
     # --- finding #13a: the vehicle boots LATE. No new "init" is sent; the
     # vehicle's own task must notice the heartbeat and run the sequence.
@@ -607,6 +633,14 @@ async def scenario_late_vehicle_recovers() -> None:
     assert conn_for(14550).count("takeoff") == 1, conn_for(14550).sent
     assert conn_for(14550).details("takeoff") == [20.0]  # per-vehicle alt, not a global
     assert vehicle("DR-1").init_state == bridge.INIT_READY
+    assert await wait_until(lambda: any(
+        m["vehicles"][0].get("ready") is True
+        for m in ws.of_type("telemetry")
+    ))
+    telem = ws.of_type("telemetry")[-1]["vehicles"][0]
+    assert telem["ready"] is True and telem["state"] == "ready"
+    assert 0 <= telem["positionAge"] < bridge.POSITION_STALE_S
+    assert telem["positionSeq"] > 0
     assert len(ws.of_type("ready")) == n_init_msgs, "recovery must not fake a second 'ready' reply"
     assert ws.said("DR-1: airborne"), ws.statuses()
 
@@ -682,9 +716,19 @@ async def scenario_goals_ownership() -> None:
     assert sp["north"] == -4.0 and sp["east"] == 10.0 and sp["down"] == -25.0, sp
     assert sp["frame"] == MAV_FRAME_LOCAL_NED and sp["mask"] == bridge.POSITION_TARGET_TYPEMASK, sp
 
-    # ...and once the controller is gone, the other client may command.
     bridge.client_disconnected(ws1)
+    ws3 = h.client("browser-3")
+    for watcher in (ws2, ws3):
+        await bridge.handle_message(watcher, goals, None, 14550)
+        assert c1.count("setpoint") == 1, c1.details("setpoint")
+        assert bridge.STATE.controller is None
+    assert bridge.STATE.vehicles["DR-1"].conn is c1
+
+    await ready_reply(ws2, h.init(ws2, count=1, alt=50.0))
+    await bridge.handle_message(ws3, goals, None, 14550)
+    assert c1.count("setpoint") == 1, c1.details("setpoint")
     await bridge.handle_message(ws2, goals, None, 14550)
+    assert bridge.STATE.controller is ws2
     assert c1.count("setpoint") == 2, c1.details("setpoint")
 
     await h.close()
@@ -694,7 +738,440 @@ async def scenario_goals_ownership() -> None:
 # Runner
 # ==========================================================================
 
+class Clock:
+    def __init__(self):
+        self.now = 0.0
+
+    def __call__(self):
+        return self.now
+
+
+async def dispatch_goals(ws):
+    await bridge.handle_message(ws, json.dumps({
+        "type": "goals",
+        "goals": [{"id": "DR-1", "x": 10.0, "y": 4.0, "alt": 25.0}],
+    }), None, 14550)
+
+
+def current_vehicle():
+    conn = conn_for(14550)
+    v = bridge.Vehicle(id="DR-1", index=0, port=14550, conn=conn,
+                       guided_mode_id=GUIDED_MODE_ID)
+    bridge.STATE.vehicles[v.id] = v
+    conn.push(hb_msg(armed=True, custom_mode=GUIDED_MODE_ID))
+    conn.push(pos_msg(-8.0, 12.0, -30.0))
+    bridge._drain_messages(v)
+    v.ready = True
+    v.init_state = bridge.INIT_READY
+    return v
+
+async def scenario_goal_safety_gates():
+    h = Harness()
+    ws = h.client("controller")
+    await h.init(ws, count=0, alt=30.0)
+    clock = Clock()
+    with patch.object(bridge, "_now", clock):
+        v = current_vehicle()
+        conn = v.conn
+        await dispatch_goals(ws)
+        assert conn.count("setpoint") == 1
+        for state in (bridge.INIT_WAIT_HEARTBEAT, bridge.INIT_CONFIRM_MODE,
+                      bridge.INIT_CONFIRM_ARM, bridge.INIT_CONFIRM_TAKEOFF,
+                      "failed:arm", "failed:takeoff", "failed:no-heartbeat"):
+            v.init_state = state
+            v.ready = False
+            await dispatch_goals(ws)
+            assert conn.count("setpoint") == 1, f"goal escaped during {state}"
+        v.init_state = bridge.INIT_READY
+        await dispatch_goals(ws)
+        assert conn.count("setpoint") == 1, "ready flag required"
+        v.ready = True
+        v.init_state = bridge.INIT_CONFIRM_TAKEOFF
+        await dispatch_goals(ws)
+        assert conn.count("setpoint") == 1, "READY state required"
+        v.init_state = bridge.INIT_READY
+        for field, value in (("last_heartbeat", None), ("base_mode", 0),
+                             ("custom_mode", 5), ("custom_mode", None),
+                             ("guided_mode_id", None), ("conn", None)):
+            original = getattr(v, field)
+            setattr(v, field, value)
+            await dispatch_goals(ws)
+            assert conn.count("setpoint") == 1, f"goal escaped with {field}={value}"
+            setattr(v, field, original)
+        clock.now = bridge.HEARTBEAT_STALE_S
+        conn.push(pos_msg(-8.0, 12.0, -30.0))
+        bridge._drain_messages(v)
+        await dispatch_goals(ws)
+        assert conn.count("setpoint") == 1, "stale heartbeat allowed a goal"
+        conn.push(hb_msg(armed=True, custom_mode=GUIDED_MODE_ID))
+        bridge._drain_messages(v)
+        await dispatch_goals(ws)
+        assert conn.count("setpoint") == 2
+        clock.now += bridge.POSITION_STALE_S
+        conn.push(hb_msg(armed=True, custom_mode=GUIDED_MODE_ID))
+        bridge._drain_messages(v)
+        assert v.connected
+        await dispatch_goals(ws)
+        assert conn.count("setpoint") == 2, "fresh heartbeat concealed stale position"
+        conn.push(pos_msg(-8.0, 12.0, -30.0))
+        bridge._drain_messages(v)
+        await dispatch_goals(ws)
+        assert conn.count("setpoint") == 3
+        v.last_position = None
+        await dispatch_goals(ws)
+        assert conn.count("setpoint") == 3, "never-seen position allowed a goal"
+        assert conn.details("setpoint")[-1] == {
+            "north": -4.0, "east": 10.0, "down": -25.0,
+            "frame": MAV_FRAME_LOCAL_NED, "mask": bridge.POSITION_TARGET_TYPEMASK,
+        }
+        v.service_phase = "landing"
+        await dispatch_goals(ws)
+        assert conn.count("setpoint") == 3, "goals must stop during a landing service"
+    await h.close()
+
+
+async def scenario_position_receipt_clock():
+    h = Harness()
+    clock = Clock()
+    with patch.object(bridge, "_now", clock):
+        v = bridge.Vehicle(id="DR-1", index=0, port=14550, conn=conn_for(14550))
+        assert v.to_telemetry().get("positionAge", "missing") is None
+        assert v.to_telemetry()["positionSeq"] == 0
+        assert not v.position_fresh
+        v.alt = 30.0
+        assert not v.airborne, "cached altitude without a sample is not airborne evidence"
+        v.conn.push(hb_msg())
+        v.conn.push(ack_msg(MAV_CMD_NAV_TAKEOFF))
+        bridge._drain_messages(v)
+        assert v.last_position is None
+        assert v.to_telemetry()["positionSeq"] == 0
+        v.conn.push(pos_msg(-8.0, 12.0, -30.0))
+        bridge._drain_messages(v)
+        assert v.last_position == 0.0
+        assert v.position_fresh and v.airborne
+        first = v.to_telemetry()
+        assert first["positionAge"] == 0.0 and first["positionSeq"] == 1
+        assert (first["x"], first["y"], first["alt"]) == (12.0, 8.0, 30.0)
+        clock.now = bridge.POSITION_STALE_S - 0.01
+        assert v.position_fresh
+        clock.now = bridge.POSITION_STALE_S
+        v.conn.push(hb_msg())
+        v.conn.push(ack_msg(MAV_CMD_NAV_TAKEOFF))
+        bridge._drain_messages(v)
+        assert v.connected and not v.position_fresh and not v.airborne
+        stale = v.to_telemetry()
+        assert stale["positionAge"] == bridge.POSITION_STALE_S
+        assert stale["positionSeq"] == 1 and v.last_position == 0.0
+        assert v.to_telemetry() == stale, "serialization must not advance the sample"
+        for _ in range(2):
+            v.conn.push(pos_msg(-8.0, 12.0, -30.0))
+        bridge._drain_messages(v)
+        assert v.position_fresh and v.airborne
+        assert v.to_telemetry()["positionSeq"] == 3
+        assert v.to_telemetry()["positionAge"] == 0.0
+    await h.close()
+
+
+async def scenario_stale_climb_cannot_confirm():
+    h = Harness()
+    clock = Clock()
+    with patch.object(bridge, "_now", clock):
+        v = current_vehicle()
+        clock.now = 10.0
+        v.conn.push(hb_msg(armed=True, custom_mode=GUIDED_MODE_ID))
+        v.conn.push(ack_msg(MAV_CMD_NAV_TAKEOFF))
+        bridge._drain_messages(v)
+        v.ready = False
+        v.init_state = bridge.INIT_CONFIRM_TAKEOFF
+        v.step_started_at = clock.now
+        v.step_sent_at = clock.now
+        await bridge._advance_init(v)
+        assert not v.ready, "stale climb confirmed takeoff"
+        v.init_state = "failed:takeoff"
+        v.failed_at = 0.0
+        await bridge._advance_init(v)
+        assert not v.ready and v.init_state == bridge.INIT_CONFIRM_TAKEOFF
+        v.conn.push(ack_msg(MAV_CMD_NAV_TAKEOFF))
+        v.conn.push(pos_msg(0.0, 0.0, -30.0))
+        bridge._drain_messages(v)
+        await bridge._advance_init(v)
+        assert v.ready and v.init_state == bridge.INIT_READY
+    await h.close()
+
+
+async def scenario_init_disconnect_races():
+    for phase in ("lock", "status", "stop", "first-pass", "summary"):
+        h = Harness()
+        ws = h.client("departing")
+        watcher = h.client("watcher")
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        original_send = ws.send
+        original_stop = bridge._stop_all_vehicles
+
+        async def send(raw):
+            msg = json.loads(raw)
+            should_pause = msg["type"] == "status" and (
+                (phase == "status" and "initializing" in msg["msg"])
+                or (phase == "summary" and "confirmed ready" in msg["msg"]))
+            if should_pause:
+                entered.set()
+                await release.wait()
+            await original_send(raw)
+
+        async def stop():
+            await original_stop()
+            if phase == "stop":
+                entered.set()
+                await release.wait()
+
+        ws.send = send
+        with patch.object(bridge, "_stop_all_vehicles", stop):
+            if phase == "lock":
+                await bridge.STATE.init_lock.acquire()
+            task = h.init(ws, count=1 if phase == "first-pass" else 0, alt=30.0)
+            if phase == "lock":
+                await asyncio.sleep(0)
+            elif phase == "first-pass":
+                assert await wait_until(lambda: "DR-1" in bridge.STATE.vehicles)
+            else:
+                await asyncio.wait_for(entered.wait(), 1.0)
+            bridge.client_disconnected(ws)
+            await dispatch_goals(watcher)
+            assert bridge.STATE.controller is None, phase
+            if phase == "lock":
+                bridge.STATE.init_lock.release()
+            elif phase == "first-pass":
+                vehicle("DR-1").first_pass_done.set()
+            release.set()
+            await asyncio.wait_for(task, 1.0)
+            assert bridge.STATE.controller is None, f"departed client acquired during {phase}"
+            assert not ws.of_type("ready"), f"departed client got ready during {phase}"
+            if phase in ("lock", "status", "stop"):
+                assert not bridge.STATE.vehicles and not bridge.STATE.vehicle_tasks, phase
+        await ready_reply(watcher, h.init(watcher, count=0, alt=30.0))
+        assert bridge.STATE.controller is watcher
+        await h.close()
+
+
+async def scenario_controller_checks_after_awaits():
+    h = Harness()
+    first = h.client("first-watcher")
+    second = h.client("second-watcher")
+    await bridge.STATE.init_lock.acquire()
+    first_init = h.init(first, count=0, alt=30.0)
+    second_init = h.init(second, count=0, alt=30.0)
+    await asyncio.sleep(0)
+    bridge.STATE.init_lock.release()
+    await asyncio.gather(first_init, second_init)
+    assert bridge.STATE.controller is first
+    assert first.of_type("ready") and not second.of_type("ready")
+    assert second.said("bridge is controlled by another client")
+    clock = Clock()
+    with patch.object(bridge, "_now", clock):
+        v = current_vehicle()
+        original_check = bridge._may_control
+
+        async def check(ws, **kwargs):
+            allowed = await original_check(ws, **kwargs)
+            await asyncio.sleep(0)
+            bridge.client_disconnected(ws)
+            return allowed
+
+        with patch.object(bridge, "_may_control", check):
+            await dispatch_goals(first)
+        assert v.conn.count("setpoint") == 0, "dispatcher used ownership from before await"
+        assert bridge.STATE.controller is None
+    await h.close()
+
+
+async def scenario_disconnected_controller_rejected():
+    h = Harness()
+    ws = h.client("departing")
+    await h.init(ws, count=0, alt=30.0)
+    clock = Clock()
+    with patch.object(bridge, "_now", clock):
+        v = current_vehicle()
+        bridge.STATE.clients.discard(ws)
+        await dispatch_goals(ws)
+        assert v.conn.count("setpoint") == 0, "controller identity without membership allowed goals"
+        await h.init(ws, count=0, alt=30.0)
+        assert bridge.STATE.vehicles.get(v.id) is v, "disconnected init rebuilt fleet"
+    await h.close()
+
+
+async def scenario_origin_round_trip():
+    """F05: goals go out origin-relative and positions come back origin-relative."""
+    h = Harness()
+    ws = h.client("controller")
+    await h.init(ws, count=0, alt=30.0)
+    clock = Clock()
+    with patch.object(bridge, "_now", clock):
+        v = current_vehicle()
+        v.origin = {"frame": "common-local-origin", "x": 1000.0, "y": 500.0, "groundM": 250.0}
+        await bridge.handle_message(ws, json.dumps({
+            "type": "goals",
+            "goals": [{"id": "DR-1", "x": 10.0, "y": 4.0, "alt": 25.0}],
+        }), None, 14550)
+        assert v.conn.details("setpoint") == [{
+            "north": -4.0, "east": 10.0, "down": -25.0,
+            "frame": MAV_FRAME_LOCAL_NED, "mask": bridge.POSITION_TARGET_TYPEMASK,
+        }], v.conn.details("setpoint")
+        v.conn.push(pos_msg(-8.0, 12.0, -280.0))
+        bridge._drain_messages(v)
+        telem = v.to_telemetry()
+        assert (telem["x"], telem["y"], telem["alt"]) == (12.0, 8.0, 280.0), telem
+        assert telem["origin"] == v.origin
+    await h.close()
+
+
+async def scenario_land_service_handshake():
+    """F04: the explicit land->landed->swap->relaunch machine on the bridge."""
+    h = Harness()
+    ws = h.client("controller")
+    await h.init(ws, count=0, alt=30.0)
+    clock = Clock()
+    with patch.object(bridge, "_now", clock):
+        v = current_vehicle()
+        conn = v.conn
+        await bridge.handle_message(ws, json.dumps({
+            "type": "service", "id": "DR-1", "requestId": "svc-1", "action": "land",
+        }), None, 14550)
+        assert conn.details("land") == [(0, 0, 0, 0, 0, 0, 0)], conn.sent
+        assert v.service_phase == "landing" and not v.ready and v.init_state == "landing"
+        await dispatch_goals(ws)
+        assert conn.count("setpoint") == 0, "a landing vehicle must not receive goals"
+        fresh = 0.0
+        landed_seen = False
+        while clock.now - fresh < bridge.INIT_STEP_TIMEOUT_S:
+            clock.now += 0.1
+            conn.push(hb_msg(armed=False, custom_mode=GUIDED_MODE_ID))
+            conn.push(pos_msg(0.0, 0.0, -0.2))
+            conn.push(ext_state_msg(1))
+            bridge._drain_messages(v)
+            await bridge._advance_init(v)
+            if v.service_phase == "landed":
+                landed_seen = True
+                break
+        assert landed_seen and v.service_phase == "landed" and v.init_state == "landed", v.service_phase
+        fresh = clock.now
+        await bridge.handle_message(ws, json.dumps({
+            "type": "service", "id": "DR-1", "requestId": "svc-1", "action": "authorize",
+        }), None, 14550)
+        assert v.service_phase == "swapping" and v.init_state == "swapping"
+        await bridge.handle_message(ws, json.dumps({
+            "type": "service", "id": "DR-1", "requestId": "svc-1", "action": "complete",
+        }), None, 14550)
+        assert v.service_phase == "swapped" and v.init_state == "swapped"
+        await bridge.handle_message(ws, json.dumps({
+            "type": "service", "id": "DR-1", "requestId": "svc-1", "action": "relaunch",
+            "alt": 45.0,
+        }), None, 14550)
+        assert v.service_phase == "relaunch" and v.init_state == bridge.INIT_CONFIRM_MODE
+        assert v.takeoff_alt == 45.0 and v.launch_alt == 0.2
+        clock.now += 0.1
+        conn.push(hb_msg(armed=True, custom_mode=GUIDED_MODE_ID))
+        bridge._drain_messages(v)
+        await bridge._advance_init(v)
+        assert v.init_state == bridge.INIT_CONFIRM_ARM, v.init_state
+        clock.now += 0.1
+        conn.push(ack_msg(MAV_CMD_COMPONENT_ARM_DISARM))
+        bridge._drain_messages(v)
+        await bridge._advance_init(v)
+        assert v.init_state == bridge.INIT_CONFIRM_TAKEOFF, v.init_state
+        clock.now += 0.1
+        conn.push(ack_msg(MAV_CMD_NAV_TAKEOFF))
+        bridge._drain_messages(v)
+        await bridge._advance_init(v)
+        assert not v.ready and v.init_state == bridge.INIT_CONFIRM_TAKEOFF, "no climb, no ready"
+        clock.now += 0.1
+        conn.push(pos_msg(0.0, 0.0, -1.5))
+        bridge._drain_messages(v)
+        await bridge._advance_init(v)
+        assert v.ready and v.init_state == bridge.INIT_READY, v.init_state
+        assert v.service_phase is None, f"relaunch left phase {v.service_phase}; goals would be blocked forever"
+        await dispatch_goals(ws)
+        assert conn.count("setpoint") == 1, "post-relaunch vehicle must accept mission goals again"
+        await bridge.handle_message(ws, json.dumps({
+            "type": "service", "id": "DR-1", "requestId": "svc-2", "action": "land",
+        }), None, 14550)
+        assert v.service_phase == "landing", "a fresh request id after completion must be accepted"
+        await bridge.handle_message(ws, json.dumps({
+            "type": "service", "id": "DR-1", "requestId": "svc-2", "action": "land",
+        }), None, 14550)
+        assert v.service_phase == "landing", "a replayed request id re-ran the service"
+    await h.close()
+
+
+async def scenario_service_gates_fraud():
+    """F04: hover, missing landed bit, stale samples and bad relaunch are refused."""
+    h = Harness()
+    ws = h.client("controller")
+    await h.init(ws, count=0, alt=30.0)
+    clock = Clock()
+    with patch.object(bridge, "_now", clock):
+        v = current_vehicle()
+        conn = v.conn
+        await bridge.handle_message(ws, json.dumps({
+            "type": "service", "id": "DR-1", "requestId": "svc-1", "action": "land",
+        }), None, 14550)
+        assert v.service_phase == "landing"
+        clock.now = 0.5
+        conn.push(hb_msg(armed=True, custom_mode=GUIDED_MODE_ID))
+        conn.push(pos_msg(0.0, 0.0, -0.2))
+        bridge._drain_messages(v)
+        await bridge._advance_init(v)
+        assert v.service_phase == "landing", "disarmed evidence is required"
+        clock.now = 0.5
+        conn.push(hb_msg(armed=False, custom_mode=GUIDED_MODE_ID))
+        conn.push(pos_msg(0.0, 0.0, -0.2))
+        bridge._drain_messages(v)
+        await bridge._advance_init(v)
+        assert v.service_phase == "landing", "EXTENDED_SYS_STATE landed is required"
+        clock.now = 0.6
+        conn.push(hb_msg(armed=False, custom_mode=GUIDED_MODE_ID))
+        conn.push(pos_msg(0.0, 0.0, -0.2))
+        conn.push(ext_state_msg(1))
+        bridge._drain_messages(v)
+        await bridge._advance_init(v)
+        assert v.service_phase == "landed", v.service_phase
+        await bridge.handle_message(ws, json.dumps({
+            "type": "service", "id": "DR-1", "requestId": "svc-1", "action": "authorize",
+        }), None, 14550)
+        assert v.service_phase == "swapping"
+        clock.now = 0.6 + bridge.HEARTBEAT_STALE_S + bridge.POSITION_STALE_S
+        await bridge.handle_message(ws, json.dumps({
+            "type": "service", "id": "DR-1", "requestId": "svc-1", "action": "complete",
+        }), None, 14550)
+        assert v.service_phase == "swapping", "stale samples confirmed a swap step"
+        await bridge.handle_message(ws, json.dumps({
+            "type": "service", "id": "DR-1", "requestId": "svc-1", "action": "relaunch",
+            "alt": 40.0,
+        }), None, 14550)
+        assert v.service_phase == "swapping", "stale samples authorized a relaunch"
+        clock.now += 0.1
+        conn.push(hb_msg(armed=False, custom_mode=GUIDED_MODE_ID))
+        conn.push(pos_msg(0.0, 0.0, -0.2))
+        conn.push(ext_state_msg(1))
+        bridge._drain_messages(v)
+        await bridge.handle_message(ws, json.dumps({
+            "type": "service", "id": "DR-1", "requestId": "svc-1", "action": "relaunch",
+            "alt": 0.0,
+        }), None, 14550)
+        assert v.service_phase == "swapping", "a zero-alt relaunch must be refused"
+    await h.close()
+
+
 SCENARIOS = [
+    ("F02: queued init and dispatcher recheck ownership after awaits", scenario_controller_checks_after_awaits),
+    ("F01: dispatcher gates goals on readiness and current vehicle evidence", scenario_goal_safety_gates),
+    ("F03: position receipt age and sequence are independent of heartbeat and broadcasts", scenario_position_receipt_clock),
+    ("F03: stale climb cannot confirm takeoff or late recovery", scenario_stale_climb_cannot_confirm),
+    ("F04: explicit land/landed/swap/relaunch service handshake is the only rearm path", scenario_land_service_handshake),
+    ("F04: hover, missing landed bit, stale samples and bad relaunch are refused", scenario_service_gates_fraud),
+    ("F05: goals leave origin-relative and positions return origin-relative", scenario_origin_round_trip),
+    ("F02: disconnect at init await boundaries cannot acquire or reply", scenario_init_disconnect_races),
+    ("F02: disconnected controller identity cannot command or init", scenario_disconnected_controller_rejected),
     ("happy path: both vehicles confirmed ready, telemetry flows during a slow neighbour's init", scenario_happy_path),
     ("arm rejected: reported not-ready with an honest status, takeoff never commanded", scenario_arm_rejected),
     ("takeoff ACKed but no climb: not ready, reported as failed:takeoff", scenario_takeoff_never_climbs),

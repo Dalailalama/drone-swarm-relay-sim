@@ -17,6 +17,81 @@ const A = require('../js/airframes.js');
 const SIK = R.RADIOS.find(r => r.id === 'sik-v3');
 const Q450 = A.AIRFRAMES.find(a => a.id === 'q450');
 
+test('F11: tether learns upstream position only through delivered telemetry and orders', () => {
+  const s = mk();
+  const [d, up] = s.drones;
+  d.x = 100; d.y = 0;
+  up.x = 0; up.y = 0;
+  d.order.upstream = up.id;
+  d.upMarginEma = -20;
+  const receive = (x, at) => {
+    d.inbox.push({ kind: 'cmd', src: 'C2', payload: {
+      ...d.order, upstreamPos: { x, y: 0, at }, c2: { x: 0, y: 0, at },
+    } });
+    d.nextTlm = Infinity;
+    ctx.droneComms(s, d);
+  };
+  receive(0, 0);
+  const before = ctx.tetherGoal(s, d, { x: 200, y: 0 });
+  assert.strictEqual(before.x, 60);
+  up.x = -1000;
+  assert.deepStrictEqual(ctx.tetherGoal(s, d, { x: 200, y: 0 }), before);
+  s.time = 1;
+  receive(-1000, 1);
+  assert.strictEqual(ctx.tetherGoal(s, d, { x: 200, y: 0 }).x, -340);
+  receive(0, 0);
+  assert.strictEqual(ctx.tetherGoal(s, d, { x: 200, y: 0 }).x, -340);
+});
+
+test('F11: missing or stale upstream observations hold a weak-link drone in place', () => {
+  const s = mk();
+  const d = s.drones[0];
+  d.x = 100; d.y = 0; d.upMarginEma = -20;
+  d.order.upstream = s.drones[1].id;
+  assert.strictEqual(ctx.tetherGoal(s, d, { x: 200, y: 0 }).x, 100);
+  d.neighborKnown[d.order.upstream] = { x: 0, y: 0, at: 0 };
+  s.time = 100;
+  assert.strictEqual(ctx.tetherGoal(s, d, { x: 200, y: 0 }).x, 100);
+  d.order.upstream = 'C2';
+  s.base.x = -1000;
+  assert.strictEqual(ctx.tetherGoal(s, d, { x: 200, y: 0 }).x, 100);
+});
+
+for (const broadcastC2 of [false, true]) {
+  test('F11: timestamped upstream observations traverse telemetry and ' + (broadcastC2 ? 'broadcast' : 'unicast'), () => {
+    const s = mk();
+    const [d, up] = s.drones;
+    s.broadcastC2 = broadcastC2;
+    s.c2.nextCmd = Infinity;
+    d.x = 100; d.y = 0; up.x = 0; up.y = 0;
+    up.gpsDenied = true; up.belX = 0; up.belY = 0;
+    d.nextTlm = up.nextTlm = 0;
+    ctx.droneComms(s, d);
+    ctx.droneComms(s, up);
+    d.nextTlm = up.nextTlm = Infinity;
+    up.x = -200;
+    const network = () => {
+      for (let i = 0; i < 80; i++) { s.time += 0.05; ctx.stepNet(s, 0.05); }
+    };
+    network();
+    ctx.c2Step(s);
+    assert.strictEqual(s.c2.known[up.id].x, 0);
+    assert.strictEqual(s.c2.known[up.id].posAt, 0);
+    s.c2.relays = [up.id];
+    s.c2.nextCmd = 0;
+    ctx.c2Step(s);
+    assert.strictEqual(d.neighborKnown[up.id], undefined);
+    network();
+    ctx.droneComms(s, d);
+    assert.strictEqual(d.order.upstream, up.id);
+    assert.strictEqual(d.neighborKnown[up.id].x, 0);
+    assert.strictEqual(d.neighborKnown[up.id].at, 0);
+    assert.ok(d.neighborKnown[up.id].receivedAt > 0);
+    d.upMarginEma = -20;
+    assert.strictEqual(ctx.tetherGoal(s, d, { x: 200, y: 0 }).x, 60);
+  });
+}
+
 function mk() {
   return ctx.makeSwarm({
     count: 2, airframe: Q450, radio: SIK, envFactor: 1,

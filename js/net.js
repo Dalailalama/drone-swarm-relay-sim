@@ -44,7 +44,7 @@ function makeNet(seed) {
     // shared-channel accounting: ACTUAL on-air seconds, billed per channel at
     // the moment of transmission (never at enqueue — see stepNet), plus an
     // estimate of queued-but-unsent air per channel for latency decisions
-    airAccumByChan: {}, chanPendingSec: {}, utilSince: 0, utilization: 0,
+    airAccumByChan: {}, airIntervals: [], chanPendingSec: {}, utilSince: 0, utilization: 0,
     // rolling capture log (like a Wireshark trace): last CAP_MAX events
     cap: [], capSeq: 0,
     // packet id counter — always advances, independent of capture being on,
@@ -107,8 +107,22 @@ function channelKeyOf(radio) {
 // reservation to unwind (findings #3/#4/#5/#16). `chanPendingSec` tracks
 // queued-but-unsent air per channel as an estimate for latency decisions
 // (video's freshness guard), not as a reservation.
-function billAir(s, chan, secs) {
-  s.net.airAccumByChan[chan] = (s.net.airAccumByChan[chan] || 0) + secs;
+function billAir(s, chan, start, end) {
+  const interval = { chan, start, end };
+  s.net.airIntervals.push(interval);
+  return interval;
+}
+
+function accountAir(s, until) {
+  let write = 0;
+  for (const air of s.net.airIntervals) {
+    const end = Math.min(until, air.end);
+    const secs = Math.max(0, end - air.start);
+    s.net.airAccumByChan[air.chan] = (s.net.airAccumByChan[air.chan] || 0) + secs;
+    air.start = Math.max(air.start, end);
+    if (air.end > until) s.net.airIntervals[write++] = air;
+  }
+  s.net.airIntervals.length = write;
 }
 
 function pendAir(s, chan, secs) {
@@ -203,7 +217,7 @@ function commitBcast(s, b, eStart) {
     const rest = b.airtime * (1 - rad0.dutyCycle) / rad0.dutyCycle;
     s.net.nodeDutyUntil[b.srcId] = Math.max(eStart + b.airtime, s.net.nodeDutyUntil[b.srcId] || 0) + rest;
   }
-  billAir(s, b.chan, b.airtime);
+  billAir(s, b.chan, eStart, eStart + b.airtime);
   s.net.txAt[b.srcId] = eStart;
   b.committed = true;
   b.tFire = eStart + b.airtime; // reception rolls when the last bit lands
@@ -226,62 +240,97 @@ function dropPacketBookkeeping(s, p, reason, from, to, marginDb) {
   capLog(s, { ev: 'drop', reason, pid: p.pid, kind: p.kind, from, to, marginDb });
 }
 
+function packetExpired(s, p, at) {
+  const ttl = p.kind === 'vid' ? 3 : (p.kind === 'tlm' ? 6 : 10);
+  return at - (p.tSent ?? s.time) > ttl;
+}
+
+function packetEndpointFailure(s, p) {
+  const from = p.path[p.hop], to = p.path[p.hop + 1];
+  const sender = nodePos(s, from), receiver = nodePos(s, to);
+  if (from !== 'C2' && (!sender || !alive(sender))) return 'dead-src';
+  if (to !== 'C2' && (!receiver || !alive(receiver))) return 'dead-dst';
+  return null;
+}
+
+function discardPacket(s, p, reason) {
+  if (!p.fired) pendAir(s, p.res.chan, -p.res.singleTx);
+  const a = p.attempt;
+  if (a && reason === 'dead-src' && s.time < a.end) {
+    a.air.end = s.time;
+    if (s.net.chanBusyUntil[p.res.chan] === a.end) s.net.chanBusyUntil[p.res.chan] = s.time;
+    if (s.net.nodeTxUntil[p.res.from] === a.end) s.net.nodeTxUntil[p.res.from] = s.time;
+    const dc = p.res.rad && p.res.rad.dutyCycle;
+    if (dc && dc < 1) s.net.nodeDutyUntil[p.res.from] = s.time + (s.time - a.start) * (1 - dc) / dc;
+  }
+  dropPacketBookkeeping(s, p, reason, p.path[p.hop], p.path[p.hop + 1], p.marginDb);
+  p._gone = true;
+}
+
 function commitPacket(s, p, eStart) {
-  // The transmission starts NOW — evaluate the world as it is, not as it
-  // was when the packet was queued (finding #3).
+  if (packetExpired(s, p, s.time) || packetExpired(s, p, eStart)) {
+    discardPacket(s, p, 'ttl-expired');
+    return;
+  }
+  const failure = packetEndpointFailure(s, p);
+  if (failure) { discardPacket(s, p, failure); return; }
   pendAir(s, p.res.chan, -p.res.singleTx);
   const from = p.path[p.hop], to = p.path[p.hop + 1];
-  const dFrom = from === 'C2' ? s.base : nodePos(s, from);
-  if (from !== 'C2' && (!dFrom || !alive(dFrom))) {
-    // A dead sender transmits nothing — it just leaves the queue.
-    dropPacketBookkeeping(s, p, 'dead-src', from, to);
-    p._gone = true;
-    return;
-  }
-  const dTo = to === 'C2' ? s.base : nodePos(s, to);
-  const rxAlive = to === 'C2' || (dTo && alive(dTo));
-  // A dead/vanished receiver still costs the sender every attempt — it
-  // transmits into silence and burns the full retry budget.
-  const r = rxAlive ? hopDelivered(s, from, to) : -1;
-  const attempts = r < 0 ? HOP_RETRIES + 1 : r + 1;
-  const actualAir = attempts * p.res.singleTx;
-  const actualDur = actualAir + (attempts - 1) * HOP_RETRY_GAP_SEC;
-  s.net.chanBusyUntil[p.res.chan] = eStart + actualDur;
-  s.net.nodeTxUntil[p.res.from] = eStart + actualDur;
+  const end = eStart + p.res.singleTx;
+  const margin = liveMarginDb(s, from, to);
+  const success = margin > 0 && s.net.rng() < pktSuccessProb(margin);
+  s.net.chanBusyUntil[p.res.chan] = end;
+  s.net.nodeTxUntil[from] = end;
   const dc = p.res.rad && p.res.rad.dutyCycle;
-  if (dc && dc < 1) {
-    const rest = actualAir * (1 - dc) / dc;
-    s.net.nodeDutyUntil[p.res.from] = Math.max(eStart + actualDur, s.net.nodeDutyUntil[p.res.from] || 0) + rest;
-  }
-  billAir(s, p.res.chan, actualAir);
-  s.net.txAt[from] = eStart; // actual emission — what a direction-finder senses
-  if (r < 0) {
-    dropPacketBookkeeping(s, p, rxAlive ? 'link-fail' : 'dead-dst', from, to,
-      rxAlive ? +liveMarginDb(s, from, to).toFixed(1) : undefined);
-    p._gone = true;
+  if (dc && dc < 1) s.net.nodeDutyUntil[from] = end + p.res.singleTx * (1 - dc) / dc;
+  p.attempt = { start: eStart, end, success, air: billAir(s, p.res.chan, eStart, end) };
+  p.marginDb = +margin.toFixed(1);
+  s.net.txAt[from] = eStart;
+  p.fired = true;
+  if (p.tHopStart == null) p.tHopStart = eStart;
+}
+
+function completePacketAttempt(s, p) {
+  const a = p.attempt;
+  p.attempt = null;
+  if (a.success) {
+    p.tArrive = a.end + NET.procDelaySec;
     return;
   }
-  p.retries = r;
-  p.fired = true;
-  p.tHopStart = eStart;
-  p.tArrive = eStart + actualDur + NET.procDelaySec;
+  if (p.retries >= HOP_RETRIES) {
+    discardPacket(s, p, 'link-fail');
+    return;
+  }
+  p.retries++;
+  p.fired = false;
+  p.tReady = a.end + HOP_RETRY_GAP_SEC;
+  pendAir(s, p.res.chan, p.res.singleTx);
 }
 
 function commitTransmissions(s) {
+  for (const p of s.net.packets) {
+    if (p._gone) continue;
+    const failure = p.attempt ? packetEndpointFailure(s, p) : null;
+    if (failure) discardPacket(s, p, failure);
+    else if (packetExpired(s, p, s.time)) discardPacket(s, p, 'ttl-expired');
+  }
   for (;;) {
-    let best = null, bestStart = Infinity, bestIsBcast = false;
+    let best = null, bestStart = Infinity, bestIsBcast = false, completing = false;
     for (const b of s.net.bcasts) {
       if (b.committed || b._gone) continue;
       const e = eligibleStartBcast(s, b);
       if (e < bestStart) { bestStart = e; best = b; bestIsBcast = true; }
     }
     for (const p of s.net.packets) {
-      if (p.fired || p._gone) continue;
-      const e = eligibleStartPkt(s, p);
-      if (e < bestStart) { bestStart = e; best = p; bestIsBcast = false; }
+      if (p._gone || (p.fired && !p.attempt)) continue;
+      const e = p.attempt ? p.attempt.end : eligibleStartPkt(s, p);
+      if (e < bestStart || (p.attempt && e === bestStart)) {
+        bestStart = e; best = p; bestIsBcast = false; completing = !!p.attempt;
+      }
     }
     if (!best || bestStart > s.time) return;
     if (bestIsBcast) commitBcast(s, best, bestStart);
+    else if (completing) completePacketAttempt(s, best);
     else commitPacket(s, best, bestStart);
   }
 }
@@ -507,6 +556,8 @@ function preparePacketHop(s, p) {
   pendAir(s, chan, singleTxSec);
   p.res = { chan, from, singleTx: singleTxSec, rad };
   p.fired = false;
+  p.attempt = null;
+  p.retries = 0;
   p.tHopStart = null;
   p.tArrive = null;
   return true;
@@ -651,23 +702,13 @@ function stepNet(s, dt) {
   for (let i = 0; i < len; i++) {
     const p = packets[i];
     if (p._gone) continue; // dropped during the commit phase
-    // TTL by kind (3s video, 6s telemetry, 10s commands). `??` not `||`:
-    // a packet sent at t=0 has tSent=0 and must age like any other. An
-    // expired packet that never transmitted hands its queued air back.
-    const ttl = p.kind === 'vid' ? 3.0 : (p.kind === 'tlm' ? 6.0 : 10.0);
-    if (s.time - (p.tSent ?? s.time) > ttl) {
-      if (!p.fired && p.res) pendAir(s, p.res.chan, -p.res.singleTx);
-      dropPacketBookkeeping(s, p, 'ttl-expired');
-      continue;
-    }
-
-    if (!p.fired || s.time < p.tArrive) {
+    if (!p.fired || p.attempt || p.tArrive == null || s.time < p.tArrive) {
       packets[writeIdx++] = p; // waiting for its slot, or in flight
       continue;
     }
 
     const from = p.path[p.hop], to = p.path[p.hop + 1];
-    capLog(s, { ev: 'hop', pid: p.pid, kind: p.kind, from, to, retries: p.retries, marginDb: +liveMarginDb(s, from, to).toFixed(1) });
+    capLog(s, { ev: 'hop', pid: p.pid, kind: p.kind, from, to, retries: p.retries, marginDb: p.marginDb });
     p.hop++;
     if (p.hop >= p.path.length - 1) {
       capLog(s, { ev: 'deliver', pid: p.pid, kind: p.kind, src: p.src, dst: p.dst });
@@ -690,14 +731,16 @@ function stepNet(s, dt) {
   // Sliding utilization estimate from ACTUAL on-air seconds, per channel —
   // independent bands are independent air, so report the busiest one rather
   // than summing unrelated spectrum into a number that can exceed 1.
-  if (s.time - s.net.utilSince >= 5) {
-    const w = s.time - s.net.utilSince;
+  while (s.time - s.net.utilSince >= 5) {
+    const end = s.net.utilSince + 5;
+    accountAir(s, end);
     let peak = 0;
-    for (const k in s.net.airAccumByChan) peak = Math.max(peak, s.net.airAccumByChan[k] / w);
+    for (const k in s.net.airAccumByChan) peak = Math.max(peak, s.net.airAccumByChan[k] / 5);
     s.net.utilization = Math.min(1, peak);
     s.net.airAccumByChan = {};
-    s.net.utilSince = s.time;
+    s.net.utilSince = end;
   }
+  accountAir(s, s.time);
 }
 
 // Export the capture as JSONL (one JSON event per line) — a portable trace

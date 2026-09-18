@@ -17,6 +17,20 @@ Coordinate frame (matches bridge.py and the browser sim exactly):
     above ground. This module never touches MAVLink/NED at all -- it only
     ever works in this "sim" frame.
 
+Init/lifecycle protocol (mirrors bridge.py finding #12/#13 semantics):
+    "init" is honoured as an EXPLICIT request: it returns per-vehicle
+    entries [{id, ready, state}] where a vehicle is `ready` only after a
+    simulated GUIDED/arm/takeoff-climb sequence is confirmed, and any
+    vehicle that cannot be armed stays listed with ready:false and state
+    "failed:<step>" while its task keeps retrying in the background.
+
+Service protocol (bridge.py "service" message): the only way a vehicle
+descends, swaps and relaunches is the explicit browser-driven handshake
+    land -> (bridge confirms landed: disarmed + EXTENDED_SYS_STATE landed)
+         -> authorize (swap starts) -> complete (swap done)
+         -> relaunch (fresh init steps: mode/arm/takeoff re-confirmed)
+A vehicle is never rearmed or relaunched outside this handshake.
+
 Usage:
     python mock_vehicles.py [--host localhost] [--port 8765]
 
@@ -29,6 +43,7 @@ import argparse
 import asyncio
 import json
 import logging
+import time
 from dataclasses import dataclass, field
 
 from websockets.asyncio.server import serve
@@ -47,6 +62,27 @@ MAX_XY_SPEED = 14.0  # m/s, roughly a small multirotor's max horizontal speed
 XY_ACCEL = 4.0  # m/s^2, how fast velocity is allowed to change per tick
 ALT_RATE = 3.0  # m/s, vertical ease-toward-goal rate (climb/descend)
 
+# --- init state-machine timing ---
+INIT_STEP_TIMEOUT_S = 10.0
+STEP_RESEND_DT = 2.0
+TAKEOFF_CONFIRM_ALT_M = 1.0
+POSITION_STALE_S = 3.0
+HEARTBEAT_STALE_S = 3.0
+
+# States are the same protocol strings bridge.py emits.
+INIT_WAIT_HEARTBEAT = "wait-heartbeat"
+INIT_CONFIRM_MODE = "confirm-mode"
+INIT_CONFIRM_ARM = "confirm-arm"
+INIT_CONFIRM_TAKEOFF = "confirm-takeoff"
+INIT_READY = "ready"
+FAILED_PREFIX = "failed:"
+
+MAV_CMD_NAV_LAND = 21
+
+
+def _now() -> float:
+    return time.monotonic()
+
 
 @dataclass
 class Vehicle:
@@ -61,6 +97,85 @@ class Vehicle:
     goal_x: float = 0.0
     goal_y: float = 0.0
     goal_alt: float = 0.0
+    launch_alt: float = 0.0
+    origin: dict = field(default_factory=lambda: {"frame": "common-local-origin", "x": 0.0, "y": 0.0, "groundM": 0.0})
+
+    # --- link/bookkeeping state ---
+    last_heartbeat: Optional[float] = None
+    armed: bool = False
+    landed_state: Optional[bool] = None
+    last_landed: Optional[float] = None
+    landed_seq: int = 0
+    position_seq: int = 0
+    last_position: Optional[float] = None
+    init_state: str = INIT_WAIT_HEARTBEAT
+    ready: bool = False
+    step_started_at: float = 0.0
+    step_sent_at: float = 0.0
+    failed_at: Optional[float] = None
+    service_phase: Optional[str] = None
+    service_id: Optional[str] = None
+    service_started: float = 0.0
+    service_position_seq: int = 0
+    service_landed_seq: int = 0
+    service_history: set = field(default_factory=set)
+
+    # --- link/telemetry truth ---
+    @property
+    def connected(self) -> bool:
+        return self.last_heartbeat is not None and (_now() - self.last_heartbeat) < HEARTBEAT_STALE_S
+
+    @property
+    def position_age(self) -> Optional[float]:
+        return None if self.last_position is None else _now() - self.last_position
+
+    @property
+    def position_fresh(self) -> bool:
+        age = self.position_age
+        return age is not None and 0 <= age < POSITION_STALE_S
+
+    @property
+    def landed_age(self) -> Optional[float]:
+        return None if self.last_landed is None else _now() - self.last_landed
+
+    @property
+    def grounded(self) -> bool:
+        return (self.connected and not self.armed and self.position_fresh
+                and self.landed is True and self.landed_age is not None
+                and 0 <= self.landed_age < POSITION_STALE_S)
+
+    @property
+    def service_grounded(self) -> bool:
+        return (self.grounded and self.last_heartbeat > self.service_started
+                and self.position_seq > self.service_position_seq
+                and self.landed_seq > self.service_landed_seq)
+
+    @property
+    def airborne(self) -> bool:
+        return self.position_fresh and self.alt > self.launch_alt + TAKEOFF_CONFIRM_ALT_M
+
+    def to_telemetry(self) -> dict:
+        return {
+            "id": self.id,
+            "x": self.x,
+            "y": self.y,
+            "alt": self.alt,
+            "connected": self.connected,
+            "ready": self.ready,
+            "state": self.init_state,
+            "armed": self.armed,
+            "positionAge": self.position_age,
+            "positionSeq": self.position_seq,
+            "landed": self.landed,
+            "landedAge": self.landed_age,
+            "landedSeq": self.landed_seq,
+            "serviceId": self.service_id,
+            "servicePhase": self.service_phase,
+            "origin": self.origin,
+        }
+
+    def to_ready_entry(self) -> dict:
+        return {"id": self.id, "ready": self.ready, "state": self.init_state}
 
     def step(self, dt: float) -> None:
         """Advance the vehicle one physics tick toward its current goal."""
@@ -119,14 +234,134 @@ class Vehicle:
         self.goal_y = y
         self.goal_alt = alt
 
-    def to_telemetry(self) -> dict:
-        return {
-            "id": self.id,
-            "x": self.x,
-            "y": self.y,
-            "alt": self.alt,
-            "connected": True,
-        }
+    # --- init state machine ---
+    def _enter_step(self, state: str, now: float) -> None:
+        self.init_state = state
+        self.step_started_at = now
+        self.step_sent_at = now
+        self.failed_at = None
+
+    def _become_ready(self, now: float) -> None:
+        self.init_state = INIT_READY
+        self.ready = True
+        self.failed_at = None
+        log.info("vehicle %s: airborne at %.1f m - READY", self.id, self.alt)
+
+    def _fail(self, step: str, now: float) -> None:
+        self.init_state = FAILED_PREFIX + step
+        self.ready = False
+        self.failed_at = now
+
+    def advance_init(self, now: float) -> None:
+        """One tick of the per-vehicle init state machine.
+
+        The mock collapses the transport steps (no real SET_MODE/arm ACKs to
+        wait for) but keeps the same PROOF structure: a vehicle is `ready`
+        only after GUIDED-simulated mode, arming and an actual measured climb
+        are all confirmed -- never by assumption.
+        """
+        if self.init_state == INIT_READY:
+            return
+        if self.service_phase is not None:
+            if self.service_phase == "landing":
+                if self.service_grounded:
+                    self.init_state = "landed"
+                    self.service_phase = "landed"
+                elif now - self.service_started >= INIT_STEP_TIMEOUT_S:
+                    self._fail("land", now)
+                    self.service_phase = "failed"
+            elif self.service_phase in ("landed", "swapping", "swapped", "failed"):
+                pass
+            elif self.service_phase == "relaunch":
+                if self.mode_confirmed and self.armed and self.airborne:
+                    self._become_ready(now)
+                    self.service_phase = "complete"
+                elif now - self.step_started_at >= INIT_STEP_TIMEOUT_S:
+                    self._fail("relaunch", now)
+                    self.service_phase = "failed"
+            return
+        if self.init_state.startswith(FAILED_PREFIX):
+            if not self.connected:
+                return
+            cooldown = 0.0 if self.init_state == FAILED_PREFIX + "no-heartbeat" else 5.0
+            if self.failed_at is not None and (now - self.failed_at) < cooldown:
+                return
+            if not self.armed:
+                self.service_phase = None
+                self._enter_step(INIT_CONFIRM_ARM, now)
+                self.armed = True
+            elif not self.airborne:
+                self.service_phase = None
+                self.launch_alt = self.alt
+                self._enter_step(INIT_CONFIRM_TAKEOFF, now)
+                self.goal_alt = self.takeoff_alt
+            else:
+                self._become_ready(now)
+            return
+        if self.init_state == INIT_WAIT_HEARTBEAT:
+            self.last_heartbeat = now
+            self._enter_step(INIT_CONFIRM_MODE, now)
+            return
+        if self.init_state == INIT_CONFIRM_MODE:
+            self.armed = True
+            self.launch_alt = self.alt
+            self._enter_step(INIT_CONFIRM_TAKEOFF, now)
+            self.goal_alt = self.takeoff_alt
+            return
+        if self.init_state == INIT_CONFIRM_TAKEOFF:
+            if self.airborne:
+                self._become_ready(now)
+            elif now - self.step_started_at >= INIT_STEP_TIMEOUT_S:
+                self._fail("takeoff", now)
+            return
+
+    def service(self, request_id: str, action: str, msg: dict) -> bool:
+        """Explicit browser-driven lifecycle handshake; returns True if applied."""
+        if action == "land":
+            if request_id in self.service_history or self.service_phase not in (None, "complete"):
+                return False
+            if not (self.ready and self.init_state == INIT_READY and self.connected
+                    and self.position_fresh and self.armed):
+                return False
+            self.service_history.add(request_id)
+            self.service_id = request_id
+            self.service_phase = "landing"
+            self.service_started = _now()
+            self.service_position_seq = self.position_seq
+            self.service_landed_seq = self.landed_seq
+            self.init_state = "landing"
+            self.ready = False
+            self.goal_x = self.x
+            self.goal_y = self.y
+            try:
+                ground = float(msg.get("groundAlt", 0.0))
+            except (TypeError, ValueError):
+                ground = 0.0
+            self.goal_alt = max(0.0, ground)
+            return True
+        if request_id != self.service_id:
+            return False
+        if action == "authorize" and self.service_phase == "landed" and self.service_grounded:
+            self.service_phase = self.init_state = "swapping"
+            return True
+        if action == "complete" and self.service_phase == "swapping" and self.service_grounded:
+            self.service_phase = self.init_state = "swapped"
+            return True
+        if action == "relaunch" and self.service_phase == "swapped" and self.service_grounded:
+            try:
+                alt = float(msg["alt"])
+            except (KeyError, TypeError, ValueError):
+                return False
+            if not alt or alt <= TAKEOFF_CONFIRM_ALT_M:
+                return False
+            self.launch_alt = self.alt
+            self.takeoff_alt = alt
+            self.service_phase = "relaunch"
+            self._enter_step(INIT_CONFIRM_MODE, now=_now())
+            self.armed = True
+            self.goal_alt = alt
+            return True
+        return False
 
 
 @dataclass
@@ -141,8 +376,9 @@ class World:
     vehicles: dict[str, Vehicle] = field(default_factory=dict)
     clients: set = field(default_factory=set)
     sim_time: float = 0.0  # seconds, advanced by the physics task's own dt
+    controller: object = None
 
-    def reset(self, count: int, alt: float) -> list[str]:
+    def reset(self, count: int, alt: float, origin: dict | None = None) -> list[str]:
         """Handle an "init": (re)create N vehicles at the origin."""
         self.vehicles = {}
         ids = []
@@ -150,6 +386,14 @@ class World:
             vid = f"DR-{i}"
             ids.append(vid)
             v = Vehicle(id=vid, x=0.0, y=0.0, alt=0.0)
+            if isinstance(origin, dict):
+                v.origin = {
+                    "frame": "common-local-origin",
+                    "x": float(origin.get("x", 0.0)),
+                    "y": float(origin.get("y", 0.0)),
+                    "groundM": float(origin.get("groundM", 0.0)),
+                }
+            v.takeoff_alt = alt
             # Start climbing immediately: goal x/y stays at the origin,
             # goal alt is the requested cruise altitude.
             v.set_goal(0.0, 0.0, alt)
@@ -162,14 +406,31 @@ class World:
             v = self.vehicles.get(vid)
             if v is None:
                 continue  # unknown id: ignore, per protocol
+            if not (v.ready and v.init_state == INIT_READY and v.connected
+                    and v.position_fresh and v.armed and v.service_phase is None):
+                continue
             try:
-                v.set_goal(float(g["x"]), float(g["y"]), float(g["alt"]))
+                x, y, alt = float(g["x"]), float(g["y"]), float(g["alt"])
             except (KeyError, TypeError, ValueError):
                 continue  # malformed goal entry: ignore gracefully
+            v.set_goal(v.origin["x"] + x, v.origin["y"] + y, v.origin["groundM"] + alt)
 
     def physics_tick(self, dt: float) -> None:
+        now = _now()
         for v in self.vehicles.values():
+            v.advance_init(now)
             v.step(dt)
+            if v.connected:
+                v.last_heartbeat = now
+            if not v.landed and v.alt <= 0.01 and not v.armed:
+                v.landed = True
+                v.last_landed = now
+                v.landed_seq += 1
+            if v.armed:
+                v.landed = False
+                v.last_landed = None
+            v.last_position = now
+            v.position_seq += 1
         self.sim_time += dt
 
     def telemetry_message(self) -> str:
@@ -224,14 +485,33 @@ async def handle_message(websocket, raw: str) -> None:
     mtype = msg.get("type")
 
     if mtype == "init":
+        if WORLD.controller is not None and WORLD.controller in WORLD.clients \
+                and WORLD.controller is not websocket:
+            await send_status(websocket, "mock is controlled by another client")
+            return
+        WORLD.controller = websocket
         count = int(msg.get("count", 0))
         alt = float(msg.get("alt", 50))
-        ids = WORLD.reset(count, alt)
-        await websocket.send(json.dumps({"type": "ready", "ids": ids}))
-        await send_status(websocket, f"mock: {count} vehicles armed, climbing to {alt} m")
+        ids = WORLD.reset(count, alt, msg.get("origin"))
+        await websocket.send(json.dumps({
+            "type": "ready", "ids": ids,
+            "vehicles": [WORLD.vehicles[i].to_ready_entry() for i in ids],
+        }))
+        await send_status(websocket, f"mock: {count} vehicles initializing toward {alt} m")
 
     elif mtype == "goals":
+        if WORLD.controller is not websocket:
+            return
         WORLD.apply_goals(msg.get("goals", []))
+
+    elif mtype == "service":
+        if WORLD.controller is not websocket:
+            return
+        v = WORLD.vehicles.get(msg.get("id"))
+        request_id = msg.get("requestId")
+        if not isinstance(request_id, str) or v is None:
+            return
+        v.service(request_id, msg.get("action"), msg)
 
     else:
         # Unknown message type: ignore gracefully, per protocol.
@@ -250,6 +530,8 @@ async def handler(websocket) -> None:
         pass
     finally:
         WORLD.clients.discard(websocket)
+        if WORLD.controller is websocket:
+            WORLD.controller = None
         log.info("client disconnected: %s", peer)
         # Note: vehicle state in WORLD is intentionally left untouched here
         # so a reconnecting browser can resume mid-flight; only a fresh

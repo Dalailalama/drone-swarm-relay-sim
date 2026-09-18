@@ -103,6 +103,242 @@ test('regression #5: a packet sent at t=0 ages and expires like any other', () =
   assert.ok(s.net.dropped >= 1, 'expiry must be recorded as a drop');
 });
 
+test('F07: expiry and eligibility in the same tick do not emit or advance clocks', () => {
+  const s = mk(1), d = s.drones[0];
+  d.x = 80; d.y = 0;
+  s.captureOn = true;
+  s.time = 1;
+  s.net.nodeTxUntil.C2 = 11.05;
+  assert.ok(ctx.sendPacket(s, 'cmd', 'C2', d.id, {}, 8000));
+  for (let tick = 20; tick <= 220; tick++) {
+    s.time = tick / 20;
+    ctx.stepNet(s, 0.05);
+  }
+  s.time = 11.05;
+  ctx.stepNet(s, 0.05);
+  assert.strictEqual(s.net.packets.length, 0);
+  assert.strictEqual(s.net.dropped, 1);
+  assert.strictEqual(s.net.cap.filter(e => e.reason === 'ttl-expired').length, 1);
+  assert.strictEqual(s.net.txAt.C2, undefined);
+  assert.strictEqual(s.net.chanBusyUntil.sub1g, undefined);
+  assert.strictEqual(s.net.nodeTxUntil.C2, 11.05);
+  assert.strictEqual(s.net.nodeDutyUntil.C2, undefined);
+  assert.strictEqual(s.net.chanPendingSec.sub1g, 0);
+  assert.ok(ctx.sendPacket(s, 'cmd', 'C2', d.id, { fresh: true }));
+  ctx.stepNet(s, 0);
+  assert.strictEqual(s.net.packets[0].fired, true);
+  assert.ok(Math.abs(s.net.chanBusyUntil.sub1g - 11.056) < 1e-9);
+});
+
+for (const endpoint of ['sender', 'receiver']) {
+  test('F08: ' + endpoint + ' death during airtime invalidates the unfinished frame', () => {
+    const s = mk(2), sender = s.drones[0], receiver = s.drones[1];
+    sender.x = 80; sender.y = 0;
+    receiver.x = 100; receiver.y = 0;
+    s.net.rng = () => 0.01;
+    s.time = 1;
+    assert.ok(ctx.sendPacket(s, 'cmd', sender.id, receiver.id, {}, 8000));
+    ctx.stepNet(s, 0);
+    assert.strictEqual(s.net.packets[0].fired, true);
+    s.time = 1.5;
+    ctx.killDrone(s, endpoint === 'sender' ? sender : receiver);
+    ctx.stepNet(s, 0.5);
+    if (endpoint === 'receiver') receiver.mode = 'ok';
+    run(s, 1.55, 2.1, 0.05);
+    assert.strictEqual(s.net.delivered, 0);
+    assert.strictEqual(receiver.inbox.length, 0);
+    assert.strictEqual(s.net.dropped, 1);
+  });
+}
+
+test('F08: sender death after airtime completion preserves pending delivery', () => {
+  const s = mk(1), d = s.drones[0];
+  d.x = 80; d.y = 0;
+  s.net.rng = () => 0.01;
+  s.time = 1;
+  assert.ok(ctx.sendPacket(s, 'tlm', d.id, 'C2', { x: 80 }, 8000));
+  ctx.stepNet(s, 0);
+  s.time = 2;
+  ctx.stepNet(s, 1);
+  assert.strictEqual(s.net.delivered, 0);
+  s.time = 2.01;
+  ctx.killDrone(s, d);
+  ctx.stepNet(s, 0.01);
+  s.time = 2.05;
+  ctx.stepNet(s, 0.04);
+  assert.strictEqual(s.net.delivered, 1);
+  assert.strictEqual(s.c2.inbox.length, 1);
+});
+
+test('F08: retries sample RF only at each actual attempt start', () => {
+  const local = loadCore();
+  const s = mk(1), d = s.drones[0];
+  d.x = 80; d.y = 0;
+  let margin = 2, rolls = 0;
+  local.liveMarginDb = () => margin;
+  s.net.rng = () => { rolls++; return 0.9; };
+  s.time = 1;
+  assert.ok(local.sendPacket(s, 'cmd', 'C2', d.id, {}, 8000));
+  local.stepNet(s, 0);
+  assert.strictEqual(rolls, 1);
+  assert.strictEqual(s.net.dropped, 0);
+  assert.strictEqual(s.net.chanBusyUntil.sub1g, 2);
+  s.time = 2;
+  local.stepNet(s, 1);
+  assert.strictEqual(rolls, 1);
+  margin = 30;
+  s.time = 2.02;
+  local.stepNet(s, 0.02);
+  assert.strictEqual(rolls, 2);
+  s.time = 3.05;
+  local.stepNet(s, 1.03);
+  assert.strictEqual(s.net.delivered, 1);
+  assert.strictEqual(d.inbox[0].retries, 1);
+});
+
+for (const kind of ['cmd', 'bcast']) {
+  test('F09: ' + kind + ' airtime straddling reporting windows is split by overlap', () => {
+    const s = mk(1), d = s.drones[0];
+    d.x = kind === 'bcast' ? 1e6 : 80; d.y = 0;
+    s.net.rng = () => 0.01;
+    s.time = 4.9;
+    if (kind === 'bcast') ctx.sendBroadcast(s, 'C2', { seq: 1, orders: {} }, 8000);
+    else assert.ok(ctx.sendPacket(s, 'cmd', 'C2', d.id, {}, 8000));
+    ctx.stepNet(s, 4.9);
+    s.time = 5;
+    ctx.stepNet(s, 0.1);
+    assert.ok(Math.abs(s.net.utilization - 0.02) < 1e-9, String(s.net.utilization));
+    s.time = 10;
+    ctx.stepNet(s, 5);
+    assert.ok(Math.abs(s.net.utilization - 0.18) < 1e-9, String(s.net.utilization));
+  });
+}
+
+test('F09: a broadcast longer than two windows reports each occupied portion', () => {
+  const s = mk(1);
+  s.drones[0].x = 1e6;
+  s.time = 4;
+  ctx.sendBroadcast(s, 'C2', { seq: 1, orders: {} }, 96000);
+  ctx.stepNet(s, 4);
+  for (const [t, expected] of [[5, 0.2], [10, 1], [15, 1], [20, 0.2], [25, 0]]) {
+    s.time = t;
+    ctx.stepNet(s, 5);
+    assert.ok(Math.abs(s.net.utilization - expected) < 1e-9, t + ': ' + s.net.utilization);
+  }
+});
+
+test('F07: expired retries never emit after a duty-cycle wait', () => {
+  const local = loadCore();
+  const s = mk(1), d = s.drones[0];
+  d.x = 80; d.y = 0;
+  d.radio = { ...SIK, dutyCycle: 0.05 };
+  local.liveMarginDb = () => 2;
+  s.net.rng = () => 0.9;
+  s.time = 1;
+  assert.ok(local.sendPacket(s, 'cmd', 'C2', d.id, {}, 8000));
+  local.stepNet(s, 0);
+  s.time = 2;
+  local.stepNet(s, 1);
+  assert.strictEqual(s.net.packets[0].fired, false);
+  s.time = 21;
+  local.stepNet(s, 19);
+  assert.strictEqual(s.net.txAt.C2, 1);
+  assert.strictEqual(s.net.chanBusyUntil.sub1g, 2);
+  assert.ok(Math.abs(s.net.nodeDutyUntil.C2 - 21) < 1e-9);
+  assert.strictEqual(s.net.chanPendingSec.sub1g, 0);
+  assert.strictEqual(s.net.dropped, 1);
+});
+
+for (const endpoint of ['sender', 'receiver']) {
+  test('F08: removing the ' + endpoint + ' invalidates an active attempt', () => {
+    const s = mk(2), sender = s.drones[0], receiver = s.drones[1];
+    sender.x = 80; sender.y = 0;
+    receiver.x = 100; receiver.y = 0;
+    s.net.rng = () => 0.01;
+    s.time = 1;
+    assert.ok(ctx.sendPacket(s, 'cmd', sender.id, receiver.id, {}, 8000));
+    ctx.stepNet(s, 0);
+    s.drones.splice(endpoint === 'sender' ? 0 : 1, 1);
+    s.time = 1.5;
+    ctx.stepNet(s, 0.5);
+    s.time = 2.1;
+    ctx.stepNet(s, 0.6);
+    assert.strictEqual(s.net.delivered, 0);
+    assert.strictEqual(s.net.dropped, 1);
+  });
+}
+
+test('F08: sender death cuts off airtime and releases the active channel', () => {
+  const s = mk(1), d = s.drones[0];
+  d.x = 80; d.y = 0;
+  s.net.rng = () => 0.01;
+  s.time = 1;
+  assert.ok(ctx.sendPacket(s, 'tlm', d.id, 'C2', {}, 8000));
+  ctx.stepNet(s, 0);
+  s.time = 1.5;
+  ctx.killDrone(s, d);
+  ctx.stepNet(s, 0.5);
+  assert.strictEqual(s.net.chanBusyUntil.sub1g, 1.5);
+  assert.strictEqual(s.net.nodeTxUntil[d.id], 1.5);
+  s.time = 5;
+  ctx.stepNet(s, 3.5);
+  assert.ok(Math.abs(s.net.utilization - 0.1) < 1e-9);
+});
+
+test('F09: retry gaps are not airtime and each retry bills its own interval', () => {
+  const local = loadCore();
+  const s = mk(1), d = s.drones[0];
+  d.x = 80; d.y = 0;
+  local.liveMarginDb = () => 2;
+  s.net.rng = () => 0.9;
+  s.time = 4.9;
+  assert.ok(local.sendPacket(s, 'cmd', 'C2', d.id, {}, 8000));
+  local.stepNet(s, 0);
+  s.time = 5;
+  local.stepNet(s, 0.1);
+  assert.ok(Math.abs(s.net.utilization - 0.02) < 1e-9);
+  s.time = 10;
+  local.stepNet(s, 5);
+  assert.ok(Math.abs(s.net.utilization - 0.58) < 1e-9, String(s.net.utilization));
+  assert.ok(Math.abs(s.net.chanBusyUntil.sub1g - 7.94) < 1e-9);
+  assert.ok(Math.abs(s.net.txAt.C2 - 6.94) < 1e-9);
+  assert.strictEqual(s.net.dropped, 1);
+  assert.strictEqual(s.net.chanPendingSec.sub1g, 0);
+  assert.strictEqual(s.net.airIntervals.length, 0);
+});
+
+test('F09: independent channels report peak occupancy instead of summed occupancy', () => {
+  const s = mk(2), a = s.drones[0], b = s.drones[1];
+  a.x = 1e6; a.y = 0;
+  b.x = -1e6; b.y = 0;
+  b.radio = { ...SIK, band: '2.4g', freqMHz: 2400 };
+  s.time = 4.9;
+  ctx.sendBroadcast(s, a.id, { seq: 1, orders: {} }, 8000);
+  ctx.sendBroadcast(s, b.id, { seq: 1, orders: {} }, 16000);
+  ctx.stepNet(s, 0);
+  assert.strictEqual(s.net.txAt[a.id], 4.9);
+  assert.strictEqual(s.net.txAt[b.id], 4.9);
+  s.time = 5;
+  ctx.stepNet(s, 0.1);
+  assert.ok(Math.abs(s.net.utilization - 0.02) < 1e-9);
+  s.time = 10;
+  ctx.stepNet(s, 5);
+  assert.ok(Math.abs(s.net.utilization - 0.38) < 1e-9);
+});
+
+test('F09: skipped reporting boundaries retain the latest full window', () => {
+  const s = mk(1);
+  s.drones[0].x = 1e6;
+  s.time = 4;
+  ctx.sendBroadcast(s, 'C2', { seq: 1, orders: {} }, 96000);
+  ctx.stepNet(s, 4);
+  s.time = 20;
+  ctx.stepNet(s, 16);
+  assert.ok(Math.abs(s.net.utilization - 0.2) < 1e-9);
+  assert.strictEqual(s.net.utilSince, 20);
+  assert.strictEqual(s.net.airIntervals.length, 0);
+});
+
 test('regression #16: one second of broadcast airtime bills one second, not two', () => {
   const s = mk(1);
   s.drones[0].x = 1e6; // nobody in range — no re-transmissions, no extra air

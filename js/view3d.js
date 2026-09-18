@@ -160,7 +160,7 @@ let view3dScene = { key: '', items: null, terrain: null, tex: null };
 function buildGroundTexture(anchor, x0, y0, x1, y1, nowMs) {
   if (typeof tileGet !== 'function' || typeof document === 'undefined') return null;
   const spanX = x1 - x0, spanY = y1 - y0;
-  const key = [Math.round(x0), Math.round(y0), Math.round(x1), anchor.lat.toFixed(5), anchor.lon.toFixed(5)].join('|');
+  const key = [x0, y0, x1, y1, anchor.lat, anchor.lon, anchor.x, anchor.y].join('|');
   if (groundTex.key === key && (groundTex.complete || nowMs - groundTex.builtAt < 600)) return groundTex.canvas;
   const pxPerM = GROUND_TEX_PX / spanX;
   const z = tileZoomFor(anchor.lat, pxPerM);
@@ -287,9 +287,11 @@ function renderView3D(ctx, cv, s, status, cam, selected) {
   // and re-sorting thousands of quads every frame for identical output.
   // Texture pixels stream through by reference, so a tile finishing loading
   // shows up without invalidating the cache.
-  const sceneKey = [cam.yaw.toFixed(5), cam.pitch.toFixed(5), cam.dist.toFixed(1),
-    cam.cx.toFixed(1), cam.cy.toFixed(1), cv.width, cv.height, gridN,
-    (s.terrain.buildings || []).length, s.altitudeM, U].join('|');
+  const sceneKey = JSON.stringify([cam.yaw, cam.pitch, cam.dist, cam.cx, cam.cy,
+    cv.width, cv.height, gridN, x0, y0, x1, y1, s.altitudeM, U,
+    s.terrain.seed, s.terrain.groundAmpM, s.terrain.groundScaleM,
+    (s.terrain.buildings || []).map(b => [b.x, b.y, b.w, b.d, b.heightM]),
+    gTex && gTex.width]);
   const sceneCached = !!(view3dScene.items && view3dScene.key === sceneKey &&
     view3dScene.terrain === s.terrain && view3dScene.tex === gTex);
 

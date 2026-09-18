@@ -16,6 +16,26 @@ const A = require('../js/airframes.js');
 const ESP = R.RADIOS.find(r => r.id === 'espnow'); // 2400 MHz
 const Q450 = A.AIRFRAMES.find(a => a.id === 'q450');
 
+for (const [mhz, alias] of [[2400, '2.4g'], [5800, '5g'], [915, 'sub1g']]) {
+  test('F12: equivalent MHz representations for ' + alias, () => {
+    for (const band of [mhz, String(mhz), alias]) {
+      assert.strictEqual(ctx.jammerFreqMHz({ band }), mhz);
+    }
+    assert.strictEqual(ctx.jammerFreqMHz({ freqMHz: String(mhz) }), mhz);
+  });
+}
+
+test('F12: all is wideband and malformed numeric prefixes are rejected', () => {
+  assert.strictEqual(ctx.jammerFreqMHz({ band: 'all' }), null);
+  for (const band of ['2400garbage', '5GHz', '2.4g!', '', 'Infinity', '0x960', -1, 0, Infinity, true]) {
+    assert.ok(Number.isNaN(ctx.jammerFreqMHz({ band })), String(band));
+    assert.ok(Number.isNaN(ctx.jammerFreqMHz({ freqMHz: band })), String(band));
+  }
+  const s = mk();
+  s.jammers.push({ x: 0, y: 0, band: '2400garbage', erpDbm: 40 });
+  assert.strictEqual(ctx.interferenceFloorDbm(s, { x: 50, y: 0 }, 50, ESP), -Infinity);
+});
+
 function mk() {
   const s = ctx.makeSwarm({
     count: 2, airframe: Q450, radio: ESP, envFactor: 1,

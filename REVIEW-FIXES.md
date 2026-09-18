@@ -66,6 +66,39 @@ implemented against a measured benchmark, not marked done by adjacency.
 | O8 city-slider debounce | **done** | 150 ms debounce; labels track live |
 | O9 ring/pruning family | **done** | capture batch-trim, coverage-map bound (oldest-first), sep-grid history purge, LOS candidates by ray-walk (was full-list for long links) |
 
+## Follow-up review of `04ca373` (2026-09-17)
+
+Findings F01–F14 from the second external review. Verification status:
+mock-verified via the existing browser/DOM harnesses and the Python MAVLink
+stubs; real SITL flight acceptance is still open (see "Remaining").
+
+| ID | Finding (short) | Regression | Fix | Status |
+|---|---|---|---|---|
+| F01 | Browser declared failed vehicles ready; goals shipped during failed init | test/external.test.js (per-vehicle ready/state incl. late recovery), test/extgoals.test.js, sitl/test_bridge.py (goal gates) | per-vehicle readiness carried through ready+telemetry, rendered honestly; goals require bridge-side ready state AND browser-side readiness evidence | **fixed (mock-verified)** |
+| F02 | Unowned fleet controllable by every watcher | sitl/test_bridge.py (two watchers after disconnect, takeover, await-races) | goals require an acquired, connected controller; init is the only acquisition; ownership rechecked after awaits | **fixed (mock-verified)** |
+| F03 | Fresh heartbeat concealed stale position | sitl/test_bridge.py (receipt clock, stale climb), test/external.test.js (stalled seq, never-received) | positionAge/positionSeq tracked per vehicle; freshness judged per position sample, independent of heartbeat/JSON traffic | **fixed (mock-verified)** |
+| F04 | Low altitude started a swap without confirmed landing; no relaunch handshake | test/extgoals.test.js (stale-landed refusal), sitl/test_bridge.py (handshake + fraud refusal) | explicit land → landed(EXTENDED_SYS_STATE) → authorize → complete → relaunch → ready handshake; grounded requires fresh landed+disarmed evidence newer than the request; no automatic rearm | **fixed (mock-verified)** |
+| F05 | Altitude reference moved with the operator; AGL goals unconverted | sitl/test_bridge.py (origin round-trip, nonzero XY + ground offset), test/external.test.js | immutable common-local origin frozen at connect, sent in init; incoming positions and outgoing goals both converted against it | **fixed (mock-verified)** |
+| F06 | Goal could cross a building beyond the 600 m scan horizon | test/obstacles.test.js (tower at 1000 m, goal at 2000 m) | commanded leg capped to the verified scan horizon, not the raw goal | **fixed** |
+| F07 | Expired packet committed before the TTL check | test/netsched.test.js (t=11.05 boundary) | expiry checked before selection and emission; no channel-clock advance for expired work | **fixed** |
+| F08 | Unicast delivered after transmitter died mid-airtime | test/netsched.test.js (before/mid/after airtime deaths) | explicit attempt lifecycle; unfinished frames invalidated on endpoint death; RF sampled per attempt | **fixed** |
+| F09 | Utilization billed the whole transmission to its starting window | test/netsched.test.js (0.02/0.18 window split) | on-air intervals intersected with reporting windows; retry gaps excluded; per-channel | **fixed** |
+| F10 | Out-of-order coverage upload counted as restart | test/covdedup.test.js (reorder vs new session) | dedup by (vehicle, session, sequence) with stable session ids; session in ACKs | **fixed** |
+| F11 | Tether steering read upstream live truth | test/navbelief.test.js (silent neighbor move) | upstream positions enter the tether only via timestamped modeled observations; documented stale fallback | **fixed** |
+| F12 | Legacy band aliases parsed as MHz numbers | test/advband.test.js ('2.4g'/'5g' equivalence) | aliases resolved before numeric parsing; strict numeric strings; malformed prefixes rejected | **fixed** |
+| F13 | Nested batch features unchecked | test/batchvalid.test.js (65 malformed cases) | nested features validated pre-normalization (booleans, bounded numerics, array shapes); CLI and API reject identically | **fixed** |
+| F14 | 3D cache ignored base/target geometry | test/view3d.test.js (22 mutation regressions) | cache key covers camera, mesh bounds, terrain/texture geometry and anchor coordinates | **fixed** |
+
+### Remaining
+
+- **SITL acceptance run (real flight):** still required — initialization,
+  late joins, telemetry loss, owner handoff, obstacle-limited goals, landing
+  and relaunch on real ArduPilot SITL. Everything above is mock-verified.
+- **O-ledger corrections:** O2 cache boundaries/hit-rate unmeasured;
+  O3 deferred (decide on browser frame latency, not headless ticks);
+  O7 = skip-identical-HTML, not keyed row updates; O8 lacks viewport building
+  culling; the ~12% A/B speedup needs preserved raw samples to be citable.
+
 Interleaved A/B at n=100 under identical machine load: ~10.6->9.4 ms/tick median
 (the wall-clock numbers in any single bench run vary +/-20% with background
 load — BASELINE.md is only regenerated on an idle machine).

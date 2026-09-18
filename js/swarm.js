@@ -93,7 +93,7 @@ const COVERAGE = {
 
 // Regulatory duty cycle stretches how often a node may transmit at all.
 function tlmIntervalSec(s) {
-  const tx = (NET.tlmBytes * 8) / (s.radio.airRateKbps * 1000);
+  const tx = ((NET.tlmBytes + 8) * 8) / (s.radio.airRateKbps * 1000);
   return Math.max(C2.tlmIntervalSec, s.radio.dutyCycle ? tx / s.radio.dutyCycle : 0);
 }
 
@@ -101,13 +101,14 @@ function cmdIntervalSec(s, nDrones) {
   // Broadcast mode: ONE packet per round regardless of fleet size — the
   // whole reason low-bandwidth C2 links broadcast instead of unicasting.
   const bytes = s.broadcastC2
-    ? NET.bcastHeaderBytes + NET.bcastRowBytes * nDrones
-    : NET.cmdBytes * nDrones;
+    ? NET.bcastHeaderBytes + 4 + (NET.bcastRowBytes + 12) * nDrones
+    : (NET.cmdBytes + 16) * nDrones;
   const tx = (bytes * 8) / (s.radio.airRateKbps * 1000);
   return Math.max(C2.cmdIntervalSec, s.radio.dutyCycle ? tx / s.radio.dutyCycle : 0);
 }
 
 let droneSeq = 0;
+const droneBootSeq = new WeakMap();
 
 // Per-node hardware. Heterogeneous missions give each drone its own airframe
 // and radio (js/fleet.js); homogeneous missions leave both null and everything
@@ -127,6 +128,8 @@ function nodeRadioOf(s, id) {
 
 function makeDrone(x, y, target, rng, airframe, radio, cls) {
   droneSeq += 1;
+  const session = (droneBootSeq.get(rng) || 0) + 1;
+  droneBootSeq.set(rng, session);
   return {
     id: 'DR-' + droneSeq,
     x, y, vx: 0, vy: 0,
@@ -150,6 +153,8 @@ function makeDrone(x, y, target, rng, airframe, radio, cls) {
     relinkGoalX: 0, relinkGoalY: 0,
     rejectedRole: null, rejectedSig: null,
     deadLog: [],          // onboard black box: positions where the link was dead
+    deadLogSession: session,
+    neighborKnown: {},
     nextDeadLog: 0,
     bcastSeen: 0,         // highest broadcast sequence heard (flood dedup)
     inbox: [],
@@ -562,6 +567,8 @@ function clipGoalToNoFly(s, from, goal) {
   const legM = dist2d(from, goal);
   if (legM < 1e-6) return goal;
   const scanM = Math.min(legM + OBSTACLE_CLEAR_M + 40, 600);
+  const horizon = Math.min(1, (scanM - OBSTACLE_CLEAR_M - 40) / legM);
+  goal = { x: from.x + (goal.x - from.x) * horizon, y: from.y + (goal.y - from.y) * horizon };
   let firstHit = null;
   for (const b of buildingsNear(s.terrain, from.x, from.y, scanM)) {
     if (b.heightM <= s.altitudeM) continue;
@@ -651,16 +658,16 @@ const JAM_SNR_OFFSET_DB = 10; // gap between raw interference power and the usab
 // branch used to recognize only '2.4g'/'5g' and mapped numeric 2400 to
 // 915 — a 2.4 GHz hunter was deaf to a 2.4 GHz emitter beside it.
 function jammerFreqMHz(j) {
-  if (j.freqMHz != null) return j.freqMHz;
-  const b = j.band;
+  const b = j.freqMHz != null ? j.freqMHz : j.band;
   if (b == null || b === 'all') return null;
-  if (typeof b === 'number') return b;
-  const n = parseFloat(b);
-  if (isFinite(n)) return n;
-  if (b === '2.4g') return 2400;
-  if (b === '5g') return 5800;
-  if (b === 'sub1g') return 915;
-  return null;
+  if (j.freqMHz == null) {
+    if (b === '2.4g') return 2400;
+    if (b === '5g') return 5800;
+    if (b === 'sub1g') return 915;
+  }
+  if (typeof b !== 'number' && (typeof b !== 'string' || !/^[+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(b.trim()))) return NaN;
+  const n = Number(b);
+  return Number.isFinite(n) && n > 0 ? n : NaN;
 }
 
 // Spectrum agility (anti-jam) and LPI/LPD waveform modelling.
@@ -699,7 +706,7 @@ function interferenceFloorDbm(s, rxPos, rxAlt, rxRadio) {
   for (const j of jams) {
     if (j.on === false) continue;
     const jf = jammerFreqMHz(j);
-    if (jf != null && Math.abs(jf - rad.freqMHz) > 150) continue; // out of band
+    if (Number.isNaN(jf) || (jf != null && Math.abs(jf - rad.freqMHz) > 150)) continue; // out of band
     const ground = Math.hypot(rxPos.x - j.x, rxPos.y - j.y);
     const jAlt = terrainGroundAt(s.terrain, j.x, j.y) + (j.altM || 15);
     if (losBlocked(s.terrain, j.x, j.y, jAlt, rxPos.x, rxPos.y, rxAlt)) continue; // terrain shadows it
@@ -901,27 +908,27 @@ function c2Step(s) {
     s.c2.everHeard.add(p.src);
     covMark(s, p.payload.x, p.payload.y, 'good');
     if (p.payload.deadLog && p.payload.deadLog.length) {
-      // Sitting somewhere in silence is much stronger evidence than one
-      // lucky packet — weight dead samples accordingly. But apply each
-      // sample ONCE, deduped by the vehicle's own sequence: a lost ACK makes
-      // the sender replay, and replays used to stack weight 3→6→9 of
-      // phantom certainty into the coverage map (finding #17). A sequence
-      // moving BACKWARD means the vehicle reinitialized — accept the new
-      // session's numbering rather than silencing it.
-      s.c2.covSeqApplied = s.c2.covSeqApplied || {};
-      const maxSeq = p.payload.deadLogMaxSeq || 0;
-      let appliedUpTo = s.c2.covSeqApplied[p.src] || 0;
-      if (maxSeq && maxSeq < appliedUpTo) appliedUpTo = 0; // restarted vehicle
+      s.c2.covSeqApplied = s.c2.covSeqApplied || new Map();
+      const session = p.payload.deadLogSession;
+      if (session == null) continue;
+      const key = JSON.stringify([p.src, session]);
+      let applied = s.c2.covSeqApplied.get(key);
+      if (!applied) { applied = new Set(); s.c2.covSeqApplied.set(key, applied); }
+      const ackSeqs = [];
       let freshSamples = 0;
       for (const pt of p.payload.deadLog) {
-        if (pt.seq != null && pt.seq <= appliedUpTo) continue; // replayed evidence
+        if (!Number.isSafeInteger(pt.seq) || pt.seq <= 0) continue;
+        ackSeqs.push(pt.seq);
+        if (applied.has(pt.seq)) continue;
+        applied.add(pt.seq);
         covMark(s, pt.x, pt.y, 'bad', 3);
         freshSamples++;
       }
-      s.c2.covSeqApplied[p.src] = Math.max(appliedUpTo, maxSeq);
       if (freshSamples) logEvent(s, 'C2: ' + p.src + ' uploaded ' + freshSamples + ' dead-zone samples — coverage map updated', 'info');
       // ACK duplicates too — a replay means the sender never heard us.
-      sendPacket(s, 'ack', 'C2', p.src, { ackDeadLogSeq: maxSeq || p.payload.deadLog.length });
+      sendPacket(s, 'ack', 'C2', p.src, {
+        ackDeadLogSession: session, ackDeadLogSeq: Math.max(0, ...ackSeqs), ackDeadLogSeqs: ackSeqs,
+      }, 28 + ackSeqs.length * 4);
     }
   }
   s.c2.inbox = [];
@@ -1148,7 +1155,7 @@ function c2Step(s) {
   // (slot 0 off C2), the flock hangs off the last relay, the rescuer off
   // its anchor.
   const lastRelay = s.c2.relays.length ? s.c2.relays[s.c2.relays.length - 1] : 'C2';
-  const orderFor = id => {
+  const buildOrder = id => {
     if (rescueOrders[id]) {
       return {
         role: 'rescue', slot: -1, goto: rescueOrders[id].goto,
@@ -1176,6 +1183,14 @@ function c2Step(s) {
     };
   };
 
+  const orderFor = id => {
+    const order = buildOrder(id);
+    const up = known[order.upstream];
+    order.c2 = { x: s.base.x, y: s.base.y, at: s.time };
+    order.upstreamPos = order.upstream === 'C2' ? { ...order.c2 }
+      : up && Number.isFinite(up.posAt) ? { x: up.x, y: up.y, at: up.posAt } : null;
+    return order;
+  };
   const ids = Object.keys(known);
 
   // --- Payload scheduling (video backhaul) --------------------------------
@@ -1218,14 +1233,14 @@ function c2Step(s) {
     const orders = {};
     for (const id of ids) orders[id] = orderFor(id);
     s.c2.bcastSeq += 1;
-    const bcastBytes = NET.bcastHeaderBytes + NET.bcastRowBytes * ids.length;
-    sendBroadcast(s, 'C2', { seq: s.c2.bcastSeq, orders, c2: { x: s.base.x, y: s.base.y } }, bcastBytes);
+    const bcastBytes = NET.bcastHeaderBytes + 4 + (NET.bcastRowBytes + 12) * ids.length;
+    sendBroadcast(s, 'C2', { seq: s.c2.bcastSeq, orders, c2: { x: s.base.x, y: s.base.y, at: s.time } }, bcastBytes);
     if (s.relayRadio && !bandCompatible(s.radio, s.relayRadio)) {
-      sendBroadcast(s, 'C2', { seq: s.c2.bcastSeq, orders, c2: { x: s.base.x, y: s.base.y } }, bcastBytes, s.relayRadio);
+      sendBroadcast(s, 'C2', { seq: s.c2.bcastSeq, orders, c2: { x: s.base.x, y: s.base.y, at: s.time } }, bcastBytes, s.relayRadio);
     }
   } else {
     // Unicast: one routed packet per drone — best effort, dies without a route
-    for (const id of ids) sendPacket(s, 'cmd', 'C2', id, orderFor(id));
+    for (const id of ids) sendPacket(s, 'cmd', 'C2', id, orderFor(id), NET.cmdBytes + 16);
   }
 }
 
@@ -1250,8 +1265,9 @@ function lostCentroid(s) {
 function droneComms(s, d) {
   for (const p of d.inbox) {
     if (p.kind === 'ack' && p.payload && p.payload.ackDeadLogSeq != null) {
-      d.deadLogAckedSeq = Math.max(d.deadLogAckedSeq || 0, p.payload.ackDeadLogSeq);
-      d.deadLog = d.deadLog.filter(sample => sample.seq && sample.seq > d.deadLogAckedSeq);
+      if (p.payload.ackDeadLogSession !== d.deadLogSession) continue;
+      const acked = new Set(p.payload.ackDeadLogSeqs || [p.payload.ackDeadLogSeq]);
+      d.deadLog = d.deadLog.filter(sample => !acked.has(sample.seq));
       continue;
     }
     if (p.kind !== 'cmd' && p.kind !== 'bcast') continue;
@@ -1265,8 +1281,10 @@ function droneComms(s, d) {
     // its location). This is the ONLY way a drone learns the base moved
     // (finding #18) — knowledge arrives by radio, never by telepathy.
     const c2pos = p.payload && p.payload.c2;
-    if (c2pos && isFinite(c2pos.x) && isFinite(c2pos.y)) {
-      d.baseKnown = { x: c2pos.x, y: c2pos.y, at: s.time };
+    const c2at = c2pos && (c2pos.at == null ? s.time : c2pos.at);
+    if (c2pos && Number.isFinite(c2pos.x) && Number.isFinite(c2pos.y) &&
+        Number.isFinite(c2at) && c2at <= s.time && (!d.baseKnown || c2at >= d.baseKnown.at)) {
+      d.baseKnown = { x: c2pos.x, y: c2pos.y, at: c2at };
     }
     if (d.mode === 'hold' || d.mode === 'relink' || d.mode === 'rtl') {
       d.mode = 'ok';
@@ -1281,6 +1299,12 @@ function droneComms(s, d) {
     // same label and slips past the feasibility gate unvetted.
     const o = p.kind === 'bcast' ? p.payload.orders[d.id] : p.payload;
     if (!o) continue;
+    const observation = o.upstreamPos;
+    const previous = d.neighborKnown[o.upstream];
+    if (observation && Number.isFinite(observation.x) && Number.isFinite(observation.y) &&
+        Number.isFinite(observation.at) && observation.at <= s.time && (!previous || observation.at >= previous.at)) {
+      d.neighborKnown[o.upstream] = { ...observation, receivedAt: s.time };
+    }
     const og = orderGoal(s, o), cg = orderGoal(s, d.order);
     const sig = o.role + '/' + Math.round(og.x) + ',' + Math.round(og.y);
     const changed = sig !== (d.order.role + '/' + Math.round(cg.x) + ',' + Math.round(cg.y));
@@ -1320,16 +1344,14 @@ function droneComms(s, d) {
       for (let i = 0; i < d.deadLog.length; i++) {
         const sample = d.deadLog[i];
         if (sample.seq == null) sample.seq = ++d.deadLogSeq;
+        else d.deadLogSeq = Math.max(d.deadLogSeq, sample.seq);
       }
-      const acked = d.deadLogAckedSeq || 0;
       const list = [];
       let maxSeq = 0;
       for (let i = 0; i < d.deadLog.length; i++) {
         const sample = d.deadLog[i];
-        if (!sample.seq || sample.seq > acked) {
-          list.push({ x: sample.x, y: sample.y, seq: sample.seq });
-          if (sample.seq > maxSeq) maxSeq = sample.seq;
-        }
+        list.push({ x: sample.x, y: sample.y, seq: sample.seq });
+        if (sample.seq > maxSeq) maxSeq = sample.seq;
       }
       if (list.length > 0) {
         unacked = list;
@@ -1345,9 +1367,11 @@ function droneComms(s, d) {
       reject: d.rejectedRole || null,
       deadLog: unacked,
       deadLogMaxSeq: deadLogMaxSeq,
+      deadLogSession: d.deadLogSession,
+      posAt: s.time,
       // Riding samples aren't free: each packed {x, y, seq} row costs real
       // bytes on the air on top of the base telemetry frame (finding #17).
-    }, NET.tlmBytes + (unacked ? unacked.length * 10 : 0));
+    }, NET.tlmBytes + 8 + (unacked ? unacked.length * 10 : 0));
   }
 
   // Payload stream: emit real video chunks only while C2's grant says so.
@@ -1504,8 +1528,7 @@ function goalFor(s, d, dt) {
 // flying AWAY from your link.
 function tetherGoal(s, d, goal) {
   if (d.mode !== 'ok' || !d.order.upstream) return goal;
-  const upPos = d.order.upstream === 'C2' ? s.base : nodePos(s, d.order.upstream);
-  if (!upPos || (upPos !== s.base && !alive(upPos))) return goal;
+  const upPos = d.order.upstream === 'C2' ? d.baseKnown : d.neighborKnown[d.order.upstream];
 
   const plan = plannedHopMarginDb(s, d);
   const slowDb = Math.max(TETHER.minSlowDb, plan - TETHER.slowBelowPlanDb);
@@ -1513,6 +1536,8 @@ function tetherGoal(s, d, goal) {
   const m = d.upMarginEma;
 
   if (m >= slowDb) return goal;
+  const staleAfter = Math.max(C2.staleSec, 3 * (tlmIntervalSec(s) + cmdIntervalSec(s, s.drones.length)));
+  if (!upPos || !Number.isFinite(upPos.at) || s.time - upPos.at > staleAfter) return { x: d.x, y: d.y };
   // only throttle motion that takes us FARTHER from the upstream node
   if (dist2d(goal, upPos) <= dist2d(d, upPos)) return goal;
 
@@ -1721,9 +1746,7 @@ function stepDrone(s, d, dt) {
 
   if ((d.mode === 'rtb' || d.mode === 'rtl') && dist2d(d, s.base) < DRONE.landThresholdM) {
     // Internal physics is a 2D abstraction — touchdown is instantaneous.
-    // A REAL vehicle must CONFIRM it: reported altitude near the ground, or
-    // no swap crew starts work under a hovering aircraft (finding #11).
-    const grounded = !external || (d.altM != null && d.altM <= 2);
+    const grounded = !external || externalServiceGrounded(d.id);
     if (d.mode === 'rtb' && grounded) {
       d.mode = 'landed'; d.vx = d.vy = 0;
       d.swapAt = s.time + BATTERY.swapSec;
@@ -1899,6 +1922,7 @@ function stepSwarm(s, dt) {
   // Ground crew: landed drones get a fresh pack and go back to work
   for (const d of s.drones) {
     if (d.mode === 'landed' && d.swapAt && s.time >= d.swapAt) {
+      if (external && !externalServiceComplete(s, d)) continue;
       d.mode = 'ok';
       d.energyWh = usableWh(afOf(s, d));
       d.batteryPct = 100;

@@ -60,6 +60,67 @@ function normalizeConfig(cfg) {
 function finiteNum(v) { return typeof v === 'number' && isFinite(v); }
 function numIn(v, lo, hi) { return finiteNum(v) && v >= lo && v <= hi; }
 
+function validateFeatures(f, count) {
+  const object = v => v !== null && typeof v === 'object' && !Array.isArray(v);
+  const has = (v, k) => Object.prototype.hasOwnProperty.call(v, k);
+  if (!object(f)) return 'features must be a JSON object';
+  const booleans = ['videoOn', 'spectrumAgility', 'lpiMode', 'adversaryMode', 'hetero'];
+  const fields = [...booleans, 'videoKbps', 'relayWing', 'relayAirframe', 'relayRadio', 'jammers', 'gpsZones'];
+  for (const k of Object.keys(f)) {
+    if (!fields.includes(k)) return 'features.' + k + ' is unknown';
+  }
+  for (const k of booleans) {
+    if (has(f, k) && typeof f[k] !== 'boolean') return 'features.' + k + ' must be a boolean';
+  }
+  if (has(f, 'videoKbps') && !numIn(f.videoKbps, 0, 100000)) return 'features.videoKbps must be a number in 0..100000';
+  if (f.videoOn && has(f, 'videoKbps') && f.videoKbps === 0) return 'features.videoKbps must be positive when videoOn is true';
+  if (has(f, 'relayWing') && !(Number.isInteger(f.relayWing) && numIn(f.relayWing, 0, count))) {
+    return 'features.relayWing must be an integer in 0..count';
+  }
+  if (has(f, 'relayAirframe') && !A.AIRFRAMES.some(a => a.id === f.relayAirframe)) return 'features.relayAirframe is unknown';
+  if (has(f, 'relayRadio') && !R.RADIOS.some(r => r.id === f.relayRadio)) return 'features.relayRadio is unknown';
+  if (f.hetero && (!has(f, 'relayAirframe') || !has(f, 'relayRadio') || f.relayWing === 0)) {
+    return 'features.hetero requires relayAirframe, relayRadio and a positive relayWing (default: up to 3)';
+  }
+  const bandFrequency = band => {
+    const aliases = { all: null, sub1g: 915, '2.4g': 2400, '5g': 5800 };
+    if (typeof band === 'string' && has(aliases, band)) return aliases[band];
+    if (typeof band === 'string' && /^[+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(band)) band = Number(band);
+    return numIn(band, 1, 100000) ? band : undefined;
+  };
+  for (const k of ['jammers', 'gpsZones']) {
+    if (!has(f, k)) continue;
+    if (!Array.isArray(f[k])) return 'features.' + k + ' must be an array';
+    for (const [i, entry] of f[k].entries()) {
+      const at = 'features.' + k + '[' + i + ']';
+      if (!object(entry)) return at + ' must be a JSON object';
+      const jammer = k === 'jammers';
+      const allowed = ['id', 'x', 'y', 'on', ...(jammer
+        ? ['erpDbm', 'altM', 'band', 'freqMHz', 'moveSpeedMs', 'detectRangeM'] : ['rM'])];
+      for (const field of Object.keys(entry)) {
+        if (!allowed.includes(field)) return at + '.' + field + ' is unknown';
+      }
+      if (!numIn(entry.x, -LIMITS.maxCoordM, LIMITS.maxCoordM) || !numIn(entry.y, -LIMITS.maxCoordM, LIMITS.maxCoordM)) {
+        return at + '.x/y must be numbers within ±' + LIMITS.maxCoordM;
+      }
+      if (has(entry, 'id') && (typeof entry.id !== 'string' || !entry.id || entry.id.length > 100)) return at + '.id must be a nonempty string of at most 100 characters';
+      if (has(entry, 'on') && typeof entry.on !== 'boolean') return at + '.on must be a boolean';
+      if (!jammer) {
+        if (!numIn(entry.rM, 0, LIMITS.maxCoordM)) return at + '.rM must be a number in 0..' + LIMITS.maxCoordM;
+        continue;
+      }
+      if (!numIn(entry.erpDbm, -100, 100)) return at + '.erpDbm must be a number in -100..100';
+      for (const [field, max] of [['altM', 10000], ['moveSpeedMs', 1000], ['detectRangeM', LIMITS.maxCoordM]]) {
+        if (has(entry, field) && !(numIn(entry[field], 0, max) && entry[field] > 0)) return at + '.' + field + ' must be a positive number <= ' + max;
+      }
+      if (has(entry, 'freqMHz') && !numIn(entry.freqMHz, 1, 100000)) return at + '.freqMHz must be a number in 1..100000';
+      if (has(entry, 'band') && bandFrequency(entry.band) === undefined) return at + '.band must be all|sub1g|2.4g|5g or a frequency in MHz (1..100000)';
+      if (has(entry, 'freqMHz') && has(entry, 'band') && bandFrequency(entry.band) !== entry.freqMHz) return at + '.band and freqMHz must agree';
+    }
+  }
+  return null;
+}
+
 function validateConfig(cfg) {
   if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) return 'config must be a JSON object';
   if (!R.RADIOS.some(r => r.id === cfg.radio)) return 'unknown radio: ' + cfg.radio;
@@ -105,6 +166,10 @@ function validateConfig(cfg) {
     return 'count must be an integer between 1 and ' + LIMITS.maxDrones;
   }
   const count = cfg.count != null ? cfg.count : 10;
+  if (Object.prototype.hasOwnProperty.call(cfg, 'features')) {
+    const invalid = validateFeatures(cfg.features, count);
+    if (invalid) return invalid;
+  }
   if (cfg.altitudeM != null && !numIn(cfg.altitudeM, 5, 1000)) return 'altitudeM must be 5..1000';
   if (cfg.spacingPct != null && !numIn(cfg.spacingPct, 30, 150)) return 'spacingPct must be 30..150';
   if (cfg.cityDensity != null && !numIn(cfg.cityDensity, 0, 100)) return 'cityDensity must be 0..100';
@@ -150,7 +215,7 @@ function runOne(ctx, cfg, cell, seed) {
     videoOn: !!f.videoOn, videoKbps: f.videoKbps || 0,
     spectrumAgility: !!f.spectrumAgility, lpiMode: !!f.lpiMode,
     adversaryMode: !!f.adversaryMode,
-    relayWing: f.hetero ? (f.relayWing || 3) : 0,
+    relayWing: f.hetero ? (f.relayWing ?? Math.min(3, cfg.count)) : 0,
     relayAirframe: f.relayAirframe ? A.AIRFRAMES.find(a => a.id === f.relayAirframe) : null,
     relayRadio: f.relayRadio ? R.RADIOS.find(r => r.id === f.relayRadio) : null,
     jammers: Array.isArray(f.jammers) ? JSON.parse(JSON.stringify(f.jammers)) : [],

@@ -28,10 +28,10 @@ function badWeightAt(s, x, y) {
   return e ? e.bad : 0;
 }
 
-function inject(s, deadLog, maxSeq) {
+function inject(s, deadLog, maxSeq, session = s.drones[0].deadLogSession) {
   s.c2.inbox.push({ kind: 'tlm', src: s.drones[0].id, dst: 'C2', payload: {
     x: 100, y: 0, battery: 90, role: 'mission',
-    deadLog, deadLogMaxSeq: maxSeq,
+    deadLog, deadLogMaxSeq: maxSeq, deadLogSession: session,
   } });
 }
 
@@ -66,10 +66,86 @@ test('regression #17: a restarted vehicle (sequence reset) is not silenced', () 
   inject(s, [{ x: 500, y: 0, seq: 7 }], 7);
   ctx.stepSwarm(s, 0.25);
   // Vehicle reinitializes; its black-box numbering starts over at 1.
-  inject(s, [{ x: 900, y: 0, seq: 1 }], 1);
+  inject(s, [{ x: 900, y: 0, seq: 1 }], 1, 'boot-2');
   ctx.stepSwarm(s, 0.25);
   assert.ok(badWeightAt(s, 900, 0) > 0,
     'post-restart samples were dropped as stale duplicates');
+});
+
+test('F10: delayed lower sequence uploads do not reset session deduplication', () => {
+  const s = mk();
+  const a = { x: 500, y: 0, seq: 1 };
+  const b = { x: 900, y: 0, seq: 2 };
+  inject(s, [a, b], 2, 'boot-1');
+  ctx.c2Step(s);
+  inject(s, [a], 1, 'boot-1');
+  ctx.c2Step(s);
+  assert.strictEqual(badWeightAt(s, 500, 0), 3);
+  inject(s, [a], 1, 'boot-2');
+  ctx.c2Step(s);
+  inject(s, [a, b], 2, 'boot-1');
+  ctx.c2Step(s);
+  assert.strictEqual(badWeightAt(s, 500, 0), 6);
+  assert.strictEqual(badWeightAt(s, 900, 0), 3);
+  const ack = s.net.packets.filter(p => p.kind === 'ack').at(-1);
+  assert.strictEqual(ack.payload.ackDeadLogSession, 'boot-1');
+});
+
+test('F10: out-of-order unseen samples and different vehicles are counted once', () => {
+  const s = mk();
+  inject(s, [{ x: 900, y: 0, seq: 2 }], 2, 'boot-1');
+  ctx.c2Step(s);
+  inject(s, [{ x: 500, y: 0, seq: 1 }], 1, 'boot-1');
+  ctx.c2Step(s);
+  inject(s, [{ x: 900, y: 0, seq: 2 }], 2, 'boot-1');
+  ctx.c2Step(s);
+  assert.strictEqual(badWeightAt(s, 500, 0), 3);
+  assert.strictEqual(badWeightAt(s, 900, 0), 3);
+  inject(s, [{ x: 900, y: 0, seq: 2 }], 2, 'boot-1');
+  s.c2.inbox[0].src = s.drones[1].id;
+  ctx.c2Step(s);
+  assert.strictEqual(badWeightAt(s, 900, 0), 6);
+});
+
+test('F10: session IDs stay stable and ACKs cannot clear another session', () => {
+  const s = mk();
+  const d = s.drones[0];
+  assert.ok(d.deadLogSession);
+  d.deadLog = [{ x: 500, y: 0, seq: 1 }];
+  d.nextTlm = 0;
+  ctx.droneComms(s, d);
+  const session = d.deadLogSession;
+  const upload = s.net.packets.find(p => p.kind === 'tlm' && p.src === d.id);
+  assert.strictEqual(upload.payload.deadLogSession, session);
+  d.inbox.push({ kind: 'ack', payload: { ackDeadLogSession: 'old-boot', ackDeadLogSeq: 1 } });
+  ctx.droneComms(s, d);
+  assert.strictEqual(d.deadLog.length, 1);
+  assert.strictEqual(d.deadLogSession, session);
+  d.inbox.push({ kind: 'ack', payload: { ackDeadLogSession: session, ackDeadLogSeq: 1 } });
+  ctx.droneComms(s, d);
+  assert.strictEqual(d.deadLog.length, 0);
+  const rebooted = ctx.makeDrone(d.x, d.y, s.target, s.net.rng, Q450, SIK);
+  rebooted.id = d.id;
+  assert.notStrictEqual(rebooted.deadLogSession, session);
+});
+
+test('F10: a reordered ACK clears only its received samples, not sequence gaps', () => {
+  const s = mk();
+  const d = s.drones[0];
+  const samples = [{ x: 500, y: 0, seq: 1 }, { x: 900, y: 0, seq: 2 }];
+  d.deadLog = samples.slice();
+  d.nextTlm = Infinity;
+  inject(s, [samples[1]], 2);
+  ctx.c2Step(s);
+  const ack = s.net.packets.find(p => p.kind === 'ack');
+  d.inbox.push(ack);
+  ctx.droneComms(s, d);
+  assert.strictEqual(d.deadLog.length, 1);
+  assert.strictEqual(d.deadLog[0].seq, 1);
+  inject(s, d.deadLog, 1);
+  ctx.c2Step(s);
+  assert.strictEqual(badWeightAt(s, 500, 0), 3);
+  assert.strictEqual(mk().drones[0].deadLogSession, d.deadLogSession);
 });
 
 test('regression #17: telemetry carrying samples bills more than bare telemetry', () => {

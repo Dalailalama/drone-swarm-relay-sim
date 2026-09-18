@@ -55,6 +55,35 @@ list the browser needs, and adds `vehicles: [{id, ready, state}]` alongside
 it. "status" lines narrate the per-vehicle truth ("arm REJECTED ..."), never
 a success that wasn't confirmed.
 
+Flight origin (F05)
+-------------------
+Every vehicle coordinates travels in the COMMON LOCAL ORIGIN frame the
+browser fixes at connect/init time and sends in the "init" message:
+telemetry x/y/alt are origin-relative (NED position minus origin XY, -z
+minus origin ground height), and outgoing goals are origin-relative too.
+The origin is captured ONCE at connect/init -- a movable base or dragged
+target never rewrites it -- so the whole pipeline round-trips in one frame
+and a landing commanded at a different ground elevation still descends to
+ground, not to NED zero.
+
+Landing/swap/relaunch services (F04)
+------------------------------------
+A vehicle returns to base ONLY through the explicit browser-driven service
+handshake, never an implicit setpoint to alt 0: the controller sends
+{"type":"service","id","requestId","action":"land"} -> the bridge commands
+MAV_CMD_NAV_LAND, flips the vehicle out of `ready` (no more goals), and
+waits for fresh disarmed+EXTENDED_SYS_STATE(landed) evidence AFTER the
+request (state "landed") -> the browser authorizes the battery swap
+("swapping") -> later asks for completion ("swapped") -> finally "relaunch"
+re-enters the standard init sequence from GUIDED with a NEW takeoff
+altitude, and goals stay suppressed until the full climb is re-confirmed
+and the vehicle is ready again. Every step is guarded by
+`service_grounded`: fresh heartbeat + fresh position + landed, all newer
+than the request, so a low hover, stale samples or a constant-seq heartbeat
+can never masquerade as touchdown. Failed arm/takeoff during relaunch keeps
+the vehicle parked (failed:<step>); nothing rearms itself outside this
+handshake.
+
 Ownership (finding #13c)
 ------------------------
 The socket whose "init" built the current fleet is the controller. While
@@ -93,6 +122,7 @@ import argparse
 import asyncio
 import json
 import logging
+import math
 import time
 from dataclasses import dataclass, field
 from typing import Optional
@@ -111,6 +141,7 @@ log = logging.getLogger("bridge")
 
 TELEMETRY_HZ = 10.0
 TELEMETRY_DT = 1.0 / TELEMETRY_HZ
+POSITION_STALE_S = 3.0
 DRAIN_POLL_DT = 0.02  # how often we poll each vehicle's MAVLink socket (non-blocking each time)
 HEARTBEAT_STALE_S = 3.0  # a vehicle is "connected" only if heartbeat seen more recently than this
 HEARTBEAT_WAIT_TIMEOUT_S = 15.0  # how long the init state machine waits for a vehicle's FIRST heartbeat
@@ -154,6 +185,9 @@ POSITION_TARGET_TYPEMASK = 0b0000111111111000
 # param2 = desired interval in microseconds (0 = default rate, -1 = disable).
 MAV_CMD_SET_MESSAGE_INTERVAL = 511
 LOCAL_POSITION_NED_INTERVAL_US = int(1_000_000 / TELEMETRY_HZ)
+
+MAVLINK_MSG_ID_EXTENDED_SYS_STATE = 245
+EXTENDED_LANDED_STATE_ON_GROUND = 1
 
 # Human-readable COMMAND_ACK results, for status lines. Values are the
 # MAV_RESULT enum's; we keep our own table rather than reverse-mapping
@@ -208,6 +242,19 @@ class Vehicle:
     x: float = 0.0
     y: float = 0.0
     alt: float = 0.0
+    last_position: Optional[float] = None
+    position_seq: int = 0
+    landed: Optional[bool] = None
+    last_landed: Optional[float] = None
+    landed_seq: int = 0
+    service_id: Optional[str] = None
+    service_phase: Optional[str] = None
+    service_started: float = 0.0
+    service_position_seq: int = 0
+    service_landed_seq: int = 0
+    service_history: set = field(default_factory=set)
+    launch_alt: float = 0.0
+    origin: dict = field(default_factory=lambda: {"frame": "common-local-origin", "x": 0.0, "y": 0.0, "groundM": 0.0})
 
     # --- init state machine ------------------------------------------------
     init_state: str = INIT_WAIT_HEARTBEAT
@@ -243,8 +290,35 @@ class Vehicle:
         return int(self.custom_mode) == int(self.guided_mode_id)
 
     @property
+    def position_age(self) -> Optional[float]:
+        if self.last_position is None:
+            return None
+        return _now() - self.last_position
+
+    @property
+    def position_fresh(self) -> bool:
+        age = self.position_age
+        return age is not None and 0 <= age < POSITION_STALE_S
+
+    @property
+    def landed_age(self) -> Optional[float]:
+        return None if self.last_landed is None else _now() - self.last_landed
+
+    @property
+    def grounded(self) -> bool:
+        return (self.connected and not self.armed and self.position_fresh
+                and self.landed is True and self.landed_age is not None
+                and 0 <= self.landed_age < POSITION_STALE_S)
+
+    @property
+    def service_grounded(self) -> bool:
+        return (self.grounded and self.last_heartbeat > self.service_started
+                and self.position_seq > self.service_position_seq
+                and self.landed_seq > self.service_landed_seq)
+
+    @property
     def airborne(self) -> bool:
-        return self.alt > TAKEOFF_CONFIRM_ALT_M
+        return self.position_fresh and self.alt > self.launch_alt + TAKEOFF_CONFIRM_ALT_M
 
     def to_telemetry(self) -> dict:
         return {
@@ -253,6 +327,18 @@ class Vehicle:
             "y": self.y,
             "alt": self.alt,
             "connected": self.connected,
+            "ready": self.ready,
+            "state": self.init_state,
+            "positionAge": self.position_age,
+            "positionSeq": self.position_seq,
+            "armed": self.armed,
+            "heartbeatAge": None if self.last_heartbeat is None else _now() - self.last_heartbeat,
+            "landed": self.landed,
+            "landedAge": self.landed_age,
+            "landedSeq": self.landed_seq,
+            "serviceId": self.service_id,
+            "servicePhase": self.service_phase,
+            "origin": self.origin,
         }
 
     def to_ready_entry(self) -> dict:
@@ -365,6 +451,9 @@ def _request_position_stream(vehicle: Vehicle) -> None:
         LOCAL_POSITION_NED_INTERVAL_US,
         0, 0, 0, 0, 0,
     )
+    conn.mav.command_long_send(conn.target_system, conn.target_component,
+                               MAV_CMD_SET_MESSAGE_INTERVAL, 0, 245,
+                               LOCAL_POSITION_NED_INTERVAL_US, 0, 0, 0, 0, 0)
 
 
 # --------------------------------------------------------------------------
@@ -397,6 +486,12 @@ def _drain_messages(vehicle: Vehicle) -> None:
         elif mtype == "LOCAL_POSITION_NED":
             x, y, alt = ned_to_sim(msg.x, msg.y, msg.z)
             vehicle.x, vehicle.y, vehicle.alt = x, y, alt
+            vehicle.last_position = _now()
+            vehicle.position_seq += 1
+        elif mtype == "EXTENDED_SYS_STATE":
+            vehicle.landed = int(msg.landed_state) == 1
+            vehicle.last_landed = _now()
+            vehicle.landed_seq += 1
         elif mtype == "COMMAND_ACK":
             vehicle.acks[int(msg.command)] = int(msg.result)
 
@@ -464,6 +559,8 @@ async def _enter_confirm_takeoff(vehicle: Vehicle, now: float) -> None:
 async def _become_ready(vehicle: Vehicle, now: float) -> None:
     vehicle.init_state = INIT_READY
     vehicle.ready = True
+    if vehicle.service_phase == "relaunch":
+        vehicle.service_phase = None
     vehicle.failed_at = None
     vehicle.step_started_at = now
     await _vehicle_status(
@@ -529,6 +626,16 @@ async def _advance_init(vehicle: Vehicle) -> None:
         # re-armed or re-commanded to take off.
         return
 
+    if vehicle.service_phase == "landing":
+        if vehicle.service_grounded:
+            vehicle.init_state = "landed"
+            vehicle.service_phase = "landed"
+        elif now - vehicle.service_started >= INIT_STEP_TIMEOUT_S:
+            await _fail(vehicle, "land", f"vehicle {vehicle.id}: landing unconfirmed", now)
+            vehicle.service_phase = "failed"
+        return
+    if vehicle.service_phase in ("landed", "swapping", "swapped", "failed"):
+        return
     if state.startswith(FAILED_PREFIX):
         await _recover_if_possible(vehicle, now)
         return
@@ -575,7 +682,7 @@ async def _advance_init(vehicle: Vehicle) -> None:
                 f"vehicle {vehicle.id}: arm REJECTED (pre-arm checks?) - COMMAND_ACK {_result_name(result)}",
                 now,
             )
-        elif _accepted(result) and vehicle.armed:
+        elif _accepted(result) and vehicle.connected and vehicle.armed:
             await _vehicle_status(
                 vehicle,
                 f"vehicle {vehicle.id}: armed (ACK + heartbeat armed flag), commanding takeoff to {vehicle.takeoff_alt:g} m",
@@ -603,7 +710,7 @@ async def _advance_init(vehicle: Vehicle) -> None:
                 f"vehicle {vehicle.id}: takeoff REJECTED - COMMAND_ACK {_result_name(result)}",
                 now,
             )
-        elif _accepted(result) and vehicle.airborne:
+        elif _accepted(result) and vehicle.connected and vehicle.mode_confirmed and vehicle.armed and vehicle.airborne:
             await _become_ready(vehicle, now)
         elif elapsed >= INIT_STEP_TIMEOUT_S:
             await _fail(
@@ -717,9 +824,20 @@ def _controlled_by_other(websocket) -> bool:
     return controller in STATE.clients
 
 
-async def _may_control(websocket) -> bool:
+def _owns_control(websocket) -> bool:
+    return websocket in STATE.clients and STATE.controller is websocket
+
+
+async def _may_control(websocket, *, acquire: bool = False) -> bool:
+    if websocket not in STATE.clients:
+        return False
     if _controlled_by_other(websocket):
         await send_status(websocket, "bridge is controlled by another client")
+        return False
+    if acquire:
+        STATE.controller = websocket
+    if not _owns_control(websocket):
+        await send_status(websocket, "bridge has no controller; send init to acquire control")
         return False
     return True
 
@@ -755,23 +873,33 @@ async def handle_init(websocket, msg: dict, cli_count: Optional[int], base_port:
     async with STATE.init_lock:
         # Re-check ownership inside the lock: another client may have claimed
         # control while this init waited its turn.
-        if not await _may_control(websocket):
+        if not await _may_control(websocket, acquire=True) or not _owns_control(websocket):
             return
 
         count = cli_count if cli_count is not None else int(msg.get("count", 0))
         alt = float(msg.get("alt", 50))
+        supplied_origin = msg.get("origin", {"frame": "common-local-origin", "x": 0.0, "y": 0.0, "groundM": 0.0})
+        if not isinstance(supplied_origin, dict) or supplied_origin.get("frame") != "common-local-origin":
+            return
+        if not all(isinstance(supplied_origin.get(k), (int, float)) and math.isfinite(supplied_origin[k])
+                   for k in ("x", "y", "groundM")):
+            return
+        origin = {"frame": "common-local-origin", **{k: float(supplied_origin[k]) for k in ("x", "y", "groundM")}}
 
         await send_status(websocket, f"bridge: initializing {count} vehicle(s), target alt {alt:g} m")
+        if not _owns_control(websocket):
+            return
 
         await _stop_all_vehicles()
-        STATE.controller = websocket
+        if not _owns_control(websocket):
+            return
 
         ids = []
         vehicles = []
         for i in range(count):
             vid = f"DR-{i + 1}"
             ids.append(vid)
-            v = Vehicle(id=vid, index=i, port=base_port + 10 * i, takeoff_alt=alt, status_ws=websocket)
+            v = Vehicle(id=vid, index=i, port=base_port + 10 * i, takeoff_alt=alt, status_ws=websocket, origin=dict(origin))
             STATE.vehicles[vid] = v
             vehicles.append(v)
 
@@ -793,9 +921,13 @@ async def handle_init(websocket, msg: dict, cli_count: Optional[int], base_port:
             for w in pending:
                 w.cancel()
 
+        if not _owns_control(websocket):
+            return
         n_ready = sum(1 for v in vehicles if v.ready)
         detail = ", ".join(f"{v.id}={v.init_state}" for v in vehicles) or "no vehicles"
         await send_status(websocket, f"bridge: {n_ready}/{count} vehicles confirmed ready ({detail})")
+        if not _owns_control(websocket):
+            return
         await websocket.send(
             json.dumps(
                 {
@@ -816,15 +948,16 @@ def handle_goals(msg: dict) -> None:
     receipt keeps GUIDED mode's position setpoint fresh enough that
     ArduCopter won't consider it stale.
 
-    Setpoints go to every connected vehicle, ready or not: a vehicle that is
-    mid-recovery will start tracking them the moment it reaches GUIDED, and
-    an autopilot that isn't in GUIDED simply ignores them.
     """
     for g in msg.get("goals", []):
         vid = g.get("id")
         vehicle = STATE.vehicles.get(vid)
-        if vehicle is None or vehicle.conn is None:
-            continue  # unknown id, or vehicle never connected: ignore
+        if (vehicle is None or vehicle.conn is None
+                or not vehicle.ready or vehicle.init_state != INIT_READY
+                or not vehicle.connected or not vehicle.position_fresh
+                or not vehicle.mode_confirmed or not vehicle.armed
+                or vehicle.service_phase is not None):
+            continue
         try:
             x, y, alt = float(g["x"]), float(g["y"]), float(g["alt"])
         except (KeyError, TypeError, ValueError):
@@ -844,6 +977,57 @@ def handle_goals(msg: dict) -> None:
         )
 
 
+async def handle_service(websocket, msg: dict) -> None:
+    if not await _may_control(websocket) or not _owns_control(websocket):
+        return
+    v = STATE.vehicles.get(msg.get("id"))
+    request_id = msg.get("requestId")
+    action = msg.get("action")
+    if v is None or v.conn is None or not isinstance(request_id, str) or not request_id:
+        return
+    if action == "land":
+        if request_id in v.service_history or v.service_phase not in (None, "complete"):
+            return
+        if not (v.ready and v.init_state == INIT_READY and v.connected and v.position_fresh and v.armed):
+            return
+        v.service_history.add(request_id)
+        v.service_id = request_id
+        v.service_phase = "landing"
+        v.service_started = _now()
+        v.service_position_seq = v.position_seq
+        v.service_landed_seq = v.landed_seq
+        v.init_state = "landing"
+        v.ready = False
+        v.conn.mav.command_long_send(v.conn.target_system, v.conn.target_component,
+                                     21, 0, 0, 0, 0, 0, 0, 0, 0)
+        return
+    if request_id != v.service_id:
+        return
+    if action == "authorize" and v.service_phase == "landed" and v.service_grounded:
+        v.service_phase = v.init_state = "swapping"
+    elif action == "complete" and v.service_phase == "swapping" and v.service_grounded:
+        v.service_phase = v.init_state = "swapped"
+    elif action == "relaunch" and v.service_phase == "swapped" and v.service_grounded:
+        try:
+            alt = float(msg["alt"])
+        except (KeyError, ValueError, TypeError):
+            return
+        if not math.isfinite(alt) or alt <= TAKEOFF_CONFIRM_ALT_M:
+            return
+        v.launch_alt = v.alt
+        v.takeoff_alt = alt
+        v.service_phase = "relaunch"
+        v.acks.clear()
+        await _enter_confirm_mode(v, _now())
+    elif action == "abort":
+        if v.service_phase in ("landing", "landed", "swapping", "swapped"):
+            v.service_phase = None
+            v.service_id = None
+            v.init_state = FAILED_PREFIX + "service"
+            v.ready = False
+            v.failed_at = _now()
+
+
 async def handle_message(websocket, raw: str, cli_count: Optional[int], base_port: int) -> None:
     try:
         msg = json.loads(raw)
@@ -854,10 +1038,12 @@ async def handle_message(websocket, raw: str, cli_count: Optional[int], base_por
     mtype = msg.get("type")
     if mtype == "init":
         await handle_init(websocket, msg, cli_count, base_port)
+    elif mtype == "service":
+        await handle_service(websocket, msg)
     elif mtype == "goals":
         # Only the controlling client may command the fleet (finding #13c);
         # everyone else can still watch the telemetry broadcast.
-        if not await _may_control(websocket):
+        if not await _may_control(websocket) or not _owns_control(websocket):
             return
         handle_goals(msg)
     else:

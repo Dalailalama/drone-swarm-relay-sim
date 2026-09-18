@@ -40,7 +40,12 @@
     ready: false,
     controlMode: 'internal', // 'internal' | 'external'
     ids: null,          // vehicle ids the bridge reports
-    telem: {},          // id -> {x, y, alt, connected, t}
+    vehicleStates: {},
+    origin: null,
+    services: {},
+    serviceSeq: 0,
+    expectedCount: 0,
+    telem: {},
     prev: {},           // id -> {x, y, t} for velocity estimation
     lastGoalSent: 0,
     status: 'disconnected',
@@ -53,10 +58,83 @@
     if (s) logEvent(s, 'External: ' + text, 'info');
   }
 
+  function captureOrigin(s) {
+    return Object.freeze({ frame: 'common-local-origin', x: s.base.x, y: s.base.y,
+      groundM: terrainGroundAt(s.terrain, s.base.x, s.base.y) });
+  }
+
+  function refreshReadiness(s) {
+    const states = Object.values(ExternalMode.vehicleStates);
+    const n = states.filter(v => v.ready === true && v.state === 'ready').length;
+    const total = Math.max(ExternalMode.expectedCount, states.length);
+    ExternalMode.ready = n > 0;
+    const failed = states.filter(v => String(v.state).startsWith('failed:')).length;
+    const text = n === total && n > 0 ? 'vehicles ready (' + n + ') — flying under external control'
+      : (failed === total && total > 0 ? 'all vehicles failed' : n > 0 ? 'vehicles partially ready' : 'vehicles initializing')
+        + ' (' + n + '/' + total + ' confirmed ready)';
+    if (ExternalMode.status !== text) setStatus(s, text);
+  }
+
+  function sampleAge(t, prefix) {
+    if (!t || !Number.isSafeInteger(t[prefix + 'Seq']) || t[prefix + 'Seq'] <= 0 ||
+        !Number.isFinite(t[prefix + 'At'])) return Infinity;
+    return wallSec() - t[prefix + 'At'];
+  }
+
+  function positionFresh(t) {
+    return ExternalMode.connected && t && t.connected === true &&
+      wallSec() - t.rxAt < EXT_STALE_SEC && sampleAge(t, 'position') >= 0 &&
+      sampleAge(t, 'position') < EXT_STALE_SEC;
+  }
+
+  function vehicleReady(id) {
+    const t = ExternalMode.telem[id], v = ExternalMode.vehicleStates[id];
+    return positionFresh(t) && v && v.ready === true && v.state === 'ready' &&
+      t.ready === true && t.state === 'ready' && t.armed === true;
+  }
+
+  function grounded(id) {
+    const t = ExternalMode.telem[id];
+    return positionFresh(t) && t.armed === false && Number.isFinite(t.heartbeatAge) &&
+      t.heartbeatAge >= 0 && t.heartbeatAge + wallSec() - t.rxAt < EXT_STALE_SEC &&
+      t.landed === true && sampleAge(t, 'landed') >= 0 && sampleAge(t, 'landed') < EXT_STALE_SEC;
+  }
+
+  function serviceSend(id, action, extra) {
+    const svc = ExternalMode.services[id];
+    if (!svc || !ExternalMode.connected) return;
+    ExternalMode.ws.send(JSON.stringify({ type: 'service', id, requestId: svc.id, action, ...extra }));
+  }
+
+  function externalServiceGrounded(id) {
+    const svc = ExternalMode.services[id], t = ExternalMode.telem[id];
+    return svc && t && svc.id === t.serviceId && t.state === 'swapping' && grounded(id);
+  }
+
+  function externalServiceComplete(s, d) {
+    const svc = ExternalMode.services[d.id], t = ExternalMode.telem[d.id];
+    if (!svc || !t || t.serviceId !== svc.id) return false;
+    if (t.state === 'swapping' && grounded(d.id) && svc.phase === 'swapping') {
+      svc.phase = 'completing';
+      serviceSend(d.id, 'complete');
+    }
+    if (t.state === 'swapped' && grounded(d.id) && svc.phase === 'completing') {
+      svc.phase = 'relaunch';
+      serviceSend(d.id, 'relaunch', { alt: s.altitudeM });
+    }
+    if (svc.phase === 'relaunch' && t.servicePhase === null && vehicleReady(d.id)) {
+      delete ExternalMode.services[d.id];
+      return true;
+    }
+    return false;
+  }
+
   // Connect to a bridge/mock at wsUrl and prepare `count` vehicles at altM.
   function externalConnect(getSwarm, wsUrl, count, altM) {
     externalDisconnect();
     ExternalMode.controlMode = 'external';
+    ExternalMode.origin = captureOrigin(getSwarm());
+    ExternalMode.expectedCount = count;
     let ws;
     try { ws = new WebSocket(wsUrl); }
     catch (e) { setStatus(getSwarm(), 'bad URL: ' + e.message); return; }
@@ -69,7 +147,7 @@
     ws.onopen = () => {
       if (ExternalMode.ws !== ws) return;
       ExternalMode.connected = true;
-      ws.send(JSON.stringify({ type: 'init', count, alt: altM }));
+      ws.send(JSON.stringify({ type: 'init', count, alt: altM, origin: ExternalMode.origin }));
       setStatus(getSwarm(), 'connected — initializing ' + count + ' vehicles…');
     };
     ws.onclose = () => {
@@ -89,15 +167,43 @@
       let m; try { m = JSON.parse(ev.data); } catch (e) { return; }
       const s = getSwarm();
       if (m.type === 'ready') {
-        ExternalMode.ids = m.ids;
-        ExternalMode.ready = true;
-        setStatus(s, 'vehicles ready (' + m.ids.length + ') — flying under external control');
-      } else if (m.type === 'telemetry') {
-        for (const v of m.vehicles) {
-          const prev = ExternalMode.telem[v.id];
-          if (prev) ExternalMode.prev[v.id] = { x: prev.x, y: prev.y, t: prev.t };
-          ExternalMode.telem[v.id] = { x: v.x, y: v.y, alt: v.alt, connected: v.connected, t: m.t, rxAt: wallSec() };
+        ExternalMode.ids = Array.isArray(m.ids) ? m.ids : [];
+        ExternalMode.expectedCount = ExternalMode.ids.length;
+        for (const v of m.vehicles || []) {
+          if (!ExternalMode.telem[v.id]) ExternalMode.vehicleStates[v.id] = { ready: v.ready === true, state: v.state };
         }
+        refreshReadiness(s);
+      } else if (m.type === 'telemetry') {
+        for (const v of m.vehicles || []) {
+          const prev = ExternalMode.telem[v.id];
+          const now = wallSec();
+          const t = { ...v, rxAt: now };
+          for (const prefix of ['position', 'landed']) {
+            const seq = v[prefix + 'Seq'], age = v[prefix + 'Age'];
+            const advanced = Number.isSafeInteger(seq) && seq > 0 && (!prev || seq > (prev[prefix + 'Seq'] || 0));
+            const at = Number.isFinite(age) && age >= 0 ? now - age : -Infinity;
+            t[prefix + 'Seq'] = Math.max(seq || 0, prev ? prev[prefix + 'Seq'] || 0 : 0);
+            t[prefix + 'At'] = advanced ? at : Math.min(at, prev ? prev[prefix + 'At'] : -Infinity);
+            if (prefix === 'position') {
+              if (advanced && Number.isFinite(v.x) && Number.isFinite(v.y) && Number.isFinite(v.alt)) {
+                if (prev && Number.isFinite(prev.positionAt)) ExternalMode.prev[v.id] = prev;
+                t.x = v.x; t.y = v.y; t.alt = v.alt;
+              } else {
+                t.x = prev && prev.x; t.y = prev && prev.y; t.alt = prev && prev.alt;
+                if (!prev || seq < prev.positionSeq) t.positionAt = -Infinity;
+              }
+              if (![t.x, t.y, t.alt].every(Number.isFinite)) t.positionAt = -Infinity;
+            }
+          }
+          ExternalMode.telem[v.id] = t;
+          ExternalMode.vehicleStates[v.id] = { ready: v.ready === true, state: v.state };
+          const svc = ExternalMode.services[v.id];
+          if (svc && svc.id === v.serviceId && v.state === 'landed' && grounded(v.id) && svc.phase === 'landing') {
+            svc.phase = 'swapping';
+            serviceSend(v.id, 'authorize');
+          }
+        }
+        refreshReadiness(s);
       } else if (m.type === 'status') {
         setStatus(s, m.msg);
       }
@@ -112,10 +218,13 @@
     if (!ExternalMode.ws || !ExternalMode.connected) return;
     ExternalMode.ready = false;
     ExternalMode.ids = null;
+    ExternalMode.vehicleStates = {};
     ExternalMode.telem = {};
     ExternalMode.prev = {};
     ExternalMode.lastGoalSent = 0;
-    ExternalMode.ws.send(JSON.stringify({ type: 'init', count, alt: altM }));
+    ExternalMode.services = {};
+    ExternalMode.expectedCount = count;
+    ExternalMode.ws.send(JSON.stringify({ type: 'init', count, alt: altM, origin: ExternalMode.origin }));
     setStatus(getSwarm(), 're-initializing ' + count + ' vehicles…');
   }
 
@@ -128,8 +237,12 @@
     ExternalMode.connected = false;
     ExternalMode.ready = false;
     ExternalMode.ids = null;
+    ExternalMode.vehicleStates = {};
     ExternalMode.telem = {};
     ExternalMode.prev = {};
+    ExternalMode.services = {};
+    ExternalMode.origin = null;
+    ExternalMode.lastGoalSent = 0;
   }
 
   function externalActive() {
@@ -141,7 +254,7 @@
   // vehicles. Velocity is estimated from consecutive telemetry so heading
   // arrows and the "moving" battery-drain flag still work.
   function externalPullPositions(s) {
-    if (!ExternalMode.connected || !ExternalMode.ready) {
+    if (!ExternalMode.connected) {
       for (const d of s.drones) {
         d.vx = 0;
         d.vy = 0;
@@ -155,8 +268,7 @@
         d.vy = 0;
         continue;
       }
-      const stale = t.rxAt != null && (wallSec() - t.rxAt) > EXT_STALE_SEC;
-      if (!t.connected || stale) {
+      if (!positionFresh(t)) {
         // Bridge lost this vehicle's heartbeat — or the whole telemetry
         // stream stalled while the socket idled open (finding #9: freshness
         // is judged by LOCAL receipt age, never by the last sample's claim).
@@ -177,20 +289,21 @@
         if (!alive(d)) { d.mode = 'ok'; d.lastC2 = s.time; }
       }
       const p = ExternalMode.prev[d.id];
-      if (p && t.t > p.t) {
-        const dt = t.t - p.t;
+      d.vx = d.vy = 0;
+      if (p && t.positionAt > p.positionAt && t.positionAt - p.positionAt < EXT_STALE_SEC) {
+        const dt = t.positionAt - p.positionAt;
         d.vx = (t.x - p.x) / dt;
         d.vy = (t.y - p.y) / dt;
       }
-      d.x = t.x;
-      d.y = t.y;
+      d.x = t.x + ExternalMode.origin.x;
+      d.y = t.y + ExternalMode.origin.y;
       // The bridge reports -LOCAL_POSITION_NED.z: height above the LAUNCH
       // ORIGIN (MAVLink local NED is origin-relative — see MAV_FRAME). The
       // RF model wants AGL at the vehicle's CURRENT position; over terrain
       // the two differ by the ground-height difference (finding #25).
       if (t.alt != null) {
         d.altM = t.alt
-          + terrainGroundAt(s.terrain, s.base.x, s.base.y)
+          + ExternalMode.origin.groundM
           - terrainGroundAt(s.terrain, d.x, d.y);
       }
     }
@@ -210,15 +323,19 @@
     const goals = [];
     for (const d of s.drones) {
       if (!alive(d) || d.goalX == null) continue;
+      if (!vehicleReady(d.id) || ExternalMode.services[d.id]) continue;
       // Ship the exact goal stepDrone vetted this tick (cached on the drone),
       // not a fresh goalFor call — recomputing would double-advance orbitPhase.
-      // Two external-only vets (finding #11): the leg is clipped short of any
-      // known no-fly building (the autopilot has no obstacle map), and an
-      // RTB/RTL drone over the pad is commanded to DESCEND — touchdown is
-      // confirmed by telemetry before anyone calls it landed.
       const g = clipGoalToNoFly(s, d, { x: d.goalX, y: d.goalY });
-      const overPad = (d.mode === 'rtb' || d.mode === 'rtl') && dist2d(d, s.base) < DRONE.landThresholdM * 2;
-      goals.push({ id: d.id, x: g.x, y: g.y, alt: overPad ? 0 : s.altitudeM });
+      const overPad = (d.mode === 'rtb' || d.mode === 'rtl') && dist2d(d, s.base) < DRONE.landThresholdM;
+      const origin = ExternalMode.origin;
+      if (overPad) {
+        ExternalMode.services[d.id] = { id: String(++ExternalMode.serviceSeq), phase: 'landing' };
+        serviceSend(d.id, 'land', { groundAlt: terrainGroundAt(s.terrain, d.x, d.y) - origin.groundM });
+        continue;
+      }
+      goals.push({ id: d.id, x: g.x - origin.x, y: g.y - origin.y,
+        alt: s.altitudeM + terrainGroundAt(s.terrain, g.x, g.y) - origin.groundM });
     }
     if (ExternalMode.ws && ExternalMode.connected) {
       ExternalMode.ws.send(JSON.stringify({ type: 'goals', goals }));
@@ -233,4 +350,6 @@
   window.externalReinit = externalReinit;
   window.externalPullPositions = externalPullPositions;
   window.externalPushGoals = externalPushGoals;
+  window.externalServiceGrounded = externalServiceGrounded;
+  window.externalServiceComplete = externalServiceComplete;
 })();
