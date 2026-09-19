@@ -1286,8 +1286,12 @@ function droneComms(s, d) {
         Number.isFinite(c2at) && c2at <= s.time && (!d.baseKnown || c2at >= d.baseKnown.at)) {
       d.baseKnown = { x: c2pos.x, y: c2pos.y, at: c2at };
     }
-    if (d.mode === 'hold' || d.mode === 'relink' || d.mode === 'rtl') {
+    const inExternalService = (typeof externalServiceActive === 'function' && externalServiceActive(d.id)) ||
+                              (typeof ExternalMode !== 'undefined' && ExternalMode.services && ExternalMode.services[d.id] && ExternalMode.services[d.id].phase !== 'failed') ||
+                              (typeof window !== 'undefined' && window.ExternalMode && window.ExternalMode.services && window.ExternalMode.services[d.id] && window.ExternalMode.services[d.id].phase !== 'failed');
+    if (!inExternalService && (d.mode === 'hold' || d.mode === 'relink' || d.mode === 'rtl')) {
       d.mode = 'ok';
+      d.endpointDeadAt = null;
       logEvent(s, d.id + ' link restored — resuming orders', 'info');
     }
 
@@ -1477,6 +1481,8 @@ function updateBattery(s, d, dt, vAirMs) {
   if (d.energyWh <= 0 && alive(d)) {
     d.mode = 'dead';
     d.vx = d.vy = 0;
+    d.endpointDeadAt = s.time;
+    if (typeof interruptEndpointAttempts === 'function') interruptEndpointAttempts(s, d.id);
     logEvent(s, d.id + ' battery exhausted — down', 'error');
   }
 }
@@ -1485,6 +1491,8 @@ function killDrone(s, d) {
   if (!alive(d)) return;
   d.mode = 'dead';
   d.vx = d.vy = 0;
+  d.endpointDeadAt = s.time;
+  if (typeof interruptEndpointAttempts === 'function') interruptEndpointAttempts(s, d.id);
   logEvent(s, d.id + ' lost', 'error'); // note: C2 only finds out via telemetry silence
 }
 
@@ -1744,11 +1752,13 @@ function stepDrone(s, d, dt) {
     updateBattery(s, d, dt, Math.min(va, maxV));
   }
 
-  if ((d.mode === 'rtb' || d.mode === 'rtl') && dist2d(d, s.base) < DRONE.landThresholdM) {
+  if ((d.mode === 'rtb' || (external && d.mode === 'rtl')) && dist2d(d, s.base) < DRONE.landThresholdM) {
     // Internal physics is a 2D abstraction — touchdown is instantaneous.
     const grounded = !external || externalServiceGrounded(d.id);
-    if (d.mode === 'rtb' && grounded) {
+    if ((d.mode === 'rtb' || d.mode === 'rtl') && grounded) {
       d.mode = 'landed'; d.vx = d.vy = 0;
+      d.endpointDeadAt = s.time;
+      if (typeof interruptEndpointAttempts === 'function') interruptEndpointAttempts(s, d.id);
       d.swapAt = s.time + BATTERY.swapSec;
       logEvent(s, d.id + ' landed at base — battery swap in progress', 'info');
     }
@@ -1924,6 +1934,7 @@ function stepSwarm(s, dt) {
     if (d.mode === 'landed' && d.swapAt && s.time >= d.swapAt) {
       if (external && !externalServiceComplete(s, d)) continue;
       d.mode = 'ok';
+      d.endpointDeadAt = null;
       d.energyWh = usableWh(afOf(s, d));
       d.batteryPct = 100;
       d.swapAt = null;

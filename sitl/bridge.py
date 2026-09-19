@@ -165,6 +165,8 @@ INIT_CONFIRM_MODE = "confirm-mode"
 INIT_CONFIRM_ARM = "confirm-arm"
 INIT_CONFIRM_TAKEOFF = "confirm-takeoff"
 INIT_READY = "ready"
+INIT_CONFIRM_ABORT = "confirm-abort"
+INIT_ABORT_HOLD = "abort-hold"
 FAILED_PREFIX = "failed:"  # + step name, e.g. "failed:arm", "failed:no-heartbeat"
 
 # --- MAVLink constants that need explaining -------------------------------
@@ -254,6 +256,13 @@ class Vehicle:
     service_landed_seq: int = 0
     service_history: set = field(default_factory=set)
     launch_alt: float = 0.0
+    descent_ref_alt: float = 0.0
+    last_descent_at: float = 0.0
+    takeoff_climb_m: float = 0.0
+    hold_x: Optional[float] = None
+    hold_y: Optional[float] = None
+    hold_alt: Optional[float] = None
+    service_action_history: dict = field(default_factory=dict)
     origin: dict = field(default_factory=lambda: {"frame": "common-local-origin", "x": 0.0, "y": 0.0, "groundM": 0.0})
 
     # --- init state machine ------------------------------------------------
@@ -398,7 +407,38 @@ def _send_set_mode(vehicle: Vehicle) -> None:
     mavutil.mavfile.set_mode() wraps exactly this legacy-message approach,
     which is what mission planners / ArduPilot's own example scripts use.
     """
-    vehicle.conn.set_mode(vehicle.guided_mode_id)
+    if vehicle.conn is None:
+        return
+    if vehicle.guided_mode_id is None:
+        try:
+            mapping = vehicle.conn.mode_mapping()
+            if mapping and "GUIDED" in mapping:
+                vehicle.guided_mode_id = mapping["GUIDED"]
+        except Exception:
+            pass
+    if vehicle.guided_mode_id is not None:
+        vehicle.conn.set_mode(vehicle.guided_mode_id)
+
+
+def _send_hold_target(vehicle: Vehicle) -> None:
+    """Send position hold setpoint in GUIDED mode using captured hold target."""
+    if vehicle.conn is None:
+        return
+    if vehicle.hold_x is None or vehicle.hold_y is None or vehicle.hold_alt is None:
+        return
+    north, east, down = sim_to_ned(vehicle.hold_x, vehicle.hold_y, vehicle.hold_alt)
+    vehicle.conn.mav.set_position_target_local_ned_send(
+        0,
+        vehicle.conn.target_system,
+        vehicle.conn.target_component,
+        mavutil.mavlink.MAV_FRAME_LOCAL_NED,
+        POSITION_TARGET_TYPEMASK,
+        north, east, down,
+        0, 0, 0,
+        0, 0, 0,
+        0, 0,
+    )
+
 
 
 def _send_arm(vehicle: Vehicle) -> None:
@@ -429,7 +469,7 @@ def _send_takeoff(vehicle: Vehicle) -> None:
         0,  # confirmation
         0, 0, 0, 0,  # param1-4: unused for copter takeoff
         0, 0,  # param5 (lat), param6 (lon): 0 = current position
-        vehicle.takeoff_alt,  # param7: target altitude, metres
+        vehicle.takeoff_climb_m if vehicle.takeoff_climb_m > 0 else vehicle.takeoff_alt,  # param7: target altitude, metres
     )
 
 
@@ -604,6 +644,8 @@ async def _recover_if_possible(vehicle: Vehicle, now: float) -> None:
     """Failed state: wait for the vehicle to come back, then resume."""
     if not vehicle.connected:
         return  # nothing to talk to yet; keep polling for a heartbeat
+    if vehicle.service_phase in ("failed", "aborted") or vehicle.init_state == FAILED_PREFIX + "abort":
+        return
     # A vehicle that only just started talking is retried immediately (that
     # heartbeat IS the thing we were waiting for); anything else backs off,
     # so a vehicle failing its pre-arm checks isn't hammered every 20 ms.
@@ -626,16 +668,76 @@ async def _advance_init(vehicle: Vehicle) -> None:
         # re-armed or re-commanded to take off.
         return
 
+    if state == INIT_CONFIRM_ABORT:
+        elapsed = now - vehicle.step_started_at
+        if vehicle.connected and vehicle.mode_confirmed and vehicle.position_fresh:
+            vehicle.hold_x = vehicle.x
+            vehicle.hold_y = vehicle.y
+            vehicle.hold_alt = vehicle.alt
+            _enter_step(vehicle, INIT_ABORT_HOLD, now)
+            await _vehicle_status(
+                vehicle,
+                f"vehicle {vehicle.id}: abort confirmed in GUIDED, holding at ({vehicle.hold_x:.1f}, {vehicle.hold_y:.1f}, {vehicle.hold_alt:.1f})",
+            )
+            _send_hold_target(vehicle)
+            return
+        elif elapsed >= INIT_STEP_TIMEOUT_S:
+            await _fail(
+                vehicle,
+                "abort",
+                f"vehicle {vehicle.id}: abort unconfirmed after {INIT_STEP_TIMEOUT_S:g}s "
+                f"(mode_confirmed={vehicle.mode_confirmed}, connected={vehicle.connected}, pos_fresh={vehicle.position_fresh})",
+                now,
+            )
+            vehicle.service_phase = "failed"
+            return
+        elif (not vehicle.connected or not vehicle.mode_confirmed) and now - vehicle.step_sent_at >= STEP_RESEND_DT:
+            _send_set_mode(vehicle)
+            vehicle.step_sent_at = now
+        return
+
+    if state == INIT_ABORT_HOLD:
+        # Airborne hold after abort: hold current position in GUIDED
+        if vehicle.conn is not None and vehicle.connected and vehicle.mode_confirmed and vehicle.position_fresh:
+            _send_hold_target(vehicle)
+        return
+
+    if state == "aborted" or vehicle.service_phase == "aborted":
+        # Aborted ground service: non-arming state, never auto-recover
+        return
+
     if vehicle.service_phase == "landing":
         if vehicle.service_grounded:
             vehicle.init_state = "landed"
             vehicle.service_phase = "landed"
-        elif now - vehicle.service_started >= INIT_STEP_TIMEOUT_S:
-            await _fail(vehicle, "land", f"vehicle {vehicle.id}: landing unconfirmed", now)
+            vehicle.failed_at = None
+            return
+        land_ack = _ack(vehicle, mavutil.mavlink.MAV_CMD_NAV_LAND)
+        if land_ack is not None and not _accepted(land_ack):
+            await _fail(vehicle, "land", f"vehicle {vehicle.id}: landing command REJECTED - COMMAND_ACK {_result_name(land_ack)}", now)
             vehicle.service_phase = "failed"
+            return
+        if vehicle.position_fresh:
+            if vehicle.alt <= vehicle.descent_ref_alt - 0.5:
+                vehicle.descent_ref_alt = vehicle.alt
+                vehicle.last_descent_at = now
+        if now - vehicle.last_descent_at >= INIT_STEP_TIMEOUT_S:
+            await _fail(vehicle, "land", f"vehicle {vehicle.id}: landing unconfirmed (no descent progress)", now)
+            vehicle.service_phase = "failed"
+            return
         return
-    if vehicle.service_phase in ("landed", "swapping", "swapped", "failed"):
+
+    if vehicle.service_phase == "failed":
+        if vehicle.service_grounded:
+            vehicle.init_state = "landed"
+            vehicle.service_phase = "landed"
+            vehicle.failed_at = None
+            await _vehicle_status(vehicle, f"vehicle {vehicle.id}: confirmed landed after timeout - recovered to landed")
         return
+
+    if vehicle.service_phase in ("landed", "swapping", "swapped"):
+        return
+
     if state.startswith(FAILED_PREFIX):
         await _recover_if_possible(vehicle, now)
         return
@@ -977,18 +1079,73 @@ def handle_goals(msg: dict) -> None:
         )
 
 
+async def _send_service_ack(
+    websocket,
+    request_id: str,
+    vid: str,
+    action: str,
+    accepted: bool,
+    error: Optional[str] = None,
+    code: Optional[str] = None,
+    retryable: bool = False,
+    duplicate: bool = False,
+) -> None:
+    if websocket is None:
+        return
+    ack_msg = {
+        "type": "service_ack",
+        "requestId": request_id,
+        "id": vid,
+        "action": action,
+        "accepted": accepted,
+        "duplicate": duplicate,
+    }
+    if error is not None:
+        ack_msg["error"] = error
+    if code is not None:
+        ack_msg["code"] = code
+    if not accepted:
+        ack_msg["retryable"] = retryable
+    try:
+        await websocket.send(json.dumps(ack_msg))
+    except Exception:
+        pass
+
+
 async def handle_service(websocket, msg: dict) -> None:
     if not await _may_control(websocket) or not _owns_control(websocket):
         return
-    v = STATE.vehicles.get(msg.get("id"))
+    vid = msg.get("id")
+    v = STATE.vehicles.get(vid)
     request_id = msg.get("requestId")
     action = msg.get("action")
     if v is None or v.conn is None or not isinstance(request_id, str) or not request_id:
         return
+
+    # Idempotency check: replay previous response if this action was already handled
+    history_key = (request_id, action)
+    if history_key in v.service_action_history:
+        cached_accepted, cached_err, cached_code, cached_retryable = v.service_action_history[history_key]
+        await _send_service_ack(
+            websocket, request_id, v.id, action, cached_accepted,
+            error=cached_err, code=cached_code, retryable=cached_retryable, duplicate=True
+        )
+        return
+
+    async def record_and_ack(accepted: bool, error: Optional[str] = None, code: Optional[str] = None, retryable: bool = False):
+        if accepted:
+            v.service_action_history[history_key] = (accepted, error, code, retryable)
+        await _send_service_ack(websocket, request_id, v.id, action, accepted, error=error, code=code, retryable=retryable)
+
     if action == "land":
-        if request_id in v.service_history or v.service_phase not in (None, "complete"):
+        if v.service_phase not in (None, "complete"):
+            if v.service_id == request_id and v.service_phase == "landing":
+                await record_and_ack(True)
+                return
+            await record_and_ack(False, error=f"service busy in phase {v.service_phase}", code="SERVICE_BUSY", retryable=True)
             return
         if not (v.ready and v.init_state == INIT_READY and v.connected and v.position_fresh and v.armed):
+            await record_and_ack(False, error="vehicle not ready to land", code="VEHICLE_NOT_READY", retryable=True)
             return
         v.service_history.add(request_id)
         v.service_id = request_id
@@ -996,36 +1153,106 @@ async def handle_service(websocket, msg: dict) -> None:
         v.service_started = _now()
         v.service_position_seq = v.position_seq
         v.service_landed_seq = v.landed_seq
+        v.descent_ref_alt = v.alt
+        v.last_descent_at = _now()
         v.init_state = "landing"
         v.ready = False
+        # Clear any stale MAV_CMD_NAV_LAND ack from previous landing attempts
+        v.acks.pop(21, None)
         v.conn.mav.command_long_send(v.conn.target_system, v.conn.target_component,
                                      21, 0, 0, 0, 0, 0, 0, 0, 0)
+        await record_and_ack(True)
         return
+
     if request_id != v.service_id:
+        await record_and_ack(False, error="request ID mismatch or service not active", code="INVALID_REQUEST_ID", retryable=False)
         return
-    if action == "authorize" and v.service_phase == "landed" and v.service_grounded:
-        v.service_phase = v.init_state = "swapping"
-    elif action == "complete" and v.service_phase == "swapping" and v.service_grounded:
-        v.service_phase = v.init_state = "swapped"
-    elif action == "relaunch" and v.service_phase == "swapped" and v.service_grounded:
+
+    if action == "authorize":
+        if v.service_phase == "landed" and v.service_grounded:
+            v.service_phase = v.init_state = "swapping"
+            await record_and_ack(True)
+        else:
+            await record_and_ack(False, error=f"cannot authorize in phase {v.service_phase}", code="INVALID_PHASE", retryable=True)
+        return
+
+    if action == "complete":
+        if v.service_phase == "swapping" and v.service_grounded:
+            v.service_phase = v.init_state = "swapped"
+            await record_and_ack(True)
+        else:
+            await record_and_ack(False, error=f"cannot complete in phase {v.service_phase}", code="INVALID_PHASE", retryable=True)
+        return
+
+    if action == "relaunch":
+        if not (v.service_phase == "swapped" and v.service_grounded):
+            await record_and_ack(False, error=f"cannot relaunch in phase {v.service_phase}", code="INVALID_PHASE", retryable=True)
+            return
         try:
             alt = float(msg["alt"])
         except (KeyError, ValueError, TypeError):
+            await record_and_ack(False, error="invalid altitude parameter", code="BAD_ALTITUDE", retryable=False)
             return
         if not math.isfinite(alt) or alt <= TAKEOFF_CONFIRM_ALT_M:
+            await record_and_ack(False, error=f"altitude must be > {TAKEOFF_CONFIRM_ALT_M} m", code="BAD_ALTITUDE", retryable=False)
             return
         v.launch_alt = v.alt
-        v.takeoff_alt = alt
+        v.takeoff_climb_m = alt
+        v.takeoff_alt = v.launch_alt + alt
         v.service_phase = "relaunch"
         v.acks.clear()
+        await record_and_ack(True)
         await _enter_confirm_mode(v, _now())
-    elif action == "abort":
-        if v.service_phase in ("landing", "landed", "swapping", "swapped"):
-            v.service_phase = None
-            v.service_id = None
-            v.init_state = FAILED_PREFIX + "service"
-            v.ready = False
-            v.failed_at = _now()
+        return
+
+    if action == "abort":
+        if v.service_phase in ("landing", "landed", "swapping", "swapped", "relaunch", "failed"):
+            is_grounded = bool(v.grounded or (v.service_phase in ("landed", "swapping", "swapped") and not v.armed))
+            is_airborne = not is_grounded
+            now = _now()
+            if is_airborne:
+                v.service_phase = "aborted"
+                v.ready = False
+                v.failed_at = None
+                v.hold_x = None
+                v.hold_y = None
+                v.hold_alt = None
+                _send_set_mode(v)
+                if v.connected and v.mode_confirmed and v.position_fresh:
+                    v.hold_x = v.x
+                    v.hold_y = v.y
+                    v.hold_alt = v.alt
+                    _enter_step(v, INIT_ABORT_HOLD, now)
+                    _send_hold_target(v)
+                else:
+                    _enter_step(v, INIT_CONFIRM_ABORT, now)
+            else:
+                v.service_phase = "aborted"
+                v.init_state = "aborted"
+                v.ready = False
+                v.failed_at = None
+            await record_and_ack(True)
+        else:
+            await record_and_ack(False, error=f"cannot abort in phase {v.service_phase}", code="INVALID_PHASE", retryable=False)
+        return
+
+    if action == "resume":
+        if v.init_state in (INIT_ABORT_HOLD, INIT_CONFIRM_ABORT) or (v.service_phase == "aborted" and not v.service_grounded and v.armed):
+            if v.mode_confirmed and v.position_fresh and v.connected and v.armed:
+                v.service_phase = None
+                v.service_id = None
+                v.init_state = INIT_READY
+                v.ready = True
+                await record_and_ack(True)
+            else:
+                await record_and_ack(False, error="vehicle not stabilized in hold", code="HOLD_NOT_READY", retryable=True)
+        elif v.service_grounded or v.init_state == "aborted" or v.service_phase == "aborted":
+            await record_and_ack(False, error="cannot resume grounded vehicle; relaunch required", code="CANNOT_RESUME_GROUNDED", retryable=False)
+        else:
+            await record_and_ack(False, error="vehicle is not in abort-hold", code="NOT_IN_HOLD", retryable=False)
+        return
+
+    await record_and_ack(False, error=f"unknown action {action}", code="UNKNOWN_ACTION", retryable=False)
 
 
 async def handle_message(websocket, raw: str, cli_count: Optional[int], base_port: int) -> None:

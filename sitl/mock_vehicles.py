@@ -43,8 +43,10 @@ import argparse
 import asyncio
 import json
 import logging
+import math
 import time
 from dataclasses import dataclass, field
+from typing import Optional
 
 from websockets.asyncio.server import serve
 from websockets.exceptions import ConnectionClosed
@@ -75,6 +77,8 @@ INIT_CONFIRM_MODE = "confirm-mode"
 INIT_CONFIRM_ARM = "confirm-arm"
 INIT_CONFIRM_TAKEOFF = "confirm-takeoff"
 INIT_READY = "ready"
+INIT_CONFIRM_ABORT = "confirm-abort"
+INIT_ABORT_HOLD = "abort-hold"
 FAILED_PREFIX = "failed:"
 
 MAV_CMD_NAV_LAND = 21
@@ -98,11 +102,20 @@ class Vehicle:
     goal_y: float = 0.0
     goal_alt: float = 0.0
     launch_alt: float = 0.0
+    takeoff_alt: float = 0.0
+    takeoff_climb_m: float = 0.0
+    hold_x: Optional[float] = None
+    hold_y: Optional[float] = None
+    hold_alt: Optional[float] = None
+    target_ground_alt: float = 0.0
     origin: dict = field(default_factory=lambda: {"frame": "common-local-origin", "x": 0.0, "y": 0.0, "groundM": 0.0})
 
     # --- link/bookkeeping state ---
     last_heartbeat: Optional[float] = None
     armed: bool = False
+    custom_mode: int = 0
+    guided_mode_id: int = 4
+    landed: bool = False
     landed_state: Optional[bool] = None
     last_landed: Optional[float] = None
     landed_seq: int = 0
@@ -119,8 +132,16 @@ class Vehicle:
     service_position_seq: int = 0
     service_landed_seq: int = 0
     service_history: set = field(default_factory=set)
+    service_action_history: dict = field(default_factory=dict)
+    descent_ref_alt: float = 0.0
+    last_descent_at: float = 0.0
+    climb_ref_alt: float = 0.0
 
     # --- link/telemetry truth ---
+    @property
+    def mode_confirmed(self) -> bool:
+        return self.custom_mode == self.guided_mode_id
+
     @property
     def connected(self) -> bool:
         return self.last_heartbeat is not None and (_now() - self.last_heartbeat) < HEARTBEAT_STALE_S
@@ -164,6 +185,7 @@ class Vehicle:
             "ready": self.ready,
             "state": self.init_state,
             "armed": self.armed,
+            "heartbeatAge": None if self.last_heartbeat is None else _now() - self.last_heartbeat,
             "positionAge": self.position_age,
             "positionSeq": self.position_seq,
             "landed": self.landed,
@@ -240,6 +262,7 @@ class Vehicle:
         self.step_started_at = now
         self.step_sent_at = now
         self.failed_at = None
+        self.climb_ref_alt = self.alt
 
     def _become_ready(self, now: float) -> None:
         self.init_state = INIT_READY
@@ -253,39 +276,71 @@ class Vehicle:
         self.failed_at = now
 
     def advance_init(self, now: float) -> None:
-        """One tick of the per-vehicle init state machine.
-
-        The mock collapses the transport steps (no real SET_MODE/arm ACKs to
-        wait for) but keeps the same PROOF structure: a vehicle is `ready`
-        only after GUIDED-simulated mode, arming and an actual measured climb
-        are all confirmed -- never by assumption.
-        """
-        if self.init_state == INIT_READY:
+        """One tick of the per-vehicle init state machine."""
+        if self.init_state in (INIT_READY, INIT_ABORT_HOLD, "aborted") or (self.service_phase == "aborted" and self.init_state != INIT_CONFIRM_ABORT):
+            return
+        if self.init_state == INIT_CONFIRM_ABORT:
+            elapsed = now - self.step_started_at
+            if self.connected and self.mode_confirmed and self.position_fresh:
+                self.hold_x = self.x
+                self.hold_y = self.y
+                self.hold_alt = self.alt
+                self.goal_x = self.x
+                self.goal_y = self.y
+                self.goal_alt = self.alt
+                self.init_state = INIT_ABORT_HOLD
+                return
+            elif elapsed >= INIT_STEP_TIMEOUT_S:
+                self._fail("abort", now)
+                self.service_phase = "failed"
+                return
+            elif (not self.connected or not self.mode_confirmed) and now - self.step_sent_at >= STEP_RESEND_DT:
+                self.step_sent_at = now
             return
         if self.service_phase is not None:
             if self.service_phase == "landing":
                 if self.service_grounded:
                     self.init_state = "landed"
                     self.service_phase = "landed"
-                elif now - self.service_started >= INIT_STEP_TIMEOUT_S:
+                    self.failed_at = None
+                    return
+                if self.alt <= self.descent_ref_alt - 0.5:
+                    self.descent_ref_alt = self.alt
+                    self.last_descent_at = now
+                if now - self.last_descent_at >= INIT_STEP_TIMEOUT_S:
                     self._fail("land", now)
                     self.service_phase = "failed"
-            elif self.service_phase in ("landed", "swapping", "swapped", "failed"):
+                return
+            elif self.service_phase in ("landed", "swapping", "swapped"):
                 pass
+            elif self.service_phase == "failed":
+                if self.service_grounded:
+                    self.init_state = "landed"
+                    self.service_phase = "landed"
+                    self.failed_at = None
+                return
             elif self.service_phase == "relaunch":
-                if self.mode_confirmed and self.armed and self.airborne:
+                if self.mode_confirmed and self.armed and self.airborne and self.alt >= self.takeoff_alt - TAKEOFF_CONFIRM_ALT_M:
                     self._become_ready(now)
-                    self.service_phase = "complete"
-                elif now - self.step_started_at >= INIT_STEP_TIMEOUT_S:
-                    self._fail("relaunch", now)
-                    self.service_phase = "failed"
+                    self.service_phase = None
+                else:
+                    if self.alt >= self.climb_ref_alt + 0.5:
+                        self.climb_ref_alt = self.alt
+                        self.step_started_at = now
+                    if now - self.step_started_at >= INIT_STEP_TIMEOUT_S:
+                        self._fail("relaunch", now)
+                        self.service_phase = "failed"
             return
         if self.init_state.startswith(FAILED_PREFIX):
             if not self.connected:
                 return
+            if self.service_phase in ("failed", "aborted") or self.init_state == FAILED_PREFIX + "abort":
+                return
             cooldown = 0.0 if self.init_state == FAILED_PREFIX + "no-heartbeat" else 5.0
             if self.failed_at is not None and (now - self.failed_at) < cooldown:
                 return
+            if not self.mode_confirmed:
+                self.custom_mode = self.guided_mode_id
             if not self.armed:
                 self.service_phase = None
                 self._enter_step(INIT_CONFIRM_ARM, now)
@@ -303,32 +358,41 @@ class Vehicle:
             self._enter_step(INIT_CONFIRM_MODE, now)
             return
         if self.init_state == INIT_CONFIRM_MODE:
+            self.custom_mode = self.guided_mode_id
             self.armed = True
             self.launch_alt = self.alt
             self._enter_step(INIT_CONFIRM_TAKEOFF, now)
             self.goal_alt = self.takeoff_alt
             return
         if self.init_state == INIT_CONFIRM_TAKEOFF:
-            if self.airborne:
+            if self.airborne and self.alt >= self.takeoff_alt - TAKEOFF_CONFIRM_ALT_M:
                 self._become_ready(now)
-            elif now - self.step_started_at >= INIT_STEP_TIMEOUT_S:
-                self._fail("takeoff", now)
+            else:
+                if self.alt >= self.climb_ref_alt + 0.5:
+                    self.climb_ref_alt = self.alt
+                    self.step_started_at = now
+                if now - self.step_started_at >= INIT_STEP_TIMEOUT_S:
+                    self._fail("takeoff", now)
             return
 
-    def service(self, request_id: str, action: str, msg: dict) -> bool:
-        """Explicit browser-driven lifecycle handshake; returns True if applied."""
+    def service(self, request_id: str, action: str, msg: dict) -> tuple[bool, Optional[str], Optional[str], bool]:
+        """Explicit browser-driven lifecycle handshake; returns (accepted, error, code, retryable)."""
         if action == "land":
-            if request_id in self.service_history or self.service_phase not in (None, "complete"):
-                return False
+            if self.service_phase not in (None, "complete"):
+                if self.service_id == request_id and self.service_phase == "landing":
+                    return True, None, None, False
+                return False, f"service busy in phase {self.service_phase}", "SERVICE_BUSY", True
             if not (self.ready and self.init_state == INIT_READY and self.connected
                     and self.position_fresh and self.armed):
-                return False
+                return False, "vehicle not ready to land", "VEHICLE_NOT_READY", True
             self.service_history.add(request_id)
             self.service_id = request_id
             self.service_phase = "landing"
             self.service_started = _now()
             self.service_position_seq = self.position_seq
             self.service_landed_seq = self.landed_seq
+            self.descent_ref_alt = self.alt
+            self.last_descent_at = _now()
             self.init_state = "landing"
             self.ready = False
             self.goal_x = self.x
@@ -337,31 +401,92 @@ class Vehicle:
                 ground = float(msg.get("groundAlt", 0.0))
             except (TypeError, ValueError):
                 ground = 0.0
-            self.goal_alt = max(0.0, ground)
-            return True
+            self.target_ground_alt = ground
+            self.goal_alt = ground
+            return True, None, None, False
+
         if request_id != self.service_id:
-            return False
-        if action == "authorize" and self.service_phase == "landed" and self.service_grounded:
-            self.service_phase = self.init_state = "swapping"
-            return True
-        if action == "complete" and self.service_phase == "swapping" and self.service_grounded:
-            self.service_phase = self.init_state = "swapped"
-            return True
-        if action == "relaunch" and self.service_phase == "swapped" and self.service_grounded:
+            return False, "request ID mismatch or service not active", "INVALID_REQUEST_ID", False
+
+        if action == "authorize":
+            if self.service_phase == "landed" and self.service_grounded:
+                self.service_phase = self.init_state = "swapping"
+                return True, None, None, False
+            return False, f"cannot authorize in phase {self.service_phase}", "INVALID_PHASE", True
+
+        if action == "complete":
+            if self.service_phase == "swapping" and self.service_grounded:
+                self.service_phase = self.init_state = "swapped"
+                return True, None, None, False
+            return False, f"cannot complete in phase {self.service_phase}", "INVALID_PHASE", True
+
+        if action == "relaunch":
+            if not (self.service_phase == "swapped" and self.service_grounded):
+                return False, f"cannot relaunch in phase {self.service_phase}", "INVALID_PHASE", True
             try:
                 alt = float(msg["alt"])
             except (KeyError, TypeError, ValueError):
-                return False
-            if not alt or alt <= TAKEOFF_CONFIRM_ALT_M:
-                return False
+                return False, "invalid altitude parameter", "BAD_ALTITUDE", False
+            if not math.isfinite(alt) or alt <= TAKEOFF_CONFIRM_ALT_M:
+                return False, f"altitude must be > {TAKEOFF_CONFIRM_ALT_M} m", "BAD_ALTITUDE", False
             self.launch_alt = self.alt
-            self.takeoff_alt = alt
+            self.takeoff_climb_m = alt
+            self.takeoff_alt = self.launch_alt + alt
+            self.goal_alt = self.takeoff_alt
             self.service_phase = "relaunch"
             self._enter_step(INIT_CONFIRM_MODE, now=_now())
+            self.custom_mode = self.guided_mode_id
             self.armed = True
-            self.goal_alt = alt
-            return True
-        return False
+            return True, None, None, False
+
+        if action == "abort":
+            if self.service_phase in ("landing", "landed", "swapping", "swapped", "relaunch", "failed"):
+                is_grounded = bool(self.grounded or (self.service_phase in ("landed", "swapping", "swapped") and not self.armed))
+                is_airborne = not is_grounded
+                now = _now()
+                if is_airborne:
+                    self.service_phase = "aborted"
+                    self.ready = False
+                    self.failed_at = None
+                    self.step_started_at = now
+                    self.step_sent_at = now
+                    if not getattr(self, "stuck_mode", False):
+                        self.custom_mode = self.guided_mode_id
+                    if self.connected and self.mode_confirmed and self.position_fresh:
+                        self.hold_x = self.x
+                        self.hold_y = self.y
+                        self.hold_alt = self.alt
+                        self.goal_x = self.x
+                        self.goal_y = self.y
+                        self.goal_alt = self.alt
+                        self.init_state = INIT_ABORT_HOLD
+                    else:
+                        self.hold_x = None
+                        self.hold_y = None
+                        self.hold_alt = None
+                        self.init_state = INIT_CONFIRM_ABORT
+                else:
+                    self.service_phase = "aborted"
+                    self.init_state = "aborted"
+                    self.ready = False
+                    self.failed_at = None
+                return True, None, None, False
+            return False, f"cannot abort in phase {self.service_phase}", "INVALID_PHASE", False
+
+        if action == "resume":
+            if self.init_state in (INIT_ABORT_HOLD, INIT_CONFIRM_ABORT) or (self.service_phase == "aborted" and not self.service_grounded and self.armed):
+                if self.mode_confirmed and self.position_fresh and self.connected and self.armed:
+                    self.service_phase = None
+                    self.service_id = None
+                    self.init_state = INIT_READY
+                    self.ready = True
+                    return True, None, None, False
+                return False, "vehicle not stabilized in hold", "HOLD_NOT_READY", True
+            elif self.service_grounded or self.init_state == "aborted" or self.service_phase == "aborted":
+                return False, "cannot resume grounded vehicle; relaunch required", "CANNOT_RESUME_GROUNDED", False
+            return False, "vehicle is not in abort-hold", "NOT_IN_HOLD", False
+
+        return False, f"unknown action {action}", "UNKNOWN_ACTION", False
 
 
 @dataclass
@@ -413,22 +538,40 @@ class World:
                 x, y, alt = float(g["x"]), float(g["y"]), float(g["alt"])
             except (KeyError, TypeError, ValueError):
                 continue  # malformed goal entry: ignore gracefully
-            v.set_goal(v.origin["x"] + x, v.origin["y"] + y, v.origin["groundM"] + alt)
+            v.set_goal(x, y, alt)
 
     def physics_tick(self, dt: float) -> None:
         now = _now()
         for v in self.vehicles.values():
             v.advance_init(now)
             v.step(dt)
-            if v.connected:
+            if v.last_heartbeat is not None:
                 v.last_heartbeat = now
-            if not v.landed and v.alt <= 0.01 and not v.armed:
+
+            # Touchdown detection using local ground elevation
+            if v.service_phase in ("landing", "failed"):
+                if abs(v.alt - v.target_ground_alt) <= 0.05:
+                    v.alt = v.target_ground_alt
+                    if v.armed:
+                        v.armed = False
+                    if not v.landed:
+                        v.landed = True
+                        v.last_landed = now
+                        v.landed_seq += 1
+            elif not v.landed and abs(v.alt - v.target_ground_alt) <= 0.05 and not v.armed:
                 v.landed = True
                 v.last_landed = now
                 v.landed_seq += 1
+
+            # Keep grounded telemetry fresh throughout swap
+            if v.landed:
+                v.last_landed = now
+                v.landed_seq += 1
+
             if v.armed:
                 v.landed = False
                 v.last_landed = None
+
             v.last_position = now
             v.position_seq += 1
         self.sim_time += dt
@@ -507,11 +650,48 @@ async def handle_message(websocket, raw: str) -> None:
     elif mtype == "service":
         if WORLD.controller is not websocket:
             return
-        v = WORLD.vehicles.get(msg.get("id"))
+        vid = msg.get("id")
+        v = WORLD.vehicles.get(vid)
         request_id = msg.get("requestId")
-        if not isinstance(request_id, str) or v is None:
+        action = msg.get("action")
+        if not isinstance(request_id, str) or v is None or not action:
             return
-        v.service(request_id, msg.get("action"), msg)
+
+        # Idempotency check: replay previous response if this action was already handled
+        history_key = (request_id, action)
+        if history_key in v.service_action_history:
+            cached_acc, cached_err, cached_code, cached_ret = v.service_action_history[history_key]
+            await websocket.send(json.dumps({
+                "type": "service_ack",
+                "requestId": request_id,
+                "id": vid,
+                "action": action,
+                "accepted": cached_acc,
+                "error": cached_err,
+                "code": cached_code,
+                "retryable": cached_ret,
+                "duplicate": True,
+            }))
+            return
+
+        accepted, err, code, retryable = v.service(request_id, action, msg)
+        if accepted:
+            v.service_action_history[history_key] = (accepted, err, code, retryable)
+        ack_msg = {
+            "type": "service_ack",
+            "requestId": request_id,
+            "id": vid,
+            "action": action,
+            "accepted": accepted,
+            "duplicate": False,
+        }
+        if err is not None:
+            ack_msg["error"] = err
+        if code is not None:
+            ack_msg["code"] = code
+        if not accepted:
+            ack_msg["retryable"] = retryable
+        await websocket.send(json.dumps(ack_msg))
 
     else:
         # Unknown message type: ignore gracefully, per protocol.

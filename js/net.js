@@ -245,9 +245,51 @@ function packetExpired(s, p, at) {
   return at - (p.tSent ?? s.time) > ttl;
 }
 
+function interruptEndpointAttempts(s, nodeId) {
+  if (!s.net || !s.net.packets) return;
+  for (const p of s.net.packets) {
+    if (p._gone || !p.attempt || p.attempt.interruptedAt != null) continue;
+    const from = p.path[p.hop], to = p.path[p.hop + 1];
+    if (from === nodeId) {
+      p.attempt.interruptedAt = s.time;
+      p.attempt.interruptedReason = 'dead-src';
+    } else if (to === nodeId) {
+      p.attempt.interruptedAt = s.time;
+      p.attempt.interruptedReason = 'dead-dst';
+    }
+  }
+}
+
 function packetEndpointFailure(s, p) {
   const from = p.path[p.hop], to = p.path[p.hop + 1];
   const sender = nodePos(s, from), receiver = nodePos(s, to);
+  if (p.attempt) {
+    if (p.attempt.interruptedAt != null) {
+      if (p.attempt.interruptedAt < p.attempt.end) return p.attempt.interruptedReason;
+      return null;
+    }
+    if (from !== 'C2') {
+      if (!sender || !alive(sender)) {
+        const tDead = (sender && sender.endpointDeadAt != null) ? sender.endpointDeadAt : s.time;
+        if (tDead < p.attempt.end) {
+          p.attempt.interruptedAt = tDead;
+          p.attempt.interruptedReason = 'dead-src';
+          return 'dead-src';
+        }
+      }
+    }
+    if (to !== 'C2') {
+      if (!receiver || !alive(receiver)) {
+        const tDead = (receiver && receiver.endpointDeadAt != null) ? receiver.endpointDeadAt : s.time;
+        if (tDead < p.attempt.end) {
+          p.attempt.interruptedAt = tDead;
+          p.attempt.interruptedReason = 'dead-dst';
+          return 'dead-dst';
+        }
+      }
+    }
+    return null;
+  }
   if (from !== 'C2' && (!sender || !alive(sender))) return 'dead-src';
   if (to !== 'C2' && (!receiver || !alive(receiver))) return 'dead-dst';
   return null;
@@ -256,12 +298,16 @@ function packetEndpointFailure(s, p) {
 function discardPacket(s, p, reason) {
   if (!p.fired) pendAir(s, p.res.chan, -p.res.singleTx);
   const a = p.attempt;
-  if (a && reason === 'dead-src' && s.time < a.end) {
-    a.air.end = s.time;
-    if (s.net.chanBusyUntil[p.res.chan] === a.end) s.net.chanBusyUntil[p.res.chan] = s.time;
-    if (s.net.nodeTxUntil[p.res.from] === a.end) s.net.nodeTxUntil[p.res.from] = s.time;
-    const dc = p.res.rad && p.res.rad.dutyCycle;
-    if (dc && dc < 1) s.net.nodeDutyUntil[p.res.from] = s.time + (s.time - a.start) * (1 - dc) / dc;
+  if (a && reason === 'dead-src') {
+    const tCut = (a.interruptedAt != null) ? a.interruptedAt : s.time;
+    if (tCut < a.end) {
+      const cutEnd = Math.max(a.start, tCut);
+      a.air.end = cutEnd;
+      if (s.net.chanBusyUntil[p.res.chan] === a.end) s.net.chanBusyUntil[p.res.chan] = cutEnd;
+      if (s.net.nodeTxUntil[p.res.from] === a.end) s.net.nodeTxUntil[p.res.from] = cutEnd;
+      const dc = p.res.rad && p.res.rad.dutyCycle;
+      if (dc && dc < 1) s.net.nodeDutyUntil[p.res.from] = cutEnd + (cutEnd - a.start) * (1 - dc) / dc;
+    }
   }
   dropPacketBookkeeping(s, p, reason, p.path[p.hop], p.path[p.hop + 1], p.marginDb);
   p._gone = true;
@@ -283,7 +329,7 @@ function commitPacket(s, p, eStart) {
   s.net.nodeTxUntil[from] = end;
   const dc = p.res.rad && p.res.rad.dutyCycle;
   if (dc && dc < 1) s.net.nodeDutyUntil[from] = end + p.res.singleTx * (1 - dc) / dc;
-  p.attempt = { start: eStart, end, success, air: billAir(s, p.res.chan, eStart, end) };
+  p.attempt = { start: eStart, end, success, air: billAir(s, p.res.chan, eStart, end), interruptedAt: null, interruptedReason: null };
   p.marginDb = +margin.toFixed(1);
   s.net.txAt[from] = eStart;
   p.fired = true;
@@ -672,7 +718,8 @@ function deliverPacket(s, p) {
   }
   else {
     const d = nodePos(s, p.dst);
-    if (d && alive(d)) d.inbox.push(p);
+    const aliveAtArrive = d && (alive(d) || (d.endpointDeadAt != null && d.endpointDeadAt >= p.tArrive));
+    if (aliveAtArrive) d.inbox.push(p);
     else s.net.delivered--, s.net.dropped++;
   }
 }
@@ -713,6 +760,13 @@ function stepNet(s, dt) {
     if (p.hop >= p.path.length - 1) {
       capLog(s, { ev: 'deliver', pid: p.pid, kind: p.kind, src: p.src, dst: p.dst });
       deliverPacket(s, p);
+      continue;
+    }
+
+    const intermediate = nodePos(s, to);
+    const aliveAtHop = intermediate && (alive(intermediate) || (intermediate.endpointDeadAt != null && intermediate.endpointDeadAt >= p.tArrive));
+    if (!aliveAtHop) {
+      discardPacket(s, p, 'dead-dst');
       continue;
     }
 
@@ -777,6 +831,6 @@ if (typeof module !== 'undefined' && module.exports) {
     txRadioOf, channelKeyOf, hopTimeSec, nodeIds, nodePos,
     linkUsable, linkCost, routePath, c2Tree, pathToC2,
     sendPacket, deliverPacket, stepNet, exportCaptureJSONL,
-    hopDelivered, HOP_RETRIES,
+    hopDelivered, HOP_RETRIES, interruptEndpointAttempts,
   };
 }

@@ -103,7 +103,32 @@
   function serviceSend(id, action, extra) {
     const svc = ExternalMode.services[id];
     if (!svc || !ExternalMode.connected) return;
+    svc.pendingAction = action;
+    svc.lastAction = action;
+    svc.lastSentAt = wallSec();
+    svc.retries = (svc.retries || 0) + 1;
     ExternalMode.ws.send(JSON.stringify({ type: 'service', id, requestId: svc.id, action, ...extra }));
+  }
+
+  function dispatchServiceAction(s, id, action, extra) {
+    const svc = ExternalMode.services[id];
+    if (!svc || svc.phase === 'failed') return false;
+    const now = wallSec();
+    const isSameAction = (svc.pendingAction === action || svc.lastAction === action);
+    if (!isSameAction) {
+      serviceSend(id, action, extra);
+      return true;
+    }
+    const elapsed = now - (svc.lastSentAt || 0);
+    if (elapsed < 0.5) return false;
+    if ((svc.retries || 0) < 5) {
+      serviceSend(id, action, extra);
+      return true;
+    }
+    svc.phase = 'failed';
+    svc.pendingAction = null;
+    setStatus(s, 'service ' + action + ' failed: retries exhausted');
+    return false;
   }
 
   function externalServiceGrounded(id) {
@@ -114,15 +139,14 @@
   function externalServiceComplete(s, d) {
     const svc = ExternalMode.services[d.id], t = ExternalMode.telem[d.id];
     if (!svc || !t || t.serviceId !== svc.id) return false;
-    if (t.state === 'swapping' && grounded(d.id) && svc.phase === 'swapping') {
-      svc.phase = 'completing';
-      serviceSend(d.id, 'complete');
+    if (svc.phase === 'failed') return false;
+    if (t.state === 'swapping' && grounded(d.id) && (svc.phase === 'swapping' || svc.phase === 'completing')) {
+      dispatchServiceAction(s, d.id, 'complete');
     }
-    if (t.state === 'swapped' && grounded(d.id) && svc.phase === 'completing') {
-      svc.phase = 'relaunch';
-      serviceSend(d.id, 'relaunch', { alt: s.altitudeM });
+    if (t.state === 'swapped' && grounded(d.id) && (svc.phase === 'swapped' || svc.phase === 'completing')) {
+      dispatchServiceAction(s, d.id, 'relaunch', { alt: s.altitudeM });
     }
-    if (svc.phase === 'relaunch' && t.servicePhase === null && vehicleReady(d.id)) {
+    if ((svc.phase === 'relaunch' || svc.pendingAction === 'relaunch') && t.servicePhase === null && vehicleReady(d.id)) {
       delete ExternalMode.services[d.id];
       return true;
     }
@@ -173,6 +197,28 @@
           if (!ExternalMode.telem[v.id]) ExternalMode.vehicleStates[v.id] = { ready: v.ready === true, state: v.state };
         }
         refreshReadiness(s);
+      } else if (m.type === 'service_ack') {
+        const svc = ExternalMode.services[m.id];
+        if (svc && svc.id === m.requestId && svc.pendingAction === m.action) {
+          if (m.accepted) {
+            svc.phase = (m.action === 'land') ? 'landing'
+                      : (m.action === 'authorize') ? 'swapping'
+                      : (m.action === 'complete') ? 'swapped'
+                      : (m.action === 'relaunch') ? 'relaunch'
+                      : svc.phase;
+            svc.pendingAction = null;
+            svc.lastAction = null;
+            svc.retries = 0;
+          } else {
+            if (m.retryable !== false && (svc.retries || 0) < 5) {
+              svc.pendingAction = null;
+            } else {
+              svc.phase = 'failed';
+              svc.pendingAction = null;
+              setStatus(s, 'service ' + m.action + ' failed: ' + (m.code || 'rejected'));
+            }
+          }
+        }
       } else if (m.type === 'telemetry') {
         for (const v of m.vehicles || []) {
           const prev = ExternalMode.telem[v.id];
@@ -198,9 +244,24 @@
           ExternalMode.telem[v.id] = t;
           ExternalMode.vehicleStates[v.id] = { ready: v.ready === true, state: v.state };
           const svc = ExternalMode.services[v.id];
-          if (svc && svc.id === v.serviceId && v.state === 'landed' && grounded(v.id) && svc.phase === 'landing') {
-            svc.phase = 'swapping';
-            serviceSend(v.id, 'authorize');
+          if (svc && svc.id === v.serviceId && svc.phase !== 'failed') {
+            if (v.state === 'landing' || v.servicePhase === 'landing') {
+              if (svc.pendingAction === 'land') { svc.pendingAction = null; svc.lastAction = null; svc.retries = 0; }
+            }
+            if (v.state === 'landed' && grounded(v.id) && (svc.phase === 'landing' || svc.phase === 'landed')) {
+              if (svc.pendingAction === 'land') { svc.pendingAction = null; svc.lastAction = null; svc.retries = 0; }
+              if (svc.phase !== 'swapping') {
+                dispatchServiceAction(s, v.id, 'authorize');
+              }
+            }
+            if (v.state === 'swapping') {
+              svc.phase = 'swapping';
+              if (svc.pendingAction === 'authorize') { svc.pendingAction = null; svc.lastAction = null; svc.retries = 0; }
+            }
+            if (v.state === 'swapped') {
+              svc.phase = 'swapped';
+              if (svc.pendingAction === 'complete') { svc.pendingAction = null; svc.lastAction = null; svc.retries = 0; }
+            }
           }
         }
         refreshReadiness(s);
@@ -279,6 +340,8 @@
         if (d.extLostSince == null) d.extLostSince = s.time;
         else if (alive(d) && s.time - d.extLostSince > EXT_LOST_DEAD_SEC) {
           d.mode = 'dead';
+          d.endpointDeadAt = s.time;
+          if (typeof interruptEndpointAttempts === 'function') interruptEndpointAttempts(s, d.id);
           logEvent(s, d.id + ' vehicle link lost >' + EXT_LOST_DEAD_SEC + 's — marking down', 'error');
         }
         continue;
@@ -286,7 +349,16 @@
       if (d.extLostSince != null) {
         d.extLostSince = null;
         // Vehicle heartbeat returned — revive a drone we'd given up on.
-        if (!alive(d)) { d.mode = 'ok'; d.lastC2 = s.time; }
+        if (d.mode === 'dead') {
+          const svc = ExternalMode.services && ExternalMode.services[d.id];
+          if (svc && (svc.phase === 'landed' || svc.phase === 'swapping' || svc.phase === 'swapped')) {
+            d.mode = 'landed';
+          } else {
+            d.mode = 'ok';
+          }
+          d.endpointDeadAt = null;
+          d.lastC2 = s.time;
+        }
       }
       const p = ExternalMode.prev[d.id];
       d.vx = d.vy = 0;
@@ -323,15 +395,22 @@
     const goals = [];
     for (const d of s.drones) {
       if (!alive(d) || d.goalX == null) continue;
-      if (!vehicleReady(d.id) || ExternalMode.services[d.id]) continue;
+      if (!vehicleReady(d.id)) continue;
+      const svc = ExternalMode.services[d.id];
+      const overPad = (d.mode === 'rtb' || d.mode === 'rtl') && dist2d(d, s.base) < DRONE.landThresholdM;
+      const origin = ExternalMode.origin;
+      if (svc) {
+        if (overPad && svc.phase === 'landing' && svc.phase !== 'failed') {
+          dispatchServiceAction(s, d.id, 'land', { groundAlt: terrainGroundAt(s.terrain, d.x, d.y) - origin.groundM });
+        }
+        continue;
+      }
       // Ship the exact goal stepDrone vetted this tick (cached on the drone),
       // not a fresh goalFor call — recomputing would double-advance orbitPhase.
       const g = clipGoalToNoFly(s, d, { x: d.goalX, y: d.goalY });
-      const overPad = (d.mode === 'rtb' || d.mode === 'rtl') && dist2d(d, s.base) < DRONE.landThresholdM;
-      const origin = ExternalMode.origin;
       if (overPad) {
         ExternalMode.services[d.id] = { id: String(++ExternalMode.serviceSeq), phase: 'landing' };
-        serviceSend(d.id, 'land', { groundAlt: terrainGroundAt(s.terrain, d.x, d.y) - origin.groundM });
+        dispatchServiceAction(s, d.id, 'land', { groundAlt: terrainGroundAt(s.terrain, d.x, d.y) - origin.groundM });
         continue;
       }
       goals.push({ id: d.id, x: g.x - origin.x, y: g.y - origin.y,
@@ -340,6 +419,11 @@
     if (ExternalMode.ws && ExternalMode.connected) {
       ExternalMode.ws.send(JSON.stringify({ type: 'goals', goals }));
     }
+  }
+
+  function externalServiceActive(id) {
+    const svc = ExternalMode.services && ExternalMode.services[id];
+    return Boolean(svc && svc.phase !== 'failed');
   }
 
   // Expose to main.js and the sim loop.
@@ -352,4 +436,5 @@
   window.externalPushGoals = externalPushGoals;
   window.externalServiceGrounded = externalServiceGrounded;
   window.externalServiceComplete = externalServiceComplete;
+  window.externalServiceActive = externalServiceActive;
 })();

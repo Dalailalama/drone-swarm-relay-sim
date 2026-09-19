@@ -348,3 +348,103 @@ test('regression #16: one second of broadcast airtime bills one second, not two'
   assert.ok(s.net.utilization > 0.15 && s.net.utilization < 0.25,
     '1 s of air in a 5 s window must read ~0.20, got ' + s.net.utilization.toFixed(3));
 });
+
+test('C07: sender death before airtime ends drops packet; death after airtime ends preserves reception', () => {
+  // 1. Sender death before airtime ends
+  const s1 = mk(2), sender1 = s1.drones[0], receiver1 = s1.drones[1];
+  sender1.x = 50; sender1.y = 0;
+  receiver1.x = 100; receiver1.y = 0;
+  s1.net.rng = () => 0.01;
+  s1.time = 1.0;
+  assert.ok(ctx.sendPacket(s1, 'cmd', sender1.id, receiver1.id, {}, 8000));
+  ctx.stepNet(s1, 0);
+  // Attempt runs from 1.0 to 2.0
+  s1.time = 1.8;
+  ctx.killDrone(s1, sender1);
+  ctx.stepNet(s1, 0.8);
+  s1.time = 2.5;
+  ctx.stepNet(s1, 0.7);
+  assert.strictEqual(s1.net.delivered, 0, 'death before airtime ends must drop the packet');
+  assert.strictEqual(s1.net.dropped, 1);
+
+  // 2. Sender death AFTER airtime ends preserves already-transmitted packet
+  const s2 = mk(2), sender2 = s2.drones[0], receiver2 = s2.drones[1];
+  sender2.x = 50; sender2.y = 0;
+  receiver2.x = 100; receiver2.y = 0;
+  s2.net.rng = () => 0.01;
+  s2.time = 1.0;
+  assert.ok(ctx.sendPacket(s2, 'cmd', sender2.id, receiver2.id, {}, 8000));
+  ctx.stepNet(s2, 0);
+  // Let airtime complete at 2.0
+  s2.time = 2.01;
+  ctx.stepNet(s2, 1.01);
+  // Sender dies AFTER airtime completed, before deliverPacket processing at 2.05
+  ctx.killDrone(s2, sender2);
+  s2.time = 2.05;
+  ctx.stepNet(s2, 0.04);
+  assert.strictEqual(s2.net.delivered, 1, 'death after airtime ends must NOT invalidate completed transmission');
+});
+
+test('C07: immediate interruption recording survives subsequent endpoint revival', () => {
+  const s = mk(2), sender = s.drones[0], receiver = s.drones[1];
+  sender.x = 50; sender.y = 0;
+  receiver.x = 100; receiver.y = 0;
+  s.net.rng = () => 0.01;
+  s.time = 1.0;
+  assert.ok(ctx.sendPacket(s, 'cmd', sender.id, receiver.id, {}, 8000));
+  ctx.stepNet(s, 0);
+
+  // Interruption happens at 1.5 during attempt (1.0 - 2.0)
+  s.time = 1.5;
+  ctx.killDrone(s, sender);
+  assert.strictEqual(s.net.packets[0].attempt.interruptedAt, 1.5, 'interruptedAt must be recorded immediately');
+
+  // Sender is revived before airtime finishes, clearing drone endpoint timestamp
+  sender.mode = 'ok';
+  sender.endpointDeadAt = undefined;
+  assert.ok(ctx.alive(sender), 'sender must be alive after revival');
+
+  // Step past airtime completion
+  s.time = 2.1;
+  ctx.stepNet(s, 0.6);
+  assert.strictEqual(s.net.delivered, 0, 'revival must not undo the recorded attempt interruption');
+  assert.strictEqual(s.net.dropped, 1);
+});
+
+test('W05: delayed processing of recorded interruption truncates airtime and frees channel', () => {
+  const s = mk(2), sender = s.drones[0], receiver = s.drones[1];
+  sender.x = 50; sender.y = 0;
+  receiver.x = 100; receiver.y = 0;
+  s.net.rng = () => 0.01; // Ensure packet delivery probability passes
+  s.time = 1.0;
+
+  // 256-byte telemetry packet on 64 kbps (0.032s airtime, nominal end = 1.032)
+  assert.ok(ctx.sendPacket(s, 'tlm', sender.id, receiver.id, { pad: 'x'.repeat(200) }, 256));
+  ctx.stepNet(s, 0);
+  const p = s.net.packets[0];
+  assert.ok(p && p.attempt, 'packet attempt started');
+  assert.strictEqual(p.attempt.start, 1.0);
+  assert.strictEqual(p.attempt.end, 1.032);
+  assert.strictEqual(s.net.chanBusyUntil['sub1g'], 1.032);
+
+  // Sender killed at 1.02 (0.02s into transmission)
+  s.time = 1.02;
+  ctx.killDrone(s, sender);
+  assert.strictEqual(p.attempt.interruptedAt, 1.02);
+
+  // Delayed network step runs at 1.05 (after nominal airtime end 1.032)
+  s.time = 1.05;
+  ctx.stepNet(s, 0.03);
+
+  // Packet dropped, but channel busy time and air bill truncated to 1.02
+  assert.strictEqual(s.net.delivered, 0);
+  assert.strictEqual(s.net.dropped, 1);
+  assert.strictEqual(p.attempt.air.end, 1.02, 'air attempt end must be truncated to 1.02');
+  assert.strictEqual(s.net.chanBusyUntil['sub1g'], 1.02, 'channel busy must be freed at 1.02, not 1.032');
+  assert.strictEqual(s.net.nodeTxUntil[sender.id], 1.02, 'sender nodeTxUntil must be released at 1.02');
+
+  // Step to window boundary at t=5.0: 0.02s airtime / 5s = 0.004 utilization
+  s.time = 5.0;
+  ctx.stepNet(s, 3.95);
+  assert.ok(Math.abs(s.net.utilization - 0.004) < 1e-4, 'utilization must reflect only 0.020s airtime (got ' + s.net.utilization + ')');
+});

@@ -204,6 +204,7 @@ def _install_stubs() -> None:
     """Inject stub `pymavlink` and `websockets` modules before importing bridge."""
     mavlink = types.SimpleNamespace(
         MAV_CMD_NAV_TAKEOFF=MAV_CMD_NAV_TAKEOFF,
+        MAV_CMD_NAV_LAND=MAV_CMD_NAV_LAND,
         MAV_CMD_COMPONENT_ARM_DISARM=MAV_CMD_COMPONENT_ARM_DISARM,
         MAV_RESULT_ACCEPTED=MAV_RESULT_ACCEPTED,
         MAV_RESULT_IN_PROGRESS=MAV_RESULT_IN_PROGRESS,
@@ -1068,7 +1069,7 @@ async def scenario_land_service_handshake():
             "alt": 45.0,
         }), None, 14550)
         assert v.service_phase == "relaunch" and v.init_state == bridge.INIT_CONFIRM_MODE
-        assert v.takeoff_alt == 45.0 and v.launch_alt == 0.2
+        assert abs(v.takeoff_alt - 45.2) < 1e-6 and v.launch_alt == 0.2 and v.takeoff_climb_m == 45.0
         clock.now += 0.1
         conn.push(hb_msg(armed=True, custom_mode=GUIDED_MODE_ID))
         bridge._drain_messages(v)
@@ -1162,7 +1163,426 @@ async def scenario_service_gates_fraud():
     await h.close()
 
 
+async def scenario_c03_landing_rejection_and_descent_timeout_recovery():
+    """C03: landing command rejection, descent noise rejection, and late touchdown recovery."""
+    h = Harness()
+    ws = h.client("controller")
+    await h.init(ws, count=0, alt=30.0)
+    clock = Clock()
+    with patch.object(bridge, "_now", clock):
+        v = current_vehicle()
+        conn = v.conn
+        # 1. Landing command rejection
+        await bridge.handle_message(ws, json.dumps({
+            "type": "service", "id": "DR-1", "requestId": "svc-rej", "action": "land",
+        }), None, 14550)
+        assert v.service_phase == "landing"
+        conn.push(ack_msg(MAV_CMD_NAV_LAND, MAV_RESULT_DENIED))
+        bridge._drain_messages(v)
+        await bridge._advance_init(v)
+        assert v.service_phase == "failed" and v.init_state == "failed:land", "rejected land command must fail immediately"
+
+        # 2. Descent progress noise rejection (< 0.5m does not reset descent timer)
+        v.init_state = bridge.INIT_READY
+        v.ready = True
+        v.service_phase = None
+        v.service_id = None
+        v.alt = 30.0
+        v.acks.clear()
+        clock.now = 10.0
+        conn.push(hb_msg(armed=True, custom_mode=GUIDED_MODE_ID))
+        conn.push(pos_msg(0.0, 0.0, -30.0))
+        bridge._drain_messages(v)
+        await bridge.handle_message(ws, json.dumps({
+            "type": "service", "id": "DR-1", "requestId": "svc-desc", "action": "land",
+        }), None, 14550)
+        assert v.service_phase == "landing"
+        clock.now = 15.0
+        # Descent of only 0.2m (noise)
+        v.alt = 29.8
+        conn.push(hb_msg(armed=True, custom_mode=GUIDED_MODE_ID))
+        conn.push(pos_msg(0.0, 0.0, -29.8))
+        bridge._drain_messages(v)
+        await bridge._advance_init(v)
+        assert v.last_descent_at == 10.0, "sub-0.5m descent must not update last_descent_at"
+
+        # Timeout expires after 10s from last_descent_at
+        clock.now = 20.1
+        await bridge._advance_init(v)
+        assert v.service_phase == "failed", "lack of descent progress must fail landing"
+
+        # 3. Late touchdown recovery: confirmed landed while failed recovers to landed
+        clock.now = 25.0
+        conn.push(hb_msg(armed=False, custom_mode=GUIDED_MODE_ID))
+        conn.push(pos_msg(0.0, 0.0, 0.0))
+        conn.push(ext_state_msg(1))
+        bridge._drain_messages(v)
+        await bridge._advance_init(v)
+        assert v.service_phase == "landed" and v.init_state == "landed", "late touchdown must recover failed service to landed"
+    await h.close()
+
+
+async def scenario_c04_airborne_and_grounded_abort():
+    """C04: airborne abort holds in GUIDED without arming/takeoff, resumes; grounded abort never auto-arms."""
+    h = Harness()
+    ws = h.client("controller")
+    await h.init(ws, count=0, alt=30.0)
+    clock = Clock()
+    with patch.object(bridge, "_now", clock):
+        v = current_vehicle()
+        conn = v.conn
+        # 1. Airborne abort
+        await bridge.handle_message(ws, json.dumps({
+            "type": "service", "id": "DR-1", "requestId": "svc-ab1", "action": "land",
+        }), None, 14550)
+        clock.now = 0.5
+        conn.push(hb_msg(armed=True, custom_mode=GUIDED_MODE_ID))
+        conn.push(pos_msg(-8.0, 12.0, -20.0))
+        bridge._drain_messages(v)
+        await bridge.handle_message(ws, json.dumps({
+            "type": "service", "id": "DR-1", "requestId": "svc-ab1", "action": "abort",
+        }), None, 14550)
+        assert v.init_state == bridge.INIT_ABORT_HOLD, f"expected abort-hold, got {v.init_state}"
+        assert v.service_phase == "aborted"
+        assert not v.ready
+
+        # Ensure hold setpoint was dispatched
+        assert conn.count("setpoint") >= 1
+
+        # While in abort-hold, regular goals are ignored
+        sent_before = len(conn.sent)
+        await dispatch_goals(ws)
+        assert len(conn.sent) == sent_before, "goals must be ignored in abort-hold"
+
+        # Advance time: abort-hold must never enter automatic arming or takeoff
+        clock.now = 15.0
+        await bridge._advance_init(v)
+        assert v.init_state == bridge.INIT_ABORT_HOLD
+
+        # Resume from airborne hold with fresh link/telemetry
+        conn.push(hb_msg(armed=True, custom_mode=GUIDED_MODE_ID))
+        conn.push(pos_msg(0.0, 0.0, -20.0))
+        bridge._drain_messages(v)
+        await bridge.handle_message(ws, json.dumps({
+            "type": "service", "id": "DR-1", "requestId": "svc-ab1", "action": "resume",
+        }), None, 14550)
+        assert v.init_state == bridge.INIT_READY and v.ready and v.service_phase is None
+
+        # Now goals are accepted again
+        await dispatch_goals(ws)
+        assert len(conn.sent) > sent_before, "goals must be accepted after resume"
+
+        # 1b. Airborne abort below origin (-5m)
+        v.init_state = "landing"
+        v.service_phase = "landing"
+        v.service_id = "svc-ab-low"
+        v.launch_alt = 0.0
+        conn.push(hb_msg(armed=True, custom_mode=GUIDED_MODE_ID))
+        conn.push(pos_msg(0.0, 0.0, 5.0))  # down = 5.0 -> alt = -5.0
+        conn.push(ext_state_msg(2))  # in-air
+        bridge._drain_messages(v)
+        conn.sent.clear()
+        await bridge.handle_message(ws, json.dumps({
+            "type": "service", "id": "DR-1", "requestId": "svc-ab-low", "action": "abort",
+        }), None, 14550)
+        assert v.init_state == bridge.INIT_ABORT_HOLD, f"armed vehicle at -5m must abort to hold, got {v.init_state}"
+        assert v.service_phase == "aborted"
+        assert conn.count("setpoint") >= 1
+
+        # 1c. Low hover abort (+0.1m)
+        v.init_state = "landing"
+        v.service_phase = "landing"
+        v.service_id = "svc-ab-hover"
+        conn.push(hb_msg(armed=True, custom_mode=GUIDED_MODE_ID))
+        conn.push(pos_msg(0.0, 0.0, -0.1))  # down = -0.1 -> alt = +0.1
+        conn.push(ext_state_msg(2))  # in-air
+        bridge._drain_messages(v)
+        conn.sent.clear()
+        await bridge.handle_message(ws, json.dumps({
+            "type": "service", "id": "DR-1", "requestId": "svc-ab-hover", "action": "abort",
+        }), None, 14550)
+        assert v.init_state == bridge.INIT_ABORT_HOLD, "low hover armed vehicle must abort to hold"
+
+        # 1d. Abort with stale position (W07): never command stale target; wait for fresh sample
+        v.init_state = "landing"
+        v.service_phase = "landing"
+        v.service_id = "svc-ab-stale"
+        conn.push(hb_msg(armed=True, custom_mode=GUIDED_MODE_ID))
+        conn.push(ext_state_msg(2))  # in-air
+        bridge._drain_messages(v)
+        v.last_position = clock.now - 10.0  # stale
+        conn.sent.clear()
+        await bridge.handle_message(ws, json.dumps({
+            "type": "service", "id": "DR-1", "requestId": "svc-ab-stale", "action": "abort",
+        }), None, 14550)
+        assert v.init_state == bridge.INIT_CONFIRM_ABORT, f"expected confirm-abort on stale pos, got {v.init_state}"
+        assert conn.count("setpoint") == 0, "must not emit setpoint from expired coordinates"
+
+        # Fresh telemetry arrives: captures hold target and enters abort-hold
+        clock.now += 0.1
+        conn.push(pos_msg(-20.0, 15.0, -18.0))  # north=-20, east=15, down=-18 -> (x=15, y=20, alt=18)
+        conn.push(hb_msg(armed=True, custom_mode=GUIDED_MODE_ID))
+        bridge._drain_messages(v)
+        await bridge._advance_init(v)
+        assert v.init_state == bridge.INIT_ABORT_HOLD
+        assert conn.count("setpoint") == 1
+        sp1 = conn.details("setpoint")[0]
+        assert sp1["north"] == -20.0 and sp1["east"] == 15.0 and sp1["down"] == -18.0
+
+        # Further ticks retain the captured hold target despite drift
+        clock.now += 0.1
+        conn.push(pos_msg(-19.0, 16.0, -18.2))
+        bridge._drain_messages(v)
+        await bridge._advance_init(v)
+        assert conn.count("setpoint") == 2
+        sp2 = conn.details("setpoint")[1]
+        assert sp2["north"] == -20.0 and sp2["east"] == 15.0 and sp2["down"] == -18.0, "hold target must be retained"
+
+        # 1e. Abort mode unconfirmed timeout (W08)
+        v.init_state = "landing"
+        v.service_phase = "landing"
+        v.service_id = "svc-ab-unconfirmed"
+        conn.push(hb_msg(armed=True, custom_mode=9))  # non-GUIDED mode
+        conn.push(ext_state_msg(2))
+        conn.push(pos_msg(0.0, 0.0, -20.0))
+        bridge._drain_messages(v)
+        conn.sent.clear()
+        ws.messages.clear()
+        abort_req = {"type": "service", "id": "DR-1", "requestId": "svc-ab-unconfirmed", "action": "abort"}
+        await bridge.handle_message(ws, json.dumps(abort_req), None, 14550)
+        assert v.init_state == bridge.INIT_CONFIRM_ABORT
+        assert conn.count("setpoint") == 0, "must not command hold before GUIDED confirmation"
+        # Resend interval (STEP_RESEND_DT = 0.5s in test harness)
+        clock.now += 0.5
+        conn.push(hb_msg(armed=True, custom_mode=9))
+        bridge._drain_messages(v)
+        await bridge._advance_init(v)
+        assert conn.count("set_mode") >= 2
+        assert conn.count("setpoint") == 0
+        # Timeout after INIT_STEP_TIMEOUT_S (1.0s in test harness)
+        clock.now += 0.6
+        conn.push(hb_msg(armed=True, custom_mode=9))
+        bridge._drain_messages(v)
+        await bridge._advance_init(v)
+        assert v.init_state == "failed:abort"
+        assert v.service_phase == "failed"
+        assert conn.count("setpoint") == 0
+        # Duplicate abort during failure returns cached accepted response
+        await bridge.handle_message(ws, json.dumps(abort_req), None, 14550)
+        ack = json.loads(ws.messages[-1])
+        assert ack["action"] == "abort" and ack["accepted"] is True and ack["duplicate"] is True
+
+        # 1f. Abort mode confirmed late (W08)
+        v.init_state = "landing"
+        v.service_phase = "landing"
+        v.service_id = "svc-ab-late"
+        conn.push(hb_msg(armed=True, custom_mode=9))
+        conn.push(ext_state_msg(2))
+        conn.push(pos_msg(5.0, 10.0, -15.0))
+        bridge._drain_messages(v)
+        conn.sent.clear()
+        await bridge.handle_message(ws, json.dumps({
+            "type": "service", "id": "DR-1", "requestId": "svc-ab-late", "action": "abort",
+        }), None, 14550)
+        assert v.init_state == bridge.INIT_CONFIRM_ABORT
+        assert conn.count("setpoint") == 0
+        clock.now += 0.2
+        conn.push(hb_msg(armed=True, custom_mode=GUIDED_MODE_ID))
+        conn.push(pos_msg(5.0, 10.0, -15.0))
+        bridge._drain_messages(v)
+        await bridge._advance_init(v)
+        assert v.init_state == bridge.INIT_ABORT_HOLD
+        assert conn.count("setpoint") == 1
+        sp_late = conn.details("setpoint")[0]
+        assert sp_late["north"] == 5.0 and sp_late["east"] == 10.0 and sp_late["down"] == -15.0
+
+        # 1g. Abort with expired heartbeat (W10): fresh position cannot confirm without fresh heartbeat
+        v.init_state = "landing"
+        v.service_phase = "landing"
+        v.service_id = "svc-ab-stale-hb"
+        v.ready = False
+        conn.sent.clear()
+        ws.messages.clear()
+        v.last_heartbeat = clock.now - 10.0
+        v.custom_mode = GUIDED_MODE_ID
+        await bridge.handle_message(ws, json.dumps({
+            "type": "service", "id": "DR-1", "requestId": "svc-ab-stale-hb", "action": "abort",
+        }), None, 14550)
+        assert v.init_state == bridge.INIT_CONFIRM_ABORT
+        conn.push(pos_msg(-80.0, 120.0, -10.0))
+        bridge._drain_messages(v)
+        await bridge._advance_init(v)
+        assert v.init_state == bridge.INIT_CONFIRM_ABORT
+        assert not v.connected
+        assert v.position_fresh
+        assert conn.count("setpoint") == 0, "must not emit setpoints with expired heartbeat"
+
+        # Fresh heartbeat arrives: abort confirms to hold
+        clock.now += 0.1
+        conn.push(hb_msg(armed=True, custom_mode=GUIDED_MODE_ID))
+        bridge._drain_messages(v)
+        await bridge._advance_init(v)
+        assert v.init_state == bridge.INIT_ABORT_HOLD
+        assert v.connected
+        assert conn.count("setpoint") == 1
+        sp_hb = conn.details("setpoint")[0]
+        assert sp_hb["north"] == -80.0 and sp_hb["east"] == 120.0 and sp_hb["down"] == -10.0
+
+        # 2. Grounded abort: aborting a grounded swap never arms
+        v.init_state = "swapping"
+        v.service_phase = "swapping"
+        v.service_id = "svc-ab2"
+        v.alt = 0.0
+        v.last_landed = clock.now
+        v.landed_seq += 1
+        conn.push(hb_msg(armed=False, custom_mode=GUIDED_MODE_ID))
+        conn.push(pos_msg(0.0, 0.0, 0.0))
+        conn.push(ext_state_msg(1))
+        bridge._drain_messages(v)
+        arm_cmds_before = [s for s in conn.sent if s[0] == f"cmd{MAV_CMD_COMPONENT_ARM_DISARM}"]
+        await bridge.handle_message(ws, json.dumps({
+            "type": "service", "id": "DR-1", "requestId": "svc-ab2", "action": "abort",
+        }), None, 14550)
+        assert v.init_state == "aborted" and v.service_phase == "aborted"
+
+        # Advance init past timeout
+        for t in range(20):
+            clock.now += 1.0
+            await bridge._advance_init(v)
+        arm_cmds_after = [s for s in conn.sent if s[0] == f"cmd{MAV_CMD_COMPONENT_ARM_DISARM}"]
+        assert len(arm_cmds_after) == len(arm_cmds_before), "grounded abort must NEVER issue arm commands"
+    await h.close()
+
+
+async def scenario_c01_relaunch_datum_elevated_and_sunken():
+    """C01: relaunch targets climb above local touchdown altitude (AGL to origin-relative)."""
+    h = Harness()
+    ws = h.client("controller")
+    await h.init(ws, count=0, alt=30.0)
+    clock = Clock()
+    with patch.object(bridge, "_now", clock):
+        v = current_vehicle()
+        conn = v.conn
+        # 1. Elevated landing site (+15m)
+        v.init_state = "swapped"
+        v.service_phase = "swapped"
+        v.service_id = "svc-elev"
+        clock.now = 5.0
+        conn.push(hb_msg(armed=False, custom_mode=GUIDED_MODE_ID))
+        conn.push(pos_msg(0.0, 0.0, -15.0))  # down = -15 -> alt = +15
+        conn.push(ext_state_msg(1))
+        bridge._drain_messages(v)
+        await bridge.handle_message(ws, json.dumps({
+            "type": "service", "id": "DR-1", "requestId": "svc-elev", "action": "relaunch",
+            "alt": 50.0,
+        }), None, 14550)
+        assert v.launch_alt == 15.0
+        assert v.takeoff_climb_m == 50.0
+        assert v.takeoff_alt == 65.0, f"expected 65m origin-relative, got {v.takeoff_alt}"
+
+        # 2. Sunken landing site (-10m)
+        v.init_state = "swapped"
+        v.service_phase = "swapped"
+        v.service_id = "svc-sunk"
+        clock.now = 10.0
+        conn.push(hb_msg(armed=False, custom_mode=GUIDED_MODE_ID))
+        conn.push(pos_msg(0.0, 0.0, 10.0))  # down = 10 -> alt = -10
+        conn.push(ext_state_msg(1))
+        bridge._drain_messages(v)
+        await bridge.handle_message(ws, json.dumps({
+            "type": "service", "id": "DR-1", "requestId": "svc-sunk", "action": "relaunch",
+            "alt": 50.0,
+        }), None, 14550)
+        assert v.launch_alt == -10.0
+        assert v.takeoff_climb_m == 50.0
+        assert v.takeoff_alt == 40.0, f"expected 40m origin-relative, got {v.takeoff_alt}"
+    await h.close()
+
+
+async def scenario_c05_service_ack_and_idempotency():
+    """C05: machine-readable ACKs and idempotent duplicate handling."""
+    h = Harness()
+    ws = h.client("controller")
+    await h.init(ws, count=0, alt=30.0)
+    clock = Clock()
+    with patch.object(bridge, "_now", clock):
+        v = current_vehicle()
+        conn = v.conn
+        ws.messages.clear()
+        # First land request
+        await bridge.handle_message(ws, json.dumps({
+            "type": "service", "id": "DR-1", "requestId": "svc-ack-1", "action": "land",
+        }), None, 14550)
+        assert v.service_phase == "landing"
+        assert len(ws.messages) == 1
+        ack1 = json.loads(ws.messages[0])
+        assert ack1["type"] == "service_ack" and ack1["accepted"] is True and ack1["duplicate"] is False
+
+        # Duplicate land request
+        sent_cmds_before = len(conn.sent)
+        await bridge.handle_message(ws, json.dumps({
+            "type": "service", "id": "DR-1", "requestId": "svc-ack-1", "action": "land",
+        }), None, 14550)
+        assert len(ws.messages) == 2
+        ack2 = json.loads(ws.messages[1])
+        assert ack2["type"] == "service_ack" and ack2["accepted"] is True and ack2["duplicate"] is True
+        assert len(conn.sent) == sent_cmds_before, "duplicate request must not re-send MAVLink commands"
+
+        # Invalid action rejection with code
+        await bridge.handle_message(ws, json.dumps({
+            "type": "service", "id": "DR-1", "requestId": "svc-ack-1", "action": "bogus_action",
+        }), None, 14550)
+        assert len(ws.messages) == 3
+        ack3 = json.loads(ws.messages[2])
+        assert ack3["type"] == "service_ack" and ack3["accepted"] is False and "code" in ack3
+
+        # W01: retryable rejection must NOT be cached permanently
+        # Send complete while not grounded
+        v.service_phase = "swapping"
+        v.service_id = "svc-w01"
+        v.service_started = clock.now
+        v.service_position_seq = v.position_seq
+        v.service_landed_seq = v.landed_seq
+        conn.push(hb_msg(armed=True, custom_mode=GUIDED_MODE_ID))
+        conn.push(ext_state_msg(2))  # in-air
+        bridge._drain_messages(v)
+        ws.messages.clear()
+        await bridge.handle_message(ws, json.dumps({
+            "type": "service", "id": "DR-1", "requestId": "svc-w01", "action": "complete",
+        }), None, 14550)
+        assert len(ws.messages) == 1
+        ack_rej = json.loads(ws.messages[0])
+        assert ack_rej["accepted"] is False and ack_rej["retryable"] is True and ack_rej["code"] == "INVALID_PHASE"
+
+        # Vehicle state recovers with fresh grounded evidence
+        clock.now += 1.0
+        conn.push(hb_msg(armed=False, custom_mode=GUIDED_MODE_ID))
+        conn.push(pos_msg(0.0, 0.0, 0.0))
+        conn.push(ext_state_msg(1))  # landed
+        bridge._drain_messages(v)
+        # Retry with IDENTICAL requestId
+        await bridge.handle_message(ws, json.dumps({
+            "type": "service", "id": "DR-1", "requestId": "svc-w01", "action": "complete",
+        }), None, 14550)
+        assert len(ws.messages) == 2
+        ack_ok = json.loads(ws.messages[1])
+        assert ack_ok["accepted"] is True and ack_ok["duplicate"] is False, "retried request must succeed once preconditions are met"
+
+        # Duplicate send of accepted request is idempotently deduplicated
+        await bridge.handle_message(ws, json.dumps({
+            "type": "service", "id": "DR-1", "requestId": "svc-w01", "action": "complete",
+        }), None, 14550)
+        assert len(ws.messages) == 3
+        ack_dup = json.loads(ws.messages[2])
+        assert ack_dup["accepted"] is True and ack_dup["duplicate"] is True
+    await h.close()
+
+
 SCENARIOS = [
+    ("C03: landing rejection, descent progress noise rejection, late touchdown recovery", scenario_c03_landing_rejection_and_descent_timeout_recovery),
+    ("C04: airborne abort holds without arming/takeoff, resumes; grounded abort never arms", scenario_c04_airborne_and_grounded_abort),
+    ("C01: relaunch datum conversion at elevated and sunken landing sites", scenario_c01_relaunch_datum_elevated_and_sunken),
+    ("C05: machine-readable ACKs and idempotent duplicate suppression", scenario_c05_service_ack_and_idempotency),
     ("F02: queued init and dispatcher recheck ownership after awaits", scenario_controller_checks_after_awaits),
     ("F01: dispatcher gates goals on readiness and current vehicle evidence", scenario_goal_safety_gates),
     ("F03: position receipt age and sequence are independent of heartbeat and broadcasts", scenario_position_receipt_clock),
