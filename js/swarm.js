@@ -1924,6 +1924,40 @@ function stepDrone(s, d, dt) {
 // count) between the shortcut and the engineered relay path.
 const CHAIN_ENTRY = { tieEtx: 0.05, holdEtx: 1.0, holdDb: 3, dwellSec: 4 };
 
+// Display-only smoothing of drawn links (#19). The instantaneous margin rides
+// the shadow-fading process, so colours flipped at the 6 dB fade line and dB
+// labels changed every frame. Each drawn pair keeps an EMA of its margin
+// (input floored at floorDb, so a recovery shows promptly) and changes colour
+// with hystDb of hysteresis either side of each threshold; a hard-dead link
+// (at or below floorDb: no line of sight, past the horizon, a deep fade) shows
+// red at once. Routing, uptime and `connected` never read these fields — the
+// instantaneous value rides along as rawMarginDb.
+const LINK_VIEW = { tauSec: 1.5, floorDb: -10, hystDb: 1, resetSec: 5 };
+
+function linkView(s, aId, bId, raw) {
+  const view = s._linkView || (s._linkView = new Map());
+  const key = aId < bId ? aId + '|' + bId : bId + '|' + aId;
+  const x = Math.max(LINK_VIEW.floorDb, raw);
+  let v = view.get(key);
+  if (!v || s.time < v.t || s.time - v.t > LINK_VIEW.resetSec) {
+    v = { ema: x, t: s.time, state: raw >= FADE_MARGIN_DB ? 'ok' : raw >= 0 ? 'degraded' : 'lost' };
+    view.set(key, v);
+  } else if (s.time > v.t) {
+    v.ema += (x - v.ema) * (1 - Math.exp(-(s.time - v.t) / LINK_VIEW.tauSec));
+    v.t = s.time;
+  }
+  const h = LINK_VIEW.hystDb;
+  if (raw <= LINK_VIEW.floorDb) {
+    v.ema = LINK_VIEW.floorDb; v.state = 'lost';
+  } else {
+    if (v.state === 'ok' && v.ema < FADE_MARGIN_DB - h) v.state = 'degraded';
+    else if (v.state !== 'ok' && v.ema >= FADE_MARGIN_DB + h) v.state = 'ok';
+    if (v.state === 'degraded' && v.ema < -h) v.state = 'lost';
+    else if (v.state === 'lost' && v.ema > h) v.state = v.ema >= FADE_MARGIN_DB + h ? 'ok' : 'degraded';
+  }
+  return { marginDb: raw <= LINK_VIEW.floorDb ? raw : v.ema, state: v.state };
+}
+
 function chainStatus(s) {
   const onChain = d => alive(d) && (d.mode === 'ok' || d.mode === 'hold');
   const relays = s.drones.filter(d => onChain(d) && d.order.role === 'relay')
@@ -1981,13 +2015,13 @@ function chainStatus(s) {
   const hops = [];
   for (let i = 0; i < chainPts.length - 1; i++) {
     const dM = dist2d(chainPts[i], chainPts[i + 1]);
-    const margin = Math.max(-99, liveMarginDb(s, chainPts[i].id, chainPts[i + 1].id));
-    const state = margin >= FADE_MARGIN_DB ? 'ok' : margin >= 0 ? 'degraded' : 'lost';
+    const raw = Math.max(-99, liveMarginDb(s, chainPts[i].id, chainPts[i + 1].id));
+    const shown = linkView(s, chainPts[i].id, chainPts[i + 1].id, raw);
     hops.push({
-      a: chainPts[i], b: chainPts[i + 1], distM: dM, marginDb: margin,
-      rssiDbm: margin + s.radio.sensDbm,
-      lossPct: (1 - pktSuccessProb(margin)) * 100,
-      state,
+      a: chainPts[i], b: chainPts[i + 1], distM: dM, marginDb: shown.marginDb, rawMarginDb: raw,
+      rssiDbm: shown.marginDb + s.radio.sensDbm,
+      lossPct: (1 - pktSuccessProb(shown.marginDb)) * 100,
+      state: shown.state,
     });
   }
 
@@ -2000,12 +2034,16 @@ function chainStatus(s) {
     const upId = tree.prev.get(d.id);
     const up = nodePos(s, upId);
     if (!up) continue;
-    const margin = Math.max(-99, liveMarginDb(s, upId, d.id));
+    const raw = Math.max(-99, liveMarginDb(s, upId, d.id));
+    const shown = linkView(s, upId, d.id, raw);
     links.push({
       a: { id: upId, x: up.x, y: up.y }, b: { id: d.id, x: d.x, y: d.y },
-      distM: dist2d(up, d), marginDb: margin,
-      state: margin >= FADE_MARGIN_DB ? 'ok' : margin >= 0 ? 'degraded' : 'lost',
+      distM: dist2d(up, d), marginDb: shown.marginDb, rawMarginDb: raw, state: shown.state,
     });
+  }
+  // Forget pairs that stopped being drawn (bounded by fleet size, not history).
+  if (s._linkView && s._linkView.size > 2 * s.drones.length + 16) {
+    for (const [k, v] of s._linkView) if (s.time - v.t > LINK_VIEW.resetSec) s._linkView.delete(k);
   }
 
   // Ground-truth connectivity, two grades (review finding #6):
