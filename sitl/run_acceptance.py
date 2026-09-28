@@ -109,7 +109,7 @@ class AcceptanceRunner:
         else:
             # Real SITL bridge
             bridge_script = SITL_DIR / "bridge.py"
-            cmd = [sys.executable, str(bridge_script), "--port", str(self.port), "--count", str(self.count)]
+            cmd = [sys.executable, str(bridge_script), "--ws-port", str(self.port), "--count", str(self.count)]
             self.server_process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,

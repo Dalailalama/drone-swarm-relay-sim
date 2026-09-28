@@ -1578,7 +1578,36 @@ async def scenario_c05_service_ack_and_idempotency():
     await h.close()
 
 
+async def scenario_acceptance_runner_real_command():
+    """#7: the acceptance runner's real-mode server command must parse with bridge.py's CLI."""
+    import run_acceptance
+
+    captured = {}
+
+    class _Proc:
+        def poll(self):
+            return None
+
+    def _popen(cmd, **_kwargs):
+        captured["cmd"] = list(cmd)
+        return _Proc()
+
+    runner = run_acceptance.AcceptanceRunner(mode="real", count=3, port=8799)
+    with patch.object(run_acceptance.subprocess, "Popen", _popen), \
+            patch.object(run_acceptance.time, "sleep", lambda _s: None):
+        runner.start_server()
+    cmd = captured["cmd"]
+    assert cmd[1].endswith("bridge.py"), cmd
+    try:
+        with patch.object(sys, "argv", ["bridge.py"] + cmd[2:]):
+            args = bridge.parse_args()
+    except SystemExit as exc:
+        raise AssertionError(f"bridge.py rejects the runner's real-mode arguments {cmd[2:]} (exit {exc.code})")
+    assert args.ws_port == 8799 and args.count == 3, args
+
+
 SCENARIOS = [
+    ("#7: acceptance runner's real-mode command is accepted by bridge.py's CLI", scenario_acceptance_runner_real_command),
     ("C03: landing rejection, descent progress noise rejection, late touchdown recovery", scenario_c03_landing_rejection_and_descent_timeout_recovery),
     ("C04: airborne abort holds without arming/takeoff, resumes; grounded abort never arms", scenario_c04_airborne_and_grounded_abort),
     ("C01: relaunch datum conversion at elevated and sunken landing sites", scenario_c01_relaunch_datum_elevated_and_sunken),
