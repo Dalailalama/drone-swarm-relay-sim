@@ -121,3 +121,87 @@ Findings W01–W10 from the third external verification review:
 | W10 | Abort confirmed from expired heartbeat | Abort entered abort-hold and commanded setpoints with >3.0s expired GUIDED heartbeat | `sitl/test_bridge.py` (scenario_c04 1g stale heartbeat abort gate), `sitl/test_mock_vehicles.py` (test_airborne_and_grounded_abort 2d) | Require `connected and mode_confirmed and position_fresh` for abort confirmation and hold setpoint emission; retry mode requests when disconnected; mirror in mock | **fixed (mock-verified)** |
 
 Suite status: **333/333 JavaScript tests pass**, **19/19 bridge scenarios pass**, **8/8 executable mock scenarios pass**. Real SITL flight acceptance remains an offline/separate step.
+
+## Real ArduPilot SITL acceptance + two audits — 2026-09-28
+
+### Real SITL acceptance (ArduCopter 4.7.1, 3 vehicles, WSL2 Ubuntu 24.04)
+
+Run: `sitl/run_ardupilot_sitl.sh 3` (inside the ArduPilot checkout), then
+`python sitl/run_acceptance.py --mode real --count 3`. Final run: **8/8 steps
+passed** (report `sitl/acceptance_report.json`, git-ignored):
+
+| Step | Measured on real ArduPilot |
+|---|---|
+| 2 takeoff to altitude | READY at 15.0 / 14.0 / 14.0 m of a 15 m takeoff (30.5 s from fresh boot, incl. EKF settle) |
+| 3 waypoints | flew 104 / 202 / 301 m; ended 0.0 / 0.1 / 7.8 m from goal |
+| 4 freshness | position age 0.05–0.07 s, sequence advancing |
+| 5 abort-to-hold | confirmed `abort-hold` state, resumed to READY at 15.0 m |
+| 6 landing | 15.0 m to confirmed touchdown in 27.0 s |
+| 7–8 swap + relaunch | swap handshake acked; relaunch climbed to 19.0 m (pad −0.01 m + 20 m climb) |
+
+Findings from the real runs (each reproduced first, then fixed):
+
+| Issue | Finding | Evidence | Regression | Fix | Status |
+|---|---|---|---|---|---|
+| #7 | Runner started bridge with `--port` | argparse exit 2 | test_bridge "#7" | 0de5d6e | fixed |
+| #9 | Launcher: parallel per-instance rebuilds killed instances; shared eeprom.bin; re-configure took minutes under load | instance 1 died (`waf configure` exit 512) while "All 3 launched" printed; 12+ min configure at 100 % CPU | real launches (no ArduPilot in CI) | 45ac861, e0b0948 | fixed (SITL-exercised: 3/3 up in 16–42 s) |
+| #10 | Runner rejected advisory `status` before `ready`; mock sent them in the opposite order | real step 1 failed on the bridge's first status | mock now status-first; mock acceptance in CI | 780712e | fixed |
+| #11 | Runner gave the server 8.5 s and piped output it never read | bridge took 8.4 s to listen from a slow mount | test_bridge "#11" ×2 | 780712e | fixed |
+| #12 | **Bridge declared READY at 1 m**, not at the takeoff altitude (PROTOCOL.md: climb ≥ alt − 1 m) | real: READY at 1.0 m of 15 m; relaunch READY at 1.1 m | test_bridge "#12" ×4, conformance | 780712e, cc12d49 | fixed (SITL-exercised: READY at 14–15 m) |
+| — | Runner assertions were flag-only (takeoff 0.03 s "pass", no waypoint flight check, 25 s landing deadline) | real passes proved nothing; a true 15 m landing needs ~27 s | runner steps 2–8 verify altitude, flight to goals, freshness, confirmed hold, descent progress, relaunch climb | 780712e, e0b0948 | fixed |
+
+**Verification status of earlier bridge/external findings.** Exercised on real
+ArduPilot by the acceptance run: #12 readiness (ACK/arm/takeoff + altitude),
+F04 land→landed→swap→relaunch handshake, F05/#25 bridge-side altitude datum,
+W04/W07/W08/W10 abort-to-hold, the bridge side of #11 (landed only after real
+touchdown). **Still mock-only** (not exercised by any real run): #9 browser
+staleness, #10 socket identity/reconnect, #13 late vehicle joins and
+controller races, #24 count-slider re-init, F02 owner handoff, browser-side
+obstacle clipping, injected telemetry loss.
+
+### Relay-chain stability audit — fixes
+
+Scenario matrix: 23 scenarios × 1–5 seeds, 900–1800 s each.
+
+| Issue | Finding | Before → after | Regression | Fix |
+|---|---|---|---|---|
+| #8 | Map drew one route to a random orbiting drone; routing tree flapped | endpoint not nearest 88 % of the time; 252 parent changes / 3 min (127 straight back) → all real links drawn, 0 flicker | drawnchain ×2, routeflap ×3 | fd32a0c, 4ac1b8b |
+| #13 | Drones froze against walls/corners at full speed | slid 0 m; DR-3/4/7 still for 60 s at 10–14 m/s → slides 85+ m; repro drone flies 338 m | wallslide ×2 | 8226a4a |
+| #14 | Order flood saturated the channel at scale | 30 drones SiK: busy 100→65 %, C2 contact 27→100 %, reshuffles 24→0. 120 drones: busy 100→69 %, contact ≤20→100 %, reshuffles ~200→0, objective reached | floodscale ×4 | e2e2377 |
+| #15 | LOS densify stacked slots within metres | 12 slots, closest 0 m apart → 4–5 slots | densify ×2 | 6f50baa |
+| #16 | Slow healing after a relay kill | dead upstream still read 19 dB; stale rescue pulled a mission drone → tether closes, search called off | healing ×4 | fd33926 |
+| #17 | covAdjust jumped whole cells | slot moved 3318 m to clear a 420 m zone → 440 m | covadjust ×2 | ece0466 |
+| #18 | Tether lurch; rescuer upstream rotation | 100 m goal jump across 0.002 dB → continuous; 36 upstream changes / 20 rounds → ≤1 | tetherramp ×2, rescuesticky | 3c670fb |
+| #19 | Link colour / dB label flicker | 86 colour flips, 453 label changes / 120 s → 8 / 61 | linkview ×2 | b1b387d |
+| #27 | Planner froze the sim; GPS zones treated as radio walls | jammer on target 17 s per plan (every 5 s) → 8.5 ms, reused until the world changes; 100 km 16.9 s → 45 ms; GPS zone on base: no plan → plan | planperf ×4 | 6943d8b |
+
+Open (tracked, not fixed): #28 planner ignores interference on hop margins
+(DDIL Full 0 % uptime); #29 infeasible plans draft every mission drone;
+#30 rescue call-off ignores C2's own coverage.
+
+### Soak / fuzz / invariant audit — fixes
+
+Coverage: 90 schema-valid fuzz configs (48.4 sim-hours, 592 drone-hours),
+15 mid-run perturbation configs, 3–4 h soaks, 1,200 UI fuzz actions, 6,000
+bridge-fuzz steps, 30 malformed server requests. Held throughout: no
+exceptions, finite state, speed envelope, no building incursion, battery only
+rises on swaps, bounded structures, **determinism 21/21**, flat heap after GC.
+
+| Issue | Finding | Regression | Fix |
+|---|---|---|---|
+| #20 | Replay button always failed in the page; capture header missing jammers/zones/terrain | replaycapture ×4 | 8330b5a |
+| #21 | One frame exception killed the render loop | frameloop | 94d4c41 |
+| #22 | External mode revived killed drones; bridge input not shape-checked | extrobust ×5 | 4bc0d50 |
+| #23 | Target on base over hills → NaN terrain; NaN margins delivered broadcasts | nanterrain ×3 | 80e9a4a |
+| #24 | Batch/server contract gaps (100 Mbps video, unknown fields, 413, CLI) | batchcontract ×5 | 77caf80, 66fd8e2 |
+| #25 | Scenario loader accepted untyped fields, half-applied bad files | scenarioload ×14 | b1c7e22 |
+| #26 | Coverage trim evicted newest cell; denial band; dedup growth; wind swap churn | hygiene ×4 | 69f38b8 |
+
+Deferred with reason: the O(P²) video-fragment commit loop (net.js commit
+path) — the 2000 kbps cap removes the API trigger (~489 packets per chunk at
+the UI maximum).
+
+Suite status: **404/404 JavaScript tests**, **26/26 bridge scenarios**,
+**8/8 executable-mock scenarios**, protocol conformance, **4/4 failure
+scenarios**, mock acceptance 8/8 (in CI); **real SITL acceptance 8/8**
+(manual, ArduCopter 4.7.1).
