@@ -29,9 +29,35 @@
   // bills hover), and a SUSTAINED stall escalates through the same
   // lost-heartbeat ladder to 'dead'.
   const EXT_STALE_SEC = 3;
+  // Bridge input is untrusted (soak finding R12). A fix implying more than
+  // EXT_MAX_SPEED_MS from the last accepted one is held back as a glitch
+  // until the next fix confirms the new location; coordinates beyond the
+  // sanity box are never measurements; telemetry velocity stays physical.
+  const EXT_MAX_SPEED_MS = 80;     // well above any multirotor / small fixed-wing
+  const EXT_JUMP_SLACK_M = 50;     // jitter / back-to-back fixes allowance on top of the speed bound
+  const EXT_MAX_COORD_M = 1e6;
+  const EXT_MAX_ALT_M = 1e5;
 
   function wallSec() {
     return (typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now()) / 1000;
+  }
+
+  // Ids become object keys: plain, bounded strings that can't shadow an
+  // Object.prototype member ('__proto__', 'constructor', ...).
+  function validVehicleId(id) {
+    return typeof id === 'string' && id.length > 0 && id.length <= 64 && !(id in Object.prototype);
+  }
+  // A malformed entry is skipped, never allowed to throw away the whole batch.
+  function vehicleList(list) {
+    return Array.isArray(list) ? list.filter(v => v && typeof v === 'object' && validVehicleId(v.id)) : [];
+  }
+  function validFix(v) {
+    return Number.isFinite(v.x) && Number.isFinite(v.y) && Number.isFinite(v.alt) &&
+      Math.abs(v.x) <= EXT_MAX_COORD_M && Math.abs(v.y) <= EXT_MAX_COORD_M && Math.abs(v.alt) <= EXT_MAX_ALT_M;
+  }
+  function reachable(from, fix) {
+    return !from || Math.hypot(fix.x - from.x, fix.y - from.y) <=
+      EXT_MAX_SPEED_MS * Math.max(0, fix.at - from.at) + EXT_JUMP_SLACK_M;
   }
 
   const ExternalMode = {
@@ -193,11 +219,12 @@
     ws.onmessage = (ev) => {
       if (ExternalMode.ws !== ws) return;
       let m; try { m = JSON.parse(ev.data); } catch (e) { return; }
+      if (!m || typeof m !== 'object') return; // `null`, numbers, strings are not messages (R12)
       const s = getSwarm();
       if (m.type === 'ready') {
-        ExternalMode.ids = Array.isArray(m.ids) ? m.ids : [];
+        ExternalMode.ids = Array.isArray(m.ids) ? m.ids.filter(validVehicleId) : [];
         ExternalMode.expectedCount = ExternalMode.ids.length;
-        for (const v of m.vehicles || []) {
+        for (const v of vehicleList(m.vehicles)) {
           if (!ExternalMode.telem[v.id]) ExternalMode.vehicleStates[v.id] = { ready: v.ready === true, state: v.state };
         }
         refreshReadiness(s);
@@ -225,23 +252,38 @@
           }
         }
       } else if (m.type === 'telemetry') {
-        for (const v of m.vehicles || []) {
+        for (const v of vehicleList(m.vehicles)) {
           const prev = ExternalMode.telem[v.id];
           const now = wallSec();
           const t = { ...v, rxAt: now };
           for (const prefix of ['position', 'landed']) {
-            const seq = v[prefix + 'Seq'], age = v[prefix + 'Age'];
-            const advanced = Number.isSafeInteger(seq) && seq > 0 && (!prev || seq > (prev[prefix + 'Seq'] || 0));
+            const raw = v[prefix + 'Seq'], age = v[prefix + 'Age'];
+            const seq = Number.isSafeInteger(raw) && raw > 0 ? raw : 0;
+            const advanced = seq > 0 && (!prev || seq > (prev[prefix + 'Seq'] || 0));
             const at = Number.isFinite(age) && age >= 0 ? now - age : -Infinity;
-            t[prefix + 'Seq'] = Math.max(seq || 0, prev ? prev[prefix + 'Seq'] || 0 : 0);
+            t[prefix + 'Seq'] = Math.max(seq, prev ? prev[prefix + 'Seq'] || 0 : 0);
             t[prefix + 'At'] = advanced ? at : Math.min(at, prev ? prev[prefix + 'At'] : -Infinity);
             if (prefix === 'position') {
-              if (advanced && Number.isFinite(v.x) && Number.isFinite(v.y) && Number.isFinite(v.alt)) {
-                if (prev && Number.isFinite(prev.positionAt)) ExternalMode.prev[v.id] = prev;
-                t.x = v.x; t.y = v.y; t.alt = v.alt;
+              const fix = advanced && validFix(v) ? { x: v.x, y: v.y, alt: v.alt, at } : null;
+              const last = prev && Number.isFinite(prev.positionAt) && Number.isFinite(prev.x) && Number.isFinite(prev.y)
+                ? { x: prev.x, y: prev.y, at: prev.positionAt } : null;
+              const held = prev ? prev.heldFix : null;
+              if (fix && reachable(last, fix)) {
+                if (last) ExternalMode.prev[v.id] = prev;
+                t.x = fix.x; t.y = fix.y; t.alt = fix.alt; t.heldFix = null;
+              } else if (fix && held && reachable(held, fix)) {
+                // Two consecutive fixes agree on the new place: a genuine
+                // relocation. Adopt it; velocity comes only from that pair.
+                ExternalMode.prev[v.id] = { x: held.x, y: held.y, positionAt: held.at };
+                t.x = fix.x; t.y = fix.y; t.alt = fix.alt; t.heldFix = null;
               } else {
+                // No fix, or a physically impossible jump held back as a
+                // suspected glitch (R12): the last trusted fix stays in force,
+                // and so does its age.
                 t.x = prev && prev.x; t.y = prev && prev.y; t.alt = prev && prev.alt;
-                if (!prev || seq < prev.positionSeq) t.positionAt = -Infinity;
+                t.heldFix = fix || held || null;
+                if (fix) t.positionAt = prev.positionAt;
+                else if (!prev || seq < prev.positionSeq) t.positionAt = -Infinity;
               }
               if (![t.x, t.y, t.alt].every(Number.isFinite)) t.positionAt = -Infinity;
             }
@@ -345,6 +387,7 @@
         if (d.extLostSince == null) d.extLostSince = s.time;
         else if (alive(d) && s.time - d.extLostSince > EXT_LOST_DEAD_SEC) {
           d.mode = 'dead';
+          d.extLinkDown = true; // this ladder's own verdict — the only recoverable death
           d.endpointDeadAt = s.time;
           if (typeof interruptEndpointAttempts === 'function') interruptEndpointAttempts(s, d.id);
           logEvent(s, d.id + ' vehicle link lost >' + EXT_LOST_DEAD_SEC + 's — marking down', 'error');
@@ -353,8 +396,10 @@
       }
       if (d.extLostSince != null) {
         d.extLostSince = null;
-        // Vehicle heartbeat returned — revive a drone we'd given up on.
-        if (d.mode === 'dead') {
+        // Vehicle heartbeat returned — revive a drone the link-loss ladder
+        // gave up on, and ONLY that: an operator kill or an empty battery
+        // used to be undone by any >3 s telemetry hiccup (soak finding R10).
+        if (d.mode === 'dead' && d.extLinkDown && d.energyWh > 0) {
           const svc = ExternalMode.services && ExternalMode.services[d.id];
           if (svc && (svc.phase === 'landed' || svc.phase === 'swapping' || svc.phase === 'swapped')) {
             d.mode = 'landed';
@@ -364,8 +409,9 @@
           d.endpointDeadAt = null;
           d.lastC2 = s.time;
         }
+        d.extLinkDown = false;
       }
-      if (externalServiceGrounded(d.id) && d.mode !== 'landed') {
+      if (externalServiceGrounded(d.id) && d.mode !== 'landed' && d.mode !== 'dead') {
         d.mode = 'landed';
         d.vx = 0;
         d.vy = 0;
@@ -380,6 +426,8 @@
         const dt = t.positionAt - p.positionAt;
         d.vx = (t.x - p.x) / dt;
         d.vy = (t.y - p.y) / dt;
+        const sp = Math.hypot(d.vx, d.vy); // near-simultaneous fixes must not imply rocket speed (R12)
+        if (sp > EXT_MAX_SPEED_MS) { d.vx *= EXT_MAX_SPEED_MS / sp; d.vy *= EXT_MAX_SPEED_MS / sp; }
       }
       d.x = t.x + ExternalMode.origin.x;
       d.y = t.y + ExternalMode.origin.y;
