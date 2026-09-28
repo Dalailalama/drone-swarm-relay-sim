@@ -1148,6 +1148,21 @@ function c2Step(s) {
   // the nearest fresh node, each next one on the rescuer before it — and the
   // chain crawls toward the lost group's last-known centroid one
   // link-length at a time, every member tethered and connected as it goes.
+  //
+  // A search whose last-known point already has a fresh (non-rescuer) drone
+  // within half a usable range is over: a live drone there would be heard.
+  // Without this, a dead relay whose slot had already been refilled kept up to
+  // RESCUE.maxChain mission drones off the objective for memorySec (#16).
+  for (const id of Object.keys(s.c2.lost)) {
+    const L = s.c2.lost[id];
+    if (s.time - L.at < RESCUE.delaySec) continue;
+    const covered = Object.keys(known).some(k => k !== id && fresh(k) &&
+      !s.c2.rescuers.includes(k) && dist2d(known[k], L) < usable * 0.5);
+    if (covered) {
+      delete s.c2.lost[id];
+      logEvent(s, 'C2: ' + id + ' silent although its last position is covered — search called off', 'warn');
+    }
+  }
   const lostIds = Object.keys(s.c2.lost);
   if (s.c2.rescuers.length && !lostIds.length) {
     logEvent(s, 'C2: contact restored — rescue chain of ' + s.c2.rescuers.length + ' released', 'relay');
@@ -1693,9 +1708,13 @@ function stepDrone(s, d, dt) {
 
   droneComms(s, d);
 
-  // Track the upstream beacon (radios hear their neighbors constantly)
+  // Track the upstream beacon (radios hear their neighbors constantly). A dead
+  // radio doesn't beacon: liveMarginDb is pure link budget and never checks
+  // alive(), so a killed upstream used to read full margin and the tether
+  // never closed the gap it left (#16).
   if (d.order.upstream) {
-    const raw = liveMarginDb(s, d.id, d.order.upstream);
+    const upNode = d.order.upstream === 'C2' ? null : nodePos(s, d.order.upstream);
+    const raw = (upNode && !alive(upNode)) ? -Infinity : liveMarginDb(s, d.id, d.order.upstream);
     const capped = Math.max(-20, Math.min(40, raw));
     const alpha = 1 - Math.exp(-dt / 1.54);
     d.upMarginEma += (capped - d.upMarginEma) * alpha;
