@@ -90,6 +90,7 @@ const COVERAGE = {
   searchRadiusCells: 5,   // how far C2 will shift a relay slot out of a bad cell
   maxCells: 20000,        // learned-map bound: beyond this, forget oldest-touched first (O9)
 };
+const COV_SEQ_WINDOW = 64; // C2 black-box dedup: newest seqs remembered per vehicle session (> deadLogMax)
 
 // Control-traffic airtime budget (#14). Orders and telemetry share the one
 // channel with each other and with payload, so both are paced by the air
@@ -346,7 +347,9 @@ function covMark(s, x, y, kind, weight) {
   const key = covKey(s, x, y);
   let e = s.c2.cov.get(key);
   if (!e) {
-    e = { good: 0, bad: 0 };
+    // Stamped BEFORE the trim: an unstamped entry sorted as the oldest and
+    // the cell just measured was the one evicted (soak finding R5).
+    e = { good: 0, bad: 0, at: s.time };
     s.c2.cov.set(key, e);
     // O9: bound the learned map so memory can't grow with mission length —
     // past ~20k measured cells, forget the tenth that went longest without
@@ -354,7 +357,7 @@ function covMark(s, x, y, kind, weight) {
     if (s.c2.cov.size > COVERAGE.maxCells) {
       const entries = [...s.c2.cov.entries()].sort((a, b) => (a[1].at || 0) - (b[1].at || 0));
       const drop = Math.ceil(entries.length / 10);
-      for (let i = 0; i < drop; i++) s.c2.cov.delete(entries[i][0]);
+      for (let i = 0; i < drop; i++) if (entries[i][0] !== key) s.c2.cov.delete(entries[i][0]);
     }
   }
   e[kind] += weight || 1;
@@ -934,8 +937,12 @@ function maxDenialRadiusM(s) {
 // shrunk by whatever anti-jam rejection that radio enjoys right now.
 function jammerDenialRadiusM(s, j) {
   if (j.on === false) return 0;
-  if (j.band !== 'all' && Math.abs(j.band - s.radio.freqMHz) > 150) return 0;
   const r = chainRadio(s);
+  // The interference model's own band test (jammerFreqMHz, finding #20):
+  // `j.band - freqMHz` read NaN for 'sub1g'/'2.4g'/'5g' and freqMHz-only
+  // sources, so they all drew a red zone they can't cause (soak finding R9).
+  const jf = jammerFreqMHz(j);
+  if (Number.isNaN(jf) || (jf != null && Math.abs(jf - r.freqMHz) > 150)) return 0;
   const n = pathLossExponent(r);
   const eff = j.erpDbm - agilityGainDb(s, r);
   const exp = (eff - pl1m(r.freqMHz) + JAM_SNR_OFFSET_DB - r.sensDbm) / (10 * n);
@@ -1089,17 +1096,28 @@ function c2Step(s) {
       const session = p.payload.deadLogSession;
       if (session == null) continue;
       const key = JSON.stringify([p.src, session]);
+      // Bounded dedup memory (soak finding: one entry per sample, forever).
+      // Keep the newest COV_SEQ_WINDOW seqs plus a floor. Anything at or
+      // below the floor was applied: every upload carries the drone's WHOLE
+      // unacked black box, so a sample still held when a newer seq arrived
+      // rode in with it, and an acked one was applied before its ACK.
       let applied = s.c2.covSeqApplied.get(key);
-      if (!applied) { applied = new Set(); s.c2.covSeqApplied.set(key, applied); }
+      if (!applied) { applied = { seen: new Set(), floor: 0 }; s.c2.covSeqApplied.set(key, applied); }
       const ackSeqs = [];
       let freshSamples = 0;
       for (const pt of p.payload.deadLog) {
         if (!Number.isSafeInteger(pt.seq) || pt.seq <= 0) continue;
         ackSeqs.push(pt.seq);
-        if (applied.has(pt.seq)) continue;
-        applied.add(pt.seq);
+        if (pt.seq <= applied.floor || applied.seen.has(pt.seq)) continue;
+        applied.seen.add(pt.seq);
         covMark(s, pt.x, pt.y, 'bad', 3);
         freshSamples++;
+      }
+      if (applied.seen.size > COV_SEQ_WINDOW) {
+        const seqs = [...applied.seen].sort((a, b) => a - b);
+        const drop = seqs.length - COV_SEQ_WINDOW;
+        for (let i = 0; i < drop; i++) applied.seen.delete(seqs[i]);
+        applied.floor = Math.max(applied.floor, seqs[drop - 1]);
       }
       if (freshSamples) logEvent(s, 'C2: ' + p.src + ' uploaded ' + freshSamples + ' dead-zone samples — coverage map updated', 'info');
       // ACK duplicates too — a replay means the sender never heard us.
@@ -2236,6 +2254,18 @@ function stepSwarm(s, dt) {
   for (const d of s.drones) {
     if (d.mode === 'landed' && d.swapAt && s.time >= d.swapAt) {
       if (external && !externalServiceComplete(s, d)) continue;
+      // No crew launches into wind the airframe can't beat: the relaunched
+      // drone turned RTB and re-landed in the same tick, and every 90 s
+      // cycle counted as one more battery swap (soak finding).
+      const windMs = Math.hypot(s.wind.x, s.wind.y);
+      if (!external && windMs >= afOf(s, d).maxSpeedMs) {
+        if (!d.launchHeld) {
+          d.launchHeld = true;
+          logEvent(s, d.id + ' launch held — wind ' + windMs.toFixed(0) + ' m/s is at or above its ' + afOf(s, d).maxSpeedMs + ' m/s airspeed', 'warn');
+        }
+        continue;
+      }
+      d.launchHeld = false;
       d.mode = 'ok';
       d.endpointDeadAt = null;
       d.energyWh = usableWh(afOf(s, d));
