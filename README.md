@@ -430,6 +430,11 @@ downloads it as JSONL (one JSON event per line), a portable trace any tool
 can parse — think tcpdump for the mesh. Schema is documented at the top of
 [js/net.js](js/net.js) (`exportCaptureJSONL`).
 
+## Physics, Protocol & Model Specifications
+
+- **[Physical & Mathematical Model (MODEL.md)](MODEL.md)** — Coordinate systems, RF propagation equations, packet error rate sigmoids, actuator disk momentum theory, wind-adjusted smart-RTH, and model boundaries.
+- **[Browser-Bridge Wire Protocol (docs/PROTOCOL.md)](docs/PROTOCOL.md)** — JSON WebSocket wire specification, state transitions, freshness requirements, machine-readable service ACKs, and idempotent deduplication.
+
 ## Flying real autopilots (SITL bridge)
 
 The swarm logic here can command actual autopilot firmware instead of the
@@ -444,9 +449,18 @@ browser sim  <--WebSocket-->  bridge.py  <--MAVLink/UDP-->  SITL
 
 Positions come back from the vehicles; C2's relay goals go out as MAVLink
 guided-mode setpoints. It's the same code that runs the pure sim — only the
-motion is externalized. See [sitl/README.md](sitl/README.md). You can try the
-whole pipeline with **zero firmware** using the mock vehicle server
-(`python sitl/mock_vehicles.py`, then "Fly via bridge" in the sim).
+motion is externalized. See [sitl/README.md](sitl/README.md).
+
+- **Executable mock pipeline**: Test the complete WebSocket protocol, goal
+  delivery, telemetry streaming, abort-to-hold, landing, and battery swap
+  with **zero firmware** via `python sitl/mock_vehicles.py`.
+- **Automated acceptance runner**: Run end-to-end flight, landing, swap, and
+  relaunch verification with `python sitl/run_acceptance.py`.
+- **Real ArduPilot SITL**: Real SITL flight requires a Linux ArduPilot
+  environment (`./run_ardupilot_sitl.sh` and `python sitl/bridge.py`).
+- **CI**: every push runs the JavaScript suite plus the Python bridge,
+  executable-mock, protocol-conformance and failure-scenario suites. These are
+  mock-level checks; real SITL flight is not part of CI.
 
 ## Where this is going
 
