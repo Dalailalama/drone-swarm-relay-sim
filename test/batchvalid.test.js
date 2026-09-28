@@ -86,7 +86,7 @@ test('F13 rejects nonfinite feature numbers before normalization', () => {
 test('F13 preserves valid defaults, disabled knobs, hardware and zone shapes', () => {
   for (const features of [
     {}, { videoOn: true }, { videoOn: false, videoKbps: 0 },
-    { videoOn: true, videoKbps: 100000 },
+    { videoOn: true, videoKbps: 2000 }, // the UI maximum (soak R4: the old 100000 cap fragmented into thousands of packets)
     { spectrumAgility: false, lpiMode: true, adversaryMode: false, hetero: false,
       relayWing: 0, relayAirframe: 'x8', relayRadio: 'rfd900x' },
     { hetero: true, relayAirframe: 'x8', relayRadio: 'rfd900x' },

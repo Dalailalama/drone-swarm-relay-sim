@@ -35,7 +35,36 @@ const LIMITS = {
   maxDrones: 120,
   maxCoordM: 100000,
   maxTotalWorkDroneSec: 600000, // ~10 min of wall clock at the measured ~1 ms per drone-sim-second
+  maxVideoKbps: 2000,           // the UI slider's maximum; above it a chunk fragments into thousands of packets
+  // Relay-chain planning is paid per replan, independent of fleet size
+  // (soak finding R8): cap the A* grid of one replan, and the total
+  // grid-cell replans of the batch (~12 us per cell-replan measured).
+  maxPlanGridCells: 1000000,
+  maxTotalPlanCellReplans: 40000000,
 };
+
+// Mirrors the search box js/swarm.js planChain builds (not its internals):
+// the grid cell follows the chain radio's usable range (>= 40 m, capped by
+// the radio horizon) while the box follows the mission span, and the plan
+// is redone every PLAN.replanSec. Extra padding planChain adds around active
+// jammers is not estimated here.
+const PLAN_REPLAN_SEC = 5;    // js/swarm.js PLAN.replanSec
+const PLAN_C2_ANTENNA_M = 6;  // js/swarm.js C2_ANTENNA_M
+function plannerGridCells(cfg, cell) {
+  const env = { open: 1, suburban: 0.45, urban: 0.2 }[cfg.env];
+  const f = cfg.features || {};
+  const wing = f.hetero ? (f.relayWing ?? Math.min(3, cfg.count != null ? cfg.count : 10)) : 0;
+  const chainId = wing > 0 && f.relayAirframe && f.relayRadio ? f.relayRadio : cfg.radio;
+  const radio = R.RADIOS.find(r => r.id === chainId);
+  const alt = cell.altitudeM != null ? cell.altitudeM : (cfg.altitudeM || 70);
+  const usable = Math.min(R.usableRangeM(radio, env), R.radioHorizonM(PLAN_C2_ANTENNA_M, alt));
+  const span = usable * (cell.spacingPct != null ? cell.spacingPct : (cfg.spacingPct || 80)) / 100;
+  const cellM = Math.max(40, usable * 0.25);
+  const pad = span * 1.5;
+  const nx = Math.max(2, Math.ceil((Math.abs(cfg.mission.targetX) + 2 * pad) / cellM));
+  const ny = Math.max(2, Math.ceil((Math.abs(cfg.mission.targetY) + 2 * pad) / cellM));
+  return nx * ny;
+}
 
 function normalizeConfig(cfg) {
   if (!cfg || typeof cfg !== 'object') return null;
@@ -72,7 +101,7 @@ function validateFeatures(f, count) {
   for (const k of booleans) {
     if (has(f, k) && typeof f[k] !== 'boolean') return 'features.' + k + ' must be a boolean';
   }
-  if (has(f, 'videoKbps') && !numIn(f.videoKbps, 0, 100000)) return 'features.videoKbps must be a number in 0..100000';
+  if (has(f, 'videoKbps') && !numIn(f.videoKbps, 0, LIMITS.maxVideoKbps)) return 'features.videoKbps must be a number in 0..' + LIMITS.maxVideoKbps;
   if (f.videoOn && has(f, 'videoKbps') && f.videoKbps === 0) return 'features.videoKbps must be positive when videoOn is true';
   if (has(f, 'relayWing') && !(Number.isInteger(f.relayWing) && numIn(f.relayWing, 0, count))) {
     return 'features.relayWing must be an integer in 0..count';
@@ -121,8 +150,17 @@ function validateFeatures(f, count) {
   return null;
 }
 
+const CONFIG_FIELDS = ['label', 'radio', 'env', 'airframe', 'terrain', 'count', 'durationSec', 'seeds', 'mission',
+  'features', 'sweep', 'altitudeM', 'spacingPct', 'cityDensity', 'cityHeight'];
+
 function validateConfig(cfg) {
   if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) return 'config must be a JSON object';
+  // A field the engine never reads (say "windSpd") used to be dropped in
+  // silence — the caller believed a different experiment ran (soak R13).
+  for (const k of Object.keys(cfg)) {
+    if (!CONFIG_FIELDS.includes(k)) return k + ' is unknown (fields: ' + CONFIG_FIELDS.join(', ') + ')';
+  }
+  if (cfg.label != null && (typeof cfg.label !== 'string' || cfg.label.length > 200)) return 'label must be a string of at most 200 characters';
   if (!R.RADIOS.some(r => r.id === cfg.radio)) return 'unknown radio: ' + cfg.radio;
   // hasOwnProperty guard: inherited keys like 'toString' are truthy lookups
   // on a plain object literal and used to sail through as an "env".
@@ -141,6 +179,9 @@ function validateConfig(cfg) {
     }
     if (names.has(c.name)) return 'duplicate sweep cell name: ' + c.name;
     names.add(c.name);
+    for (const k of Object.keys(c)) {
+      if (!['name', 'altitudeM', 'spacingPct'].includes(k)) return 'cell "' + c.name + '": ' + k + ' is unknown (a cell varies altitudeM and/or spacingPct)';
+    }
     if (c.altitudeM != null && !numIn(c.altitudeM, 5, 1000)) return 'cell "' + c.name + '": altitudeM must be 5..1000';
     if (c.spacingPct != null && !numIn(c.spacingPct, 30, 150)) return 'cell "' + c.name + '": spacingPct must be 30..150';
   }
@@ -187,6 +228,28 @@ function validateConfig(cfg) {
   if (!finiteNum(t.targetX) || !finiteNum(t.targetY)) return 'mission.targetX/targetY required (numbers, metres)';
   if (Math.abs(t.targetX) > LIMITS.maxCoordM || Math.abs(t.targetY) > LIMITS.maxCoordM) {
     return 'mission coordinates must be within ±' + LIMITS.maxCoordM + ' m';
+  }
+  for (const k of Object.keys(t)) {
+    if (k !== 'targetX' && k !== 'targetY') return 'mission.' + k + ' is unknown (the base is fixed at 0,0)';
+  }
+
+  // Planning budget (soak finding R8): drone-seconds don't see it — one
+  // drone for 30 s toward a 100 km objective on a short-range radio held a
+  // worker until the 5-min timeout.
+  let worstGrid = 0, planWork = 0;
+  for (const c of cells) {
+    const grid = plannerGridCells(cfg, c);
+    worstGrid = Math.max(worstGrid, grid);
+    planWork += grid * seeds.length * Math.ceil(dur / PLAN_REPLAN_SEC);
+  }
+  if (worstGrid > LIMITS.maxPlanGridCells) {
+    return 're-planning the relay chain to a ' + (Math.hypot(t.targetX, t.targetY) / 1000).toFixed(1) + ' km objective on ' +
+      cfg.radio + ' searches a ' + worstGrid + '-cell grid every ' + PLAN_REPLAN_SEC + ' sim-s (limit ' + LIMITS.maxPlanGridCells +
+      ') — use a longer-range radio or a closer objective';
+  }
+  if (planWork > LIMITS.maxTotalPlanCellReplans) {
+    return 'planning workload (' + planWork + ' grid-cell replans) exceeds the ' + LIMITS.maxTotalPlanCellReplans +
+      ' budget — fewer runs, shorter duration, a closer objective or a longer-range radio';
   }
   return null;
 }
@@ -283,17 +346,29 @@ if (require.main === module) {
   };
   const cfgPath = getArg('config');
   const outDir = getArg('out', 'out');
-  if (!cfgPath) {
-    console.error('usage: node tools/batch.js --config batch/example.json [--out out/]');
-    process.exit(1);
-  }
-  const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
+  // One clear line and exit 1 — never a stack trace, and never a crash after
+  // the work is done (soak finding R13).
+  const fail = msg => { console.error(msg); process.exit(1); };
+  if (!cfgPath) fail('usage: node tools/batch.js --config batch/example.json [--out out/]');
+  let text, cfg;
+  try { text = fs.readFileSync(cfgPath, 'utf8'); } catch (e) { fail('cannot read config ' + cfgPath + ': ' + e.message); }
+  try { cfg = JSON.parse(text); } catch (e) { fail('config ' + cfgPath + ' is not valid JSON: ' + e.message); }
+  const invalid = validateConfig(cfg);
+  if (invalid) fail('invalid config: ' + invalid);
+  // The output directory is settled BEFORE the run: an --out that names a
+  // file used to throw away minutes of simulation at the very end.
+  try {
+    if (fs.existsSync(outDir) && !fs.statSync(outDir).isDirectory()) fail('--out ' + outDir + ' exists and is not a directory');
+    fs.mkdirSync(outDir, { recursive: true });
+  } catch (e) { fail('cannot create --out directory ' + outDir + ': ' + e.message); }
   console.log('Running batch "' + (cfg.label || '?') + '"…');
   const t0 = Date.now();
-  const res = runBatch(cfg, (d, t) => {
-    if (d % 5 === 0 || d === t) process.stdout.write('  ' + d + '/' + t + '\r');
-  });
-  fs.mkdirSync(outDir, { recursive: true });
+  let res;
+  try {
+    res = runBatch(cfg, (d, t) => {
+      if (d % 5 === 0 || d === t) process.stdout.write('  ' + d + '/' + t + '\r');
+    });
+  } catch (e) { fail('batch failed: ' + e.message); }
   const base = path.join(outDir, 'batch-' + Date.now());
   fs.writeFileSync(base + '-report.md', res.md);
   fs.writeFileSync(base + '-runs.csv', res.csv);

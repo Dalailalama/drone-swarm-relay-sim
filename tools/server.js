@@ -17,16 +17,24 @@ const { Worker } = require('node:worker_threads');
 const path = require('node:path');
 const { validateConfig, LIMITS } = require('./batch.js');
 
+// Oversize bodies are answered, not hung up on (soak finding R13): the old
+// code destroyed the socket mid-upload, so the client saw ECONNRESET instead
+// of an error it could act on. Past the cap we stop buffering and just drain
+// (memory stays bounded; Node's request timeout bounds the time), then 413.
 function readBody(req, maxBytes) {
   return new Promise((resolve, reject) => {
-    let size = 0;
+    let size = 0, tooLarge = false;
     const chunks = [];
     req.on('data', c => {
       size += c.length;
-      if (size > maxBytes) { reject(new Error('body too large')); req.destroy(); return; }
+      if (tooLarge) return;
+      if (size > maxBytes) { tooLarge = true; chunks.length = 0; return; }
       chunks.push(c);
     });
-    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+    req.on('end', () => {
+      if (tooLarge) reject(err('request body exceeds ' + maxBytes + ' bytes', 413));
+      else resolve(Buffer.concat(chunks).toString('utf8'));
+    });
     req.on('error', reject);
   });
 }
@@ -164,8 +172,9 @@ function createApp(opts) {
             durationSec: 'sim seconds per run (30..' + LIMITS.maxDurationSec + ')',
             seeds: 'array of seed ints (<= ' + LIMITS.maxSeedsPerCell + ')',
             mission: { targetX: 'metres east', targetY: 'metres south' },
-            features: 'videoOn/videoKbps/spectrumAgility/lpiMode/adversaryMode/hetero/relayWing/.../jammers[]/gpsZones[]',
+            features: 'videoOn/videoKbps(<= ' + LIMITS.maxVideoKbps + ')/spectrumAgility/lpiMode/adversaryMode/hetero/relayWing/.../jammers[]/gpsZones[]',
             sweep: '[{ name, altitudeM?, spacingPct? }, ...] — each cell is a parameter variation',
+            note: 'unknown fields are rejected (422); far objectives on short-range radios are budgeted by relay-planning cost',
           },
           response: { summary: 'per-cell uptime/loss/contact distributions', md: 'markdown report', csv: 'raw per-run rows' },
         }, null, 1));
@@ -175,6 +184,7 @@ function createApp(opts) {
         try {
           cfg = JSON.parse(await readBody(req, 256 * 1024));
         } catch (e) {
+          if (e.httpCode === 413) return send(res, 413, JSON.stringify({ error: e.message }));
           return send(res, 400, JSON.stringify({ error: 'bad JSON: ' + e.message }));
         }
         const invalid = validateConfig(cfg);
