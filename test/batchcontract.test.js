@@ -24,9 +24,11 @@ const GOOD = { label: 't', radio: 'sik-v3', env: 'open', airframe: 'q450', terra
   count: 2, durationSec: 30, seeds: [1], mission: { targetX: 400, targetY: 0 } };
 
 test('R8: a far objective is budgeted by its planning cost, not just drone-seconds', () => {
+  // Since #27 planChain coarsens its grid to <= 40k cells per replan (45 ms for
+  // this 100 km case, was ~1 min), so a single short far run is affordable;
+  // the batch-wide planning budget still stops long, many-seed far sweeps.
   const far = { ...GOOD, env: 'urban', count: 1, mission: { targetX: 80000, targetY: 60000 } };
-  assert.match(B.validateConfig(far) || '', /plan/i, 'a 100 km short-radio mission sailed through a 30 drone-second budget');
-  // A long radio makes the same geometry cheap: the planner's grid scales with hop range.
+  assert.strictEqual(B.validateConfig(far), null, 'a bounded 100 km replan is affordable for one short run');
   assert.strictEqual(B.validateConfig({ ...far, radio: 'rfd900x' }), null);
   // Medium span: fine for a short run, over budget when repeated for 30 min x many seeds.
   const mid = { ...GOOD, env: 'urban', count: 1, mission: { targetX: 16000, targetY: 12000 } };

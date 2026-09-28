@@ -50,6 +50,7 @@ const LIMITS = {
 // jammers is not estimated here.
 const PLAN_REPLAN_SEC = 5;    // js/swarm.js PLAN.replanSec
 const PLAN_C2_ANTENNA_M = 6;  // js/swarm.js C2_ANTENNA_M
+const PLAN_MAX_CELLS = 40000; // js/swarm.js PLAN.maxCells
 function plannerGridCells(cfg, cell) {
   const env = { open: 1, suburban: 0.45, urban: 0.2 }[cfg.env];
   const f = cfg.features || {};
@@ -59,10 +60,13 @@ function plannerGridCells(cfg, cell) {
   const alt = cell.altitudeM != null ? cell.altitudeM : (cfg.altitudeM || 70);
   const usable = Math.min(R.usableRangeM(radio, env), R.radioHorizonM(PLAN_C2_ANTENNA_M, alt));
   const span = usable * (cell.spacingPct != null ? cell.spacingPct : (cfg.spacingPct || 80)) / 100;
-  const cellM = Math.max(40, usable * 0.25);
   const pad = span * 1.5;
-  const nx = Math.max(2, Math.ceil((Math.abs(cfg.mission.targetX) + 2 * pad) / cellM));
-  const ny = Math.max(2, Math.ceil((Math.abs(cfg.mission.targetY) + 2 * pad) / cellM));
+  const W = Math.abs(cfg.mission.targetX) + 2 * pad, H = Math.abs(cfg.mission.targetY) + 2 * pad;
+  // planChain coarsens its grid so one replan never searches more than
+  // PLAN.maxCells (#27); mirror that here or far objectives look ~100x dearer.
+  const cellM = Math.max(40, usable * 0.25, Math.sqrt(W * H / PLAN_MAX_CELLS));
+  const nx = Math.max(2, Math.ceil(W / cellM));
+  const ny = Math.max(2, Math.ceil(H / cellM));
   return nx * ny;
 }
 
