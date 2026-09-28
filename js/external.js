@@ -111,7 +111,10 @@
   }
 
   function dispatchServiceAction(s, id, action, extra) {
-    const svc = ExternalMode.services[id];
+    let svc = ExternalMode.services[id];
+    if (!svc && action === 'land') {
+      svc = ExternalMode.services[id] = { id: String(++ExternalMode.serviceSeq), phase: 'landing' };
+    }
     if (!svc || svc.phase === 'failed') return false;
     const now = wallSec();
     const isSameAction = (svc.pendingAction === action || svc.lastAction === action);
@@ -127,6 +130,7 @@
     }
     svc.phase = 'failed';
     svc.pendingAction = null;
+    svc.failureReason = 'retries exhausted';
     setStatus(s, 'service ' + action + ' failed: retries exhausted');
     return false;
   }
@@ -215,6 +219,7 @@
             } else {
               svc.phase = 'failed';
               svc.pendingAction = null;
+              svc.failureReason = m.code || 'rejected';
               setStatus(s, 'service ' + m.action + ' failed: ' + (m.code || 'rejected'));
             }
           }
@@ -360,6 +365,15 @@
           d.lastC2 = s.time;
         }
       }
+      if (externalServiceGrounded(d.id) && d.mode !== 'landed') {
+        d.mode = 'landed';
+        d.vx = 0;
+        d.vy = 0;
+        d.endpointDeadAt = s.time;
+        if (typeof interruptEndpointAttempts === 'function') interruptEndpointAttempts(s, d.id);
+        d.swapAt = s.time + (typeof BATTERY !== 'undefined' && BATTERY.swapSec ? BATTERY.swapSec : 90);
+        logEvent(s, d.id + ' grounded for battery service', 'info');
+      }
       const p = ExternalMode.prev[d.id];
       d.vx = d.vy = 0;
       if (p && t.positionAt > p.positionAt && t.positionAt - p.positionAt < EXT_STALE_SEC) {
@@ -426,8 +440,56 @@
     return Boolean(svc && svc.phase !== 'failed');
   }
 
+  function getExternalDiagnostics() {
+    const list = [];
+    const ids = ExternalMode.ids && ExternalMode.ids.length
+      ? ExternalMode.ids
+      : Object.keys(ExternalMode.vehicleStates);
+    const now = wallSec();
+    for (const id of ids) {
+      const v = ExternalMode.vehicleStates[id] || {};
+      const t = ExternalMode.telem[id] || null;
+      const svc = ExternalMode.services[id] || null;
+
+      const heartbeatAge = (t && Number.isFinite(t.heartbeatAge) && Number.isFinite(t.rxAt))
+        ? Math.max(0, t.heartbeatAge + (now - t.rxAt))
+        : null;
+
+      const posAge = (t && Number.isFinite(t.positionAt))
+        ? Math.max(0, now - t.positionAt)
+        : null;
+
+      const servicePhase = svc ? svc.phase : (t && t.servicePhase ? t.servicePhase : 'none');
+      const pendingCmd = svc ? (svc.pendingAction || 'none') : 'none';
+      const retryCount = svc ? (svc.retries || 0) : 0;
+      let failureReason = null;
+      if (svc && svc.failureReason) {
+        failureReason = svc.failureReason;
+      } else if (v.state && String(v.state).startsWith('failed:')) {
+        failureReason = v.state;
+      } else if (t && t.state && String(t.state).startsWith('failed:')) {
+        failureReason = t.state;
+      }
+
+      list.push({
+        id,
+        state: (t && t.state) || v.state || (v.ready ? 'ready' : 'unknown'),
+        ready: Boolean(v.ready && t && t.ready),
+        servicePhase,
+        heartbeatAge,
+        positionAge: posAge,
+        pendingCommand: pendingCmd,
+        retryCount,
+        failureReason,
+      });
+    }
+    return list;
+  }
+
   // Expose to main.js and the sim loop.
   window.ExternalMode = ExternalMode;
+  ExternalMode.getDiagnostics = getExternalDiagnostics;
+  window.getExternalDiagnostics = getExternalDiagnostics;
   window.externalConnect = externalConnect;
   window.externalDisconnect = externalDisconnect;
   window.externalActive = externalActive;
@@ -437,4 +499,6 @@
   window.externalServiceGrounded = externalServiceGrounded;
   window.externalServiceComplete = externalServiceComplete;
   window.externalServiceActive = externalServiceActive;
+  window.dispatchServiceAction = dispatchServiceAction;
+  ExternalMode.dispatchServiceAction = dispatchServiceAction;
 })();

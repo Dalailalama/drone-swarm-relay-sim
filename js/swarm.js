@@ -171,8 +171,8 @@ function makeSwarm(opts) {
       y: (opts.base && opts.base.y != null) ? opts.base.y : (opts.baseY != null ? opts.baseY : 0),
     },
     target: {
-      x: (opts.target && opts.target.x != null) ? opts.target.x : opts.targetX,
-      y: (opts.target && opts.target.y != null) ? opts.target.y : opts.targetY,
+      x: (opts.target && opts.target.x != null) ? opts.target.x : (opts.targetX != null ? opts.targetX : 1500),
+      y: (opts.target && opts.target.y != null) ? opts.target.y : (opts.targetY != null ? opts.targetY : -300),
     },
     drones: [],
     time: 0,
@@ -183,7 +183,7 @@ function makeSwarm(opts) {
     wind: { x: opts.windX || 0, y: opts.windY || 0 },
     events: [],
     radio: opts.radio,
-    envFactor: opts.envFactor,
+    envFactor: opts.envFactor != null ? opts.envFactor : 1,
     shadowSigmaDb: opts.shadowSigmaDb || 0,
     // Heterogeneous fleet (js/fleet.js): relayWing drones carry the heavy
     // radio + endurance airframe and hold the chain; the rest fly tactical.
@@ -216,6 +216,7 @@ function makeSwarm(opts) {
     // Anti-jam spectrum agility + LPI/LPD waveform (Feature: Tier-1 #5)
     spectrumAgility: !!opts.spectrumAgility,
     lpiMode: !!opts.lpiMode,
+    seed: opts.seed != null ? opts.seed : 42,
     stats: { tSec: 0, connSec: 0 },
     net: makeNet(opts.seed != null ? opts.seed : 42),
     c2: { known: {}, relays: [], inbox: [], nextCmd: 0, wasFresh: {}, lost: {}, rescuers: [], unfit: {}, cov: new Map(), slotCache: {}, bcastSeq: 0, everHeard: new Set(), vidGrantee: null, vidIdx: 0 },
@@ -233,6 +234,25 @@ function makeSwarm(opts) {
     dr.baseKnown = { x: s.base.x, y: s.base.y, at: 0 };
     s.drones.push(dr);
   }
+  s.initialSettings = {
+    radio: (opts.radio && opts.radio.id) ? opts.radio.id : (s.radio ? s.radio.id : undefined),
+    airframe: (opts.airframe && opts.airframe.id) ? opts.airframe.id : (s.airframe ? s.airframe.id : undefined),
+    count: opts.count || 5,
+    altitudeM: s.altitudeM,
+    deployFrac: s.deployFrac,
+    corridorRouting: s.corridorRouting,
+    broadcastC2: s.broadcastC2,
+    spectrumAgility: s.spectrumAgility,
+    lpiMode: s.lpiMode,
+    videoOn: s.videoOn,
+    videoKbps: s.videoKbps,
+    adversaryMode: s.adversaryMode,
+    base: { x: s.base.x, y: s.base.y },
+    target: { x: s.target.x, y: s.target.y },
+    wind: { x: s.wind.x, y: s.wind.y },
+    envFactor: s.envFactor != null ? s.envFactor : 1,
+    terrain: s.terrain ? (s.terrain.name || s.terrain.type || 'flat') : 'flat',
+  };
   return s;
 }
 
@@ -2048,8 +2068,69 @@ function afterActionReport(s) {
   return L.join('\n');
 }
 
+function explainDroneDecision(s, d) {
+  if (!d) return null;
+  const af = afOf(s, d);
+  const vAirMs = Math.hypot(d.vx, d.vy);
+  const homeK = d.baseKnown || s.base;
+  const gHome = groundSpeedAlong(af, s.wind, d, homeK);
+  const secsHome = gHome > 0.05 ? dist2d(d, homeK) / gHome : Infinity;
+  const whHome = flightPowerW(af, af.maxSpeedMs) * secsHome / 3600 * BATTERY.homeMargin;
+  const reqWh = whHome + usableWh(af) * BATTERY.reserveFrac;
+  const reqPct = (reqWh / usableWh(af)) * 100;
+  const silenceSec = s.time - d.lastC2;
+
+  let summary = '';
+  if (d.mode === 'dead') {
+    summary = 'Vehicle down (destroyed or battery exhausted)';
+  } else if (d.mode === 'landed') {
+    summary = 'Landed on base pad (swapping or waiting for launch)';
+  } else if (d.mode === 'rtb') {
+    summary = 'Returning to base: low battery (' + d.batteryPct.toFixed(1) + '% remaining, requires ' + reqPct.toFixed(1) + '% to fly home against wind)';
+  } else if (d.mode === 'rtl') {
+    summary = 'Returning to C2: failsafe link recovery attempts exhausted';
+  } else if (d.mode === 'relink') {
+    summary = 'Regaining link (attempt ' + (d.relinkAttempt || 1) + '/' + FAILSAFE.relinkAttempts + '): retreating to last-known good link point';
+  } else if (d.mode === 'hold') {
+    summary = 'Holding position: C2 link lost (' + silenceSec.toFixed(1) + 's silence, threshold ' + FAILSAFE.holdSec + 's)';
+  } else if (d.tethered) {
+    summary = 'Tethered: upstream margin to ' + (d.order.upstream || 'neighbor') + ' degraded to ' + (d.upMarginEma != null ? d.upMarginEma.toFixed(1) : '?') + ' dB — throttling outward motion to protect chain';
+  } else if (d.order && d.order.role === 'relay') {
+    summary = 'Relay station: bridging ' + (d.order.upstream || 'C2') + ' to downstream fleet (link margin: ' + (d.upMarginEma != null ? d.upMarginEma.toFixed(1) + ' dB' : '—') + ')';
+  } else if (d.order && d.order.role === 'mission') {
+    summary = 'Objective loiter: orbiting target (margin via ' + (d.order.upstream || 'C2') + ': ' + (d.upMarginEma != null ? d.upMarginEma.toFixed(1) + ' dB' : '—') + ')';
+  } else if (d.order && d.order.role === 'rescue') {
+    summary = 'Search & rescue: probing toward silent drone position tethered to ' + (d.order.upstream || 'C2');
+  } else {
+    summary = 'En route under fleet tasking';
+  }
+
+  return {
+    id: d.id,
+    summary,
+    mode: d.mode,
+    role: d.order ? d.order.role : 'none',
+    upstream: d.order ? d.order.upstream : 'none',
+    marginDb: d.upMarginEma != null ? d.upMarginEma : null,
+    c2AgeSec: silenceSec,
+    batteryPct: d.batteryPct,
+    energyWh: d.energyWh,
+    requiredWh: reqWh,
+    requiredPct: reqPct,
+    speedMs: vAirMs,
+    tethered: Boolean(d.tethered),
+    gpsDenied: Boolean(d.gpsDenied),
+    streaming: Boolean(s.c2 && s.c2.vidGrantee === d.id),
+  };
+}
+
+if (typeof window !== 'undefined') {
+  window.explainDroneDecision = explainDroneDecision;
+  window.BATTERY = BATTERY;
+}
+
 // UMD-lite: only the cross-runtime policy constant — the sim itself runs as
 // browser globals / inside the vm harness.
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { SIM_DT_SEC };
+  module.exports = { SIM_DT_SEC, explainDroneDecision };
 }

@@ -805,9 +805,51 @@ function stepNet(s, dt) {
 //     deliver {pid, kind, src, dst}
 //     drop    {pid?, kind, reason, from?, to?, marginDb?}  reason: no-route|link-fail
 //     bcast   {seqNo, from, to, marginDb}
+function recordUserAction(s, action) {
+  if (!s || !s.captureOn) return;
+  if (!s.userActions) s.userActions = [];
+  s.userActions.push({ t: s.time, ...action });
+}
+
 function exportCaptureJSONL(s) {
-  const header = { seq: -1, t: 0, ev: 'meta', radio: s.radio.id, broadcast: !!s.broadcastC2, events: s.net.cap.length };
-  return [header, ...s.net.cap].map(e => JSON.stringify(e)).join('\n');
+  const baseSettings = s.initialSettings || {
+    radio: s.radio ? s.radio.id : undefined,
+    airframe: s.airframe ? s.airframe.id : undefined,
+    count: s.drones ? s.drones.length : undefined,
+    altitudeM: s.altitudeM,
+    deployFrac: s.deployFrac,
+    corridorRouting: !!s.corridorRouting,
+    broadcastC2: !!s.broadcastC2,
+    spectrumAgility: !!s.spectrumAgility,
+    lpiMode: !!s.lpiMode,
+    videoOn: !!s.videoOn,
+    videoKbps: s.videoKbps,
+    adversaryMode: !!s.adversaryMode,
+    base: s.base ? { x: s.base.x, y: s.base.y } : { x: 0, y: 0 },
+    target: s.target ? { x: s.target.x, y: s.target.y } : { x: 0, y: 0 },
+    wind: s.wind ? { x: s.wind.x, y: s.wind.y } : { x: 0, y: 0 },
+    envFactor: s.envFactor,
+    terrain: s.terrain ? (s.terrain.name || s.terrain.type || 'flat') : 'flat',
+  };
+  const header = {
+    seq: -1,
+    t: 0,
+    ev: 'meta',
+    version: 2,
+    seed: s.seed,
+    radio: s.radio ? s.radio.id : undefined,
+    broadcast: !!s.broadcastC2,
+    settings: { ...baseSettings },
+    userActions: s.userActions ? [...s.userActions] : [],
+    events: (s.net && s.net.cap) ? s.net.cap.length : 0,
+  };
+  const caps = (s.net && s.net.cap) ? s.net.cap : [];
+  return [header, ...caps].map(e => JSON.stringify(e)).join('\n');
+}
+
+if (typeof window !== 'undefined') {
+  window.recordUserAction = recordUserAction;
+  window.exportCaptureJSONL = exportCaptureJSONL;
 }
 
 // Hop attempt: the link must still exist when the packet actually crosses it,
@@ -832,5 +874,6 @@ if (typeof module !== 'undefined' && module.exports) {
     linkUsable, linkCost, routePath, c2Tree, pathToC2,
     sendPacket, deliverPacket, stepNet, exportCaptureJSONL,
     hopDelivered, HOP_RETRIES, interruptEndpointAttempts,
+    recordUserAction,
   };
 }

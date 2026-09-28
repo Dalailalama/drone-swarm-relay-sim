@@ -240,3 +240,33 @@ test('regression #25: origin-relative bridge altitude converts to AGL over terra
   assert.ok(Math.abs(groundAt(s.base.x, s.base.y) - groundAt(pos.x, pos.y)) > 1,
     'probe sanity: terrain must actually differ between base and vehicle');
 });
+
+test('Item 5: getExternalDiagnostics reports phase, age, pending command, retries, and failure reason', () => {
+  const ui = loadUI();
+  const ws = connectBridge(ui, 2);
+  const s = ui.ctx.sim.swarm;
+  sendTelemetry(ws, 1, [
+    { id: 'DR-1', x: 100, y: 0, alt: 50, connected: true, armed: true, ready: true, state: 'ready', positionSeq: 1, positionAge: 0.1, heartbeatAge: 0.2 },
+    { id: 'DR-2', x: 120, y: 0, alt: 0, connected: true, armed: false, ready: false, state: 'failed:takeoff', positionSeq: 2, positionAge: 0.5, heartbeatAge: 0.6 },
+  ]);
+  const diags = ui.ctx.getExternalDiagnostics();
+  assert.strictEqual(diags.length, 2);
+  assert.strictEqual(diags[0].id, 'DR-1');
+  assert.strictEqual(diags[0].ready, true);
+  assert.strictEqual(diags[0].state, 'ready');
+  assert.strictEqual(diags[0].pendingCommand, 'none');
+  assert.strictEqual(diags[0].retryCount, 0);
+  assert.ok(diags[0].heartbeatAge >= 0);
+  assert.ok(diags[0].positionAge >= 0);
+
+  assert.strictEqual(diags[1].id, 'DR-2');
+  assert.strictEqual(diags[1].ready, false);
+  assert.strictEqual(diags[1].failureReason, 'failed:takeoff');
+
+  // Trigger UI update frames (panel updates throttle at 200ms)
+  ui.ctx.__raf.pump(200);
+  ui.ctx.__raf.pump(200);
+  assert.strictEqual(ui.el('extDiagnostics').style.display, 'block');
+  assert.ok(ui.el('extDiagBody').innerHTML.includes('DR-1'));
+  assert.ok(ui.el('extDiagBody').innerHTML.includes('failed:takeoff'));
+});

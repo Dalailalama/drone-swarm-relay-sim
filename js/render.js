@@ -118,6 +118,7 @@ function drawTerrain(ctx, cv, view, s) {
     const p = worldToScreen(view, cv, b.x - b.w / 2, b.y - b.d / 2);
     const wpx = b.w * view.pxPerM, dpx = b.d * view.pxPerM;
     if (wpx < 1.2) continue;
+    if (p.x + wpx < 0 || p.x > cv.width || p.y + dpx < 0 || p.y > cv.height) continue;
     const tall = b.heightM > s.altitudeM;
     ctx.fillStyle = tall ? 'rgba(122,74,66,0.55)' : 'rgba(138,136,122,0.28)';
     ctx.fillRect(p.x, p.y, wpx, dpx);

@@ -178,6 +178,8 @@
       </div>
       <div class="btn-row">
         <button id="exportBtn" disabled>Export capture (.jsonl)</button>
+        <input type="file" id="replayInput" accept=".jsonl,text/plain" style="display:none;">
+        <button id="replayBtn">Replay capture&hellip;</button>
       </div>
       <div class="ctl-row">
         <label for="windSpdRange">Wind</label>
@@ -326,6 +328,12 @@
         <button id="extConnectBtn">Fly via bridge</button>
       </div>
       <div id="extStatus" class="af-info">off — drones flown by built-in physics</div>
+      <div id="extDiagnostics" style="margin-top:8px; display:none;">
+        <table>
+          <thead><tr><th>ID</th><th>Phase</th><th>HB</th><th>Pos</th><th>Cmd</th><th>Retries</th><th>Status</th></tr></thead>
+          <tbody id="extDiagBody"></tbody>
+        </table>
+      </div>
     </section>
 
     <section>
@@ -340,6 +348,11 @@
         <tbody id="hopsBody"></tbody>
       </table>
       <div id="chanLine" class="af-info"></div>
+    </section>
+
+    <section id="droneDecisionSection">
+      <h2>Selected drone</h2>
+      <div id="droneDecisionCard" class="af-info">Select a drone to inspect its decision logic and live measurements.</div>
     </section>
 
     <section>
@@ -368,6 +381,7 @@
 <script src="js/adversary.js"></script>
 <script src="js/net.js"></script>
 <script src="js/swarm.js"></script>
+<script src="js/replay.js"></script>
 <script src="js/render.js"></script>
 <script src="js/view3d.js"></script>
 <script src="js/external.js"></script>
