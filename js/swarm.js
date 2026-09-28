@@ -409,7 +409,25 @@ const C2_ANTENNA_M = 6; // ground station telemetry mast — BVLOS ops raise the
 // slots spaced along the path, then every adjacent hop LOS-validated against
 // the terrain model — a ridge between two slots gets an extra relay ON it
 // rather than a dead hop across it.
-const PLAN = { replanSec: 5, maxSlots: 12 };
+const PLAN = {
+  replanSec: 5, maxSlots: 12,
+  maxCells: 40000,  // search-grid bound: cells coarsen past it (a 40 m grid over 100 km took ~1 min; #27)
+  gpsCost: 3,       // GNSS-denied cells cost this much more to cross — avoided, never walls (#27)
+  failedHoldSec: 60, // an unchanged world re-searches a failed plan at most this often (#27)
+};
+
+// What a failed search depends on: the ends, the RF denial sources, the GNSS
+// zones and the measured-bad coverage cells. While none of it changes a
+// re-search can only fail again — it took 30-42 s over hills, every 5 s (#27).
+function planWorldKey(s) {
+  let bad = 0;
+  for (const e of s.c2.cov.values()) if (e.bad > e.good) bad++;
+  const r40 = v => Math.round(v / 40);
+  return [r40(s.base.x), r40(s.base.y), r40(s.target.x), r40(s.target.y), bad,
+    (s.jammers || []).map(j => [r40(j.x), r40(j.y), j.erpDbm, j.on !== false, j.band, j.freqMHz].join(':')).join('|'),
+    (s.gpsZones || []).map(z => [r40(z.x), r40(z.y), Math.round(z.rM), z.on !== false].join(':')).join('|'),
+  ].join(';');
+}
 
 // The relay chain lives on whatever radio the relay wing flies (heterogeneous)
 // or on the swarm-wide radio (homogeneous). Planning numbers for slot spacing
@@ -420,20 +438,39 @@ function planChain(s) {
   const tKey = Math.round(s.target.x / 40) + ',' + Math.round(s.target.y / 40);
   const cached = s.c2.chainPlan;
   if (cached && cached.tKey === tKey && s.time - cached.at < PLAN.replanSec) return cached;
+  const worldKey = planWorldKey(s);
+  if (cached && !cached.feasible && cached.worldKey === worldKey && s.time - cached.at < PLAN.failedHoldSec) return cached;
 
   const usable = Math.min(usableRangeM(chainRadio(s), s.envFactor), radioHorizonM(C2_ANTENNA_M, s.altitudeM));
   const span = usable * s.deployFrac;
-  const cell = Math.max(40, usable * 0.25);
   // The search box must be wide enough to route AROUND the widest denial zone,
   // otherwise A* can't find a detour and the chain fails through it.
   const pad = Math.max(span * 1.5, maxDenialRadiusM(s) * 1.35 + span);
   const minX = Math.min(s.base.x, s.target.x) - pad, maxX = Math.max(s.base.x, s.target.x) + pad;
   const minY = Math.min(s.base.y, s.target.y) - pad, maxY = Math.max(s.base.y, s.target.y) + pad;
+  const cell = Math.max(40, usable * 0.25, Math.sqrt((maxX - minX) * (maxY - minY) / PLAN.maxCells));
   const nx = Math.max(2, Math.ceil((maxX - minX) / cell)), ny = Math.max(2, Math.ceil((maxY - minY) / cell));
   const pos = (ix, iy) => ({ x: minX + (ix + 0.5) * cell, y: minY + (iy + 0.5) * cell });
-  const blocked = p => insideObstacle(s, p) || covState(s, p.x, p.y) === 'bad'
-    || inDenialZone(s, p) || gpsDeniedAt(s.gpsZones, p.x, p.y);
+  // Radio walls only: GNSS denial doesn't touch RF, so GPS zones are a crossing
+  // cost below (and kept out of path shortcuts), not a reason to withhold the
+  // plan when the base or objective sits in one (#27).
+  const blocked = p => insideObstacle(s, p) || covState(s, p.x, p.y) === 'bad' || inDenialZone(s, p);
+  const avoid = p => blocked(p) || gpsDeniedAt(s.gpsZones, p.x, p.y);
   const idx = (ix, iy) => iy * nx + ix;
+  // Each cell is judged once per plan: probes trace terrain line of sight,
+  // and every cell used to be re-probed from up to 8 neighbours.
+  const cellInfo = new Map();
+  const cellAt = (ix, iy) => {
+    const k = idx(ix, iy);
+    let c = cellInfo.get(k);
+    if (!c) {
+      const p = pos(ix, iy);
+      c = { blocked: blocked(p), cost: (covState(s, p.x, p.y) === 'good' ? 0.9 : 1)
+        * (gpsDeniedAt(s.gpsZones, p.x, p.y) ? PLAN.gpsCost : 1) };
+      cellInfo.set(k, c);
+    }
+    return c;
+  };
 
   const sIx = Math.min(nx - 1, Math.max(0, Math.floor((s.base.x - minX) / cell)));
   const sIy = Math.min(ny - 1, Math.max(0, Math.floor((s.base.y - minY) / cell)));
@@ -476,6 +513,17 @@ function planChain(s) {
   };
   gCost.set(idx(sIx, sIy), 0);
   let found = false;
+  // A goal ringed by blocked cells (a jammer sitting on the objective) can't
+  // be entered: say so now instead of exhausting the whole padded box first.
+  let ringOpen = false;
+  for (let dx = -1; dx <= 1 && !ringOpen; dx++) {
+    for (let dy = -1; dy <= 1 && !ringOpen; dy++) {
+      const ix = gIx + dx, iy = gIy + dy;
+      if ((dx || dy) && ix >= 0 && iy >= 0 && ix < nx && iy < ny
+        && ((ix === sIx && iy === sIy) || !cellAt(ix, iy).blocked)) ringOpen = true;
+    }
+  }
+  if (!ringOpen) open.length = 0;
   while (open.length) {
     const cur = heapPop();
     if (cur.ix === gIx && cur.iy === gIy) { found = true; break; }
@@ -485,9 +533,9 @@ function planChain(s) {
         if (!dx && !dy) continue;
         const ix = cur.ix + dx, iy = cur.iy + dy;
         if (ix < 0 || iy < 0 || ix >= nx || iy >= ny) continue;
-        const p = pos(ix, iy);
-        if ((ix !== gIx || iy !== gIy) && blocked(p)) continue;
-        const stepCost = (dx && dy ? 1.4142 : 1) * (covState(s, p.x, p.y) === 'good' ? 0.9 : 1);
+        const info = cellAt(ix, iy);
+        if ((ix !== gIx || iy !== gIy) && info.blocked) continue;
+        const stepCost = (dx && dy ? 1.4142 : 1) * info.cost;
         const g = cur.g + stepCost;
         const key = idx(ix, iy);
         if (gCost.has(key) && gCost.get(key) <= g) continue;
@@ -513,7 +561,7 @@ function planChain(s) {
       const n = Math.ceil(dist2d(a, b) / (cell / 2));
       for (let i = 1; i < n; i++) {
         const p = { x: a.x + (b.x - a.x) * i / n, y: a.y + (b.y - a.y) * i / n };
-        if (blocked(p)) return false;
+        if (avoid(p)) return false;
       }
       return true;
     };
@@ -532,7 +580,7 @@ function planChain(s) {
   // (review finding #19). C2 gets an empty slot list and says so; drones'
   // own protections (tether, coverage) handle whatever was already airborne.
   if (!found) {
-    const failedPlan = { slots: [], pathLen: dist2d(s.base, s.target), tKey, at: s.time, feasible: false };
+    const failedPlan = { slots: [], pathLen: dist2d(s.base, s.target), tKey, worldKey, at: s.time, feasible: false };
     s.c2.chainPlan = failedPlan;
     return failedPlan;
   }
@@ -606,7 +654,7 @@ function planChain(s) {
     else break;
   }
 
-  const plan = { slots, pathLen, tKey, at: s.time, feasible: found };
+  const plan = { slots, pathLen, tKey, worldKey, at: s.time, feasible: found };
   s.c2.chainPlan = plan;
   return plan;
 }
