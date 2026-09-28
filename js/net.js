@@ -441,7 +441,7 @@ function stepBcasts(s) {
       const rxRad = (d && d.radio) || s.radio;
       if (typeof bandCompatible === 'function' && !bandCompatible(rad, rxRad)) continue;
       const m = liveMarginDb(s, b.srcId, id);
-      if (m <= 0) continue;
+      if (!(m > 0)) continue; // NaN-safe: `m <= 0` let NaN margins deliver at any range (soak R1)
       if (s.net.rng() >= pktSuccessProb(m)) continue; // one roll, no retry
       if (seen) {
         if (++mine.dupHeard >= BCAST_SUPPRESS_DUPS) {

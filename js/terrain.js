@@ -299,6 +299,8 @@ function indexBuildings(t) {
   return t;
 }
 
+const TERRAIN_MIN_FEATURE_SPAN_M = 200;
+
 function makeTerrain(name, opts) {
   opts = opts || {};
   const distM = opts.distM != null ? opts.distM : 1000;
@@ -318,6 +320,11 @@ function makeTerrain(name, opts) {
     density: opts.density, heightScale: opts.heightScale,
   };
   const tag = (kind, t) => Object.assign(t, { name: kind, gen });
+  // Hill wavelength scales with the mission span — floored, because an
+  // objective ON the base made it 0 and fbm(x / 0) NaN-poisoned every
+  // altitude, LOS test and link margin (soak finding R1); a few metres made
+  // a bed of 170 m spikes. Every shipped scenario is far beyond the floor.
+  const featureSpanM = Math.max(distM, TERRAIN_MIN_FEATURE_SPAN_M);
 
   if (name === 'rolling') {
     const groundAmpM = 2.6 * 50 + 40;     // fixed reference baseline so altitude sweeps do not alter topography (B26)
@@ -325,7 +332,7 @@ function makeTerrain(name, opts) {
       seed, buildings: [],
       groundAmpM,
       _maxRoofAlt: groundAmpM,
-      groundScaleM: distM * 0.35,      // feature wavelength ~ a few hops
+      groundScaleM: featureSpanM * 0.35,      // feature wavelength ~ a few hops
     });
   }
   const keepOut = [
@@ -343,7 +350,7 @@ function makeTerrain(name, opts) {
   if (name === 'mixed') {
     const c = along(0.55);
     return tag('mixed', indexBuildings({
-      seed, groundAmpM: 2.0 * 50 + 30, groundScaleM: distM * 0.45,
+      seed, groundAmpM: 2.0 * 50 + 30, groundScaleM: featureSpanM * 0.45,
       buildings: makeCity(c.x, c.y, distM * 2.2, rng, keepOut, cityOpts),
     }));
   }
