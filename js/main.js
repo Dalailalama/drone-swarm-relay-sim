@@ -328,7 +328,60 @@
       adversaryMode: !!swarm.adversaryMode,
     };
   }
+  // A scenario file is untrusted data (soak finding R6), exactly like the
+  // radio presets it may carry (finding #7). Every field that reaches the
+  // controls or the swarm is checked BEFORE anything changes: numeric strings
+  // used to concatenate inside the sim ("500"+0 -> "5000"…, x -> "250NaN…"),
+  // and a null entry threw only after the mission had been relaunched.
+  function scenarioProblem(sc) {
+    const obj = v => v !== null && typeof v === 'object' && !Array.isArray(v);
+    const num = v => typeof v === 'number' && isFinite(v);
+    if (!obj(sc)) return 'not a scenario object';
+    for (const k of ['count', 'altitudeM', 'spacingPct', 'distancePct', 'windSpd', 'windDir', 'cityDensity', 'cityHeight', 'relayWing', 'videoKbps', 'seed']) {
+      if (sc[k] != null && !num(sc[k])) return k + ' must be a number';
+    }
+    for (const k of ['hetero', 'corridor', 'broadcast', 'coverage', 'spectrumAgility', 'lpiMode', 'adversaryMode', 'videoBackhaul', 'videoOn']) {
+      if (sc[k] != null && typeof sc[k] !== 'boolean') return k + ' must be true or false';
+    }
+    for (const k of ['env', 'airframe', 'terrain', 'relayAirframe']) {
+      if (sc[k] != null && typeof sc[k] !== 'string') return k + ' must be a string';
+    }
+    for (const k of ['radio', 'relayRadio']) {
+      if (sc[k] != null && typeof sc[k] !== 'string' && !obj(sc[k])) return k + ' must be a radio id';
+    }
+    for (const k of ['base', 'target', 'baseVelMps', 'targetVelMps']) {
+      if (sc[k] != null && (!obj(sc[k]) || !num(sc[k].x) || !num(sc[k].y))) return k + ' must be {x, y} with numeric x and y';
+    }
+    const bandOk = b => b == null || ['all', 'sub1g', '2.4g', '5g'].includes(b) || (num(b) && b > 0) ||
+      (typeof b === 'string' && /^[+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(b.trim()) && +b > 0);
+    const list = (k, check) => {
+      if (sc[k] == null) return null;
+      if (!Array.isArray(sc[k])) return k + ' must be a list';
+      for (let i = 0; i < sc[k].length; i++) {
+        const e = sc[k][i], at = k + '[' + i + ']';
+        if (!obj(e)) return at + ' must be an object';
+        if (!num(e.x) || !num(e.y)) return at + '.x/y must be numbers';
+        if (e.on != null && typeof e.on !== 'boolean') return at + '.on must be true or false';
+        if (e.id != null && typeof e.id !== 'string') return at + '.id must be a string';
+        const bad = check(e, at);
+        if (bad) return bad;
+      }
+      return null;
+    };
+    return list('jammers', (j, at) => {
+      if (!num(j.erpDbm)) return at + '.erpDbm must be a number';
+      if (j.altM != null && !(num(j.altM) && j.altM > 0)) return at + '.altM must be a positive number';
+      if (!bandOk(j.band)) return at + '.band must be all|sub1g|2.4g|5g or a frequency in MHz';
+      if (j.freqMHz != null && !(num(j.freqMHz) && j.freqMHz > 0)) return at + '.freqMHz must be a positive number';
+      for (const k of ['moveSpeedMs', 'detectRangeM']) if (j[k] != null && !(num(j[k]) && j[k] >= 0)) return at + '.' + k + ' must be a non-negative number';
+      return null;
+    }) || list('gpsZones', (z, at) => (num(z.rM) && z.rM >= 0) ? null : at + '.rM must be a non-negative number') ||
+      ((sc.osm != null && (!obj(sc.osm) || !num(sc.osm.lat) || !num(sc.osm.lon) || (sc.osm.radiusM != null && !num(sc.osm.radiusM))))
+        ? 'osm must carry numeric lat/lon (and radiusM)' : null);
+  }
   function applyScenario(sc) {
+    const problem = scenarioProblem(sc);
+    if (problem) throw new Error(problem); // nothing has changed yet (R6)
     resetControlsToDefaults();
     // Imported presets may be re-id'd (built-in collision) or rejected
     // (failed validation) — follow what registration actually produced,
