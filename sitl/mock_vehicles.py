@@ -303,6 +303,7 @@ class Vehicle:
                     self.init_state = "landed"
                     self.service_phase = "landed"
                     self.failed_at = None
+                    log.info("vehicle %s: landing complete -> phase landed", self.id)
                     return
                 if self.alt <= self.descent_ref_alt - 0.5:
                     self.descent_ref_alt = self.alt
@@ -310,6 +311,7 @@ class Vehicle:
                 if now - self.last_descent_at >= INIT_STEP_TIMEOUT_S:
                     self._fail("land", now)
                     self.service_phase = "failed"
+                    log.warning("vehicle %s: landing timed out! alt=%.2f descent_ref=%.2f", self.id, self.alt, self.descent_ref_alt)
                 return
             elif self.service_phase in ("landed", "swapping", "swapped"):
                 pass
@@ -675,6 +677,7 @@ async def handle_message(websocket, raw: str) -> None:
             return
 
         accepted, err, code, retryable = v.service(request_id, action, msg)
+        log.info("service req: vid=%s action=%s req_id=%s accepted=%s code=%s err=%s", vid, action, request_id, accepted, code, err)
         if accepted:
             v.service_action_history[history_key] = (accepted, err, code, retryable)
         ack_msg = {
