@@ -1242,13 +1242,37 @@ function c2Step(s) {
       const p = known[id];
       return p ? ((p.x - s.base.x) * cvx + (p.y - s.base.y) * cvy) / axisDenom : 0;
     };
-    const ordered = [...s.c2.rescuers].sort((a, b) => projT(a) - projT(b));
+    // Both the order and the anchor are sticky (#18): re-sorting bunched
+    // rescuers by their GPS-noisy projection, and re-picking between
+    // near-equidistant anchors, rotated every rescuer's upstream each round.
+    // Last round's order is kept (newcomers join by projection) and adjacent
+    // rescuers swap only when clearly inverted, by more than 15 m along the axis.
+    const sorted = [...s.c2.rescuers].sort((a, b) => projT(a) - projT(b));
+    const kept = (s.c2.rescueOrder || []).filter(id => s.c2.rescuers.includes(id));
+    const ordered = kept.concat(sorted.filter(id => !kept.includes(id)));
+    const axisLen = Math.sqrt(axisDenom);
+    for (let pass = 0; pass < ordered.length; pass++) {
+      for (let i = 0; i + 1 < ordered.length; i++) {
+        if ((projT(ordered[i]) - projT(ordered[i + 1])) * axisLen > 15) {
+          const t = ordered[i]; ordered[i] = ordered[i + 1]; ordered[i + 1] = t;
+        }
+      }
+    }
+    s.c2.rescueOrder = ordered.slice();
     let anchor = s.base, anchorId = 'C2', aD = dist2d(s.base, c);
     for (const id of Object.keys(known)) {
       if (!fresh(id) || s.c2.rescuers.includes(id)) continue;
       const dd = dist2d(known[id], c);
       if (dd < aD) { aD = dd; anchor = known[id]; anchorId = id; }
     }
+    // The incumbent anchor holds unless the new nearest is >25% closer.
+    const incA = s.c2.rescueAnchorId;
+    if (incA && incA !== anchorId) {
+      const incPos = incA === 'C2' ? s.base
+        : (fresh(incA) && !s.c2.rescuers.includes(incA) ? known[incA] : null);
+      if (incPos && dist2d(incPos, c) <= aD * 1.25) { anchor = incPos; anchorId = incA; }
+    }
+    s.c2.rescueAnchorId = anchorId;
     for (const rid of ordered) {
       const dHop = dist2d(anchor, c);
       const step = Math.min(reach, dHop);
@@ -1664,9 +1688,13 @@ function tetherGoal(s, d, goal) {
   if (dist2d(goal, upPos) <= dist2d(d, upPos)) return goal;
 
   if (m <= stopDb) {
-    // link nearly gone: step back toward the upstream neighbor
+    // link nearly gone: step back toward the upstream neighbor. The retreat
+    // ramps in over the first 3 dB below the floor, continuous with the slow
+    // band (whose throttle reaches "hold here" at the floor) — a full 40% step
+    // at the threshold made fading drones lurch tens of metres and back (#18).
     if (!d.tethered) { d.tethered = true; logEvent(s, d.id + ' tether: link to ' + d.order.upstream + ' thin — closing up', 'warn'); }
-    return { x: d.x + (upPos.x - d.x) * 0.4, y: d.y + (upPos.y - d.y) * 0.4 };
+    const k = 0.4 * Math.min(1, (stopDb - m) / 3);
+    return { x: d.x + (upPos.x - d.x) * k, y: d.y + (upPos.y - d.y) * k };
   }
   // in the slow band: freeze outbound progress proportionally
   const f = (m - stopDb) / (slowDb - stopDb);
