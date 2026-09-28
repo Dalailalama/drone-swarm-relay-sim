@@ -566,13 +566,20 @@ function planChain(s) {
   }
 
   // LOS-densify with the terrain model: a ridge between adjacent nodes gets
-  // a relay on it instead of a dead hop over it (two passes max)
+  // a relay on it instead of a dead hop over it. Re-walks until every hop is
+  // clear, too short to split, or the slot cap is reached.
   const altOf = (p, isC2) => terrainGroundAt(s.terrain, p.x, p.y) + (isC2 ? C2_ANTENNA_M : s.altitudeM);
   for (let pass = 0; pass < 2 && slots.length < PLAN.maxSlots; pass++) {
     const nodesL = [s.base, ...slots, s.target];
     let inserted = false;
     for (let i = 0; i < nodesL.length - 1 && slots.length < PLAN.maxSlots; i++) {
       const a = nodesL[i], b = nodesL[i + 1];
+      // A hop under 4x the separation radius is never bisected: its halves
+      // would fall under 2x separation, closer than two relays can both hold
+      // station. It also bounds the walk — a hop blocked by a building rather
+      // than by its length never clears, and splitting it again and again
+      // stacked slots at the building's edge (#15).
+      if (dist2d(a, b) < 4 * DRONE.separationM) continue;
       if (losBlocked(s.terrain, a.x, a.y, altOf(a, i === 0), b.x, b.y, altOf(b, false))) {
         const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
         slots.splice(i === 0 ? 0 : i, 0, mid); // insert between a and b
