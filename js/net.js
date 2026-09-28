@@ -62,6 +62,10 @@ function makeNet(seed) {
     nodeTxUntil: {},
     nodeDutyUntil: {},
     vidFrameSeq: 0,
+    // flood bookkeeping (#14): each node's queued-but-unsent re-send (for
+    // duplicate suppression), and copies actually aired per C2 order round
+    bcastPendingBy: new Map(),
+    floodSeq: null, floodCount: 0, floodCopiesEma: null,
   };
 }
 
@@ -146,6 +150,18 @@ function pendAir(s, chan, secs) {
 // queue against pathological fan-out.
 const BCAST_QUEUE_MAX = 64;
 
+// Counter-based broadcast-storm suppression (#14): a node still waiting to
+// re-send a table cancels once it has heard this many OTHER copies of it —
+// its neighbourhood is covered already. Every node re-sending once put N+1
+// copies per round on the air (44 s of air per 1 s round at 120 drones on
+// SiK); in a dense swarm this keeps a handful, while a sparse relay line —
+// where each node hears only one or two copies — still forwards hop by hop.
+const BCAST_SUPPRESS_DUPS = 3;
+
+function forgetPendingBcast(s, b) {
+  if (s.net.bcastPendingBy.get(b.srcId) === b) s.net.bcastPendingBy.delete(b.srcId);
+}
+
 function scheduleBcast(s, srcId, payload, bytes, rad) {
   // Supersession: drop queued (uncommitted) older tables — theirs is dead air.
   const list = s.net.bcasts;
@@ -154,8 +170,19 @@ function scheduleBcast(s, srcId, payload, bytes, rad) {
     if (!q.committed && !q._gone && q.payload.seq < payload.seq) {
       pendAir(s, q.chan, -q.airtime);
       capLog(s, { ev: 'drop', reason: 'bcast-superseded', from: q.srcId, seqNo: q.payload.seq });
+      forgetPendingBcast(s, q);
       list.splice(i, 1);
     }
+  }
+  // A new C2 round closes the last one: fold its aired copies into the
+  // estimate that paces C2's order rounds (cmdIntervalSec).
+  if (srcId === 'C2' && payload.seq !== s.net.floodSeq) {
+    if (s.net.floodSeq != null) {
+      const e = s.net.floodCopiesEma;
+      s.net.floodCopiesEma = e == null ? s.net.floodCount : e + 0.3 * (s.net.floodCount - e);
+    }
+    s.net.floodSeq = payload.seq;
+    s.net.floodCount = 0;
   }
   if (list.length >= BCAST_QUEUE_MAX) {
     capLog(s, { ev: 'drop', reason: 'bcast-backlog', from: srcId, seqNo: payload.seq });
@@ -165,7 +192,9 @@ function scheduleBcast(s, srcId, payload, bytes, rad) {
   const airRate = (rad && rad.airRateKbps) || 64;
   const airtime = (bytes * 8) / (airRate * 1000);
   pendAir(s, chan, airtime);
-  list.push({ srcId, payload, bytes, radio: rad, chan, airtime, tQueued: s.time, committed: false, tFire: null });
+  const entry = { srcId, payload, bytes, radio: rad, chan, airtime, tQueued: s.time, committed: false, tFire: null, dupHeard: 0 };
+  list.push(entry);
+  if (srcId !== 'C2') s.net.bcastPendingBy.set(srcId, entry);
 }
 
 function sendBroadcast(s, srcId, payload, bytes, radioOverride) {
@@ -204,10 +233,12 @@ function eligibleStartPkt(s, p) {
 
 function commitBcast(s, b, eStart) {
   pendAir(s, b.chan, -b.airtime);
+  forgetPendingBcast(s, b);
   if (b.srcId !== 'C2') {
     const d = nodePos(s, b.srcId);
     if (!d || !alive(d)) { b._gone = true; return; } // dead transmitter (B17) — never went on air
   }
+  if (b.payload.seq === s.net.floodSeq) s.net.floodCount++;
   // Advance the clocks by the ACTUAL airtime, bill it once (finding #16),
   // record real emission for DF sensing.
   s.net.chanBusyUntil[b.chan] = eStart + b.airtime;
@@ -402,12 +433,25 @@ function stepBcasts(s) {
       if (id === b.srcId || id === 'C2') continue;
       const d = nodePos(s, id);
       if (!d || !alive(d)) continue;
-      if (d.bcastSeen >= b.payload.seq) continue;
+      const seen = d.bcastSeen >= b.payload.seq;
+      const mine = seen ? s.net.bcastPendingBy.get(id) : null;
+      // Already have it: only a copy heard while still waiting to re-send the
+      // same table matters — it counts toward suppression.
+      if (seen && !(mine && !mine.committed && !mine._gone && mine.payload.seq === b.payload.seq)) continue;
       const rxRad = (d && d.radio) || s.radio;
       if (typeof bandCompatible === 'function' && !bandCompatible(rad, rxRad)) continue;
       const m = liveMarginDb(s, b.srcId, id);
       if (m <= 0) continue;
       if (s.net.rng() >= pktSuccessProb(m)) continue; // one roll, no retry
+      if (seen) {
+        if (++mine.dupHeard >= BCAST_SUPPRESS_DUPS) {
+          mine._gone = true; // never airs; skipped by the commit phase and dropped from the queue
+          pendAir(s, mine.chan, -mine.airtime);
+          forgetPendingBcast(s, mine);
+          capLog(s, { ev: 'drop', reason: 'bcast-suppressed', from: id, seqNo: mine.payload.seq });
+        }
+        continue;
+      }
       d.bcastSeen = b.payload.seq;
       d.inbox.push({ kind: 'bcast', src: 'C2', payload: b.payload });
       s.net.delivered++;

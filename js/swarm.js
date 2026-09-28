@@ -91,20 +91,49 @@ const COVERAGE = {
   maxCells: 20000,        // learned-map bound: beyond this, forget oldest-touched first (O9)
 };
 
-// Regulatory duty cycle stretches how often a node may transmit at all.
+// Control-traffic airtime budget (#14). Orders and telemetry share the one
+// channel with each other and with payload, so both are paced by the air
+// they actually cost, not a fixed clock: at 30 drones on SiK a 1 s order
+// round plus 2 s telemetry pinned the channel at 100 %, C2 heard a quarter of
+// the fleet and kept reshuffling "stale" relays. Small fleets keep the base
+// cadence; a regulatory duty cycle still stretches it too.
+const CMD_AIR_SHARE = 0.3, TLM_AIR_SHARE = 0.4;
+
+// Hops from C2 to the far end of the planned chain (C2's own plan).
+function c2HopEstimate(s) {
+  const slots = s.c2 && s.c2.chainPlan && s.c2.chainPlan.slots;
+  return 1 + (slots ? slots.length : 0);
+}
+
+// Every drone reports once per interval across the chain's hops.
 function tlmIntervalSec(s) {
   const tx = ((NET.tlmBytes + 8) * 8) / (s.radio.airRateKbps * 1000);
-  return Math.max(C2.tlmIntervalSec, s.radio.dutyCycle ? tx / s.radio.dutyCycle : 0);
+  const n = s.drones ? s.drones.filter(alive).length : 1;
+  return Math.max(C2.tlmIntervalSec, s.radio.dutyCycle ? tx / s.radio.dutyCycle : 0,
+    n * c2HopEstimate(s) * tx / TLM_AIR_SHARE);
 }
 
 function cmdIntervalSec(s, nDrones) {
-  // Broadcast mode: ONE packet per round regardless of fleet size — the
-  // whole reason low-bandwidth C2 links broadcast instead of unicasting.
+  // Broadcast mode: ONE table per round regardless of fleet size — the
+  // whole reason low-bandwidth C2 links broadcast instead of unicasting —
+  // aired by C2 plus the forwards that suppression leaves (measured per
+  // round in net.js). Unicast: every order crosses the chain's hops.
   const bytes = s.broadcastC2
     ? NET.bcastHeaderBytes + 4 + (NET.bcastRowBytes + 12) * nDrones
     : (NET.cmdBytes + 16) * nDrones;
   const tx = (bytes * 8) / (s.radio.airRateKbps * 1000);
-  return Math.max(C2.cmdIntervalSec, s.radio.dutyCycle ? tx / s.radio.dutyCycle : 0);
+  const copies = s.broadcastC2
+    ? ((s.net && s.net.floodCopiesEma) || 1 + BCAST_SUPPRESS_DUPS)
+    : c2HopEstimate(s);
+  return Math.max(C2.cmdIntervalSec, s.radio.dutyCycle ? tx / s.radio.dutyCycle : 0,
+    copies * tx / CMD_AIR_SHARE);
+}
+
+// C2 calls a drone out of contact after ~3 missed reports at the CURRENT
+// report interval — a fixed 6 s struck off healthy relays whose paced
+// reports simply hadn't come round yet.
+function c2StaleAfterSec(s) {
+  return Math.max(C2.staleSec, 3 * tlmIntervalSec(s));
 }
 
 let droneSeq = 0;
@@ -983,7 +1012,9 @@ function c2Step(s) {
   s.c2.nextCmd = s.time + cmdIntervalSec(s, Object.keys(s.c2.known).length || 1);
 
   const known = s.c2.known;
-  const fresh = id => known[id] && (s.time - known[id].at) <= C2.staleSec;
+  const staleAfter = c2StaleAfterSec(s);
+  const forgetAfter = Math.max(C2.forgetSec, 4 * staleAfter);
+  const fresh = id => known[id] && (s.time - known[id].at) <= staleAfter;
 
   // Operator display: log contact changes, and REMEMBER where the lost were
   // last heard — that memory is what rescue dispatch works from.
@@ -999,7 +1030,7 @@ function c2Step(s) {
       delete s.c2.lost[id];
     }
     s.c2.wasFresh[id] = f;
-    if (s.time - known[id].at > C2.forgetSec) { delete known[id]; delete s.c2.wasFresh[id]; }
+    if (s.time - known[id].at > forgetAfter) { delete known[id]; delete s.c2.wasFresh[id]; }
   }
   for (const id of Object.keys(s.c2.lost)) {
     if (s.time - s.c2.lost[id].at > RESCUE.memorySec) {
@@ -1924,8 +1955,9 @@ function chainStatus(s) {
   const objectiveConnected = connected;
 
   // Operator's view: how many drones does C2 have fresh contact with?
+  const staleAfter = c2StaleAfterSec(s);
   const freshCount = Object.keys(s.c2.known)
-    .filter(id => (s.time - s.c2.known[id].at) <= C2.staleSec).length;
+    .filter(id => (s.time - s.c2.known[id].at) <= staleAfter).length;
   const aliveCount = s.drones.filter(alive).length;
 
   return { nodes, hops, links, connected, fleetConnected, objectiveConnected, missionCount: flock.length, relayCount: relays.length, freshCount, aliveCount };
