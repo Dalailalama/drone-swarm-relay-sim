@@ -611,50 +611,76 @@ function clipGoalToNoFly(s, from, goal) {
 // step that would cross into a footprint — inflated by a clearance band —
 // stops at the wall instead, keeping only the velocity that slides along it.
 const OBSTACLE_CLEAR_M = 2.5;
+// Contact stops this far short of a wall: an absolute distance, never a
+// fraction of the step (a fractional back-off shrinks toward zero and left
+// drones ~1e-7 m off the face, where every later step hit at t~0; #13).
+const WALL_SKIN_M = 0.01;
+
+// Faces of `box` a motion (rx, ry) from (x, y) actually enters at its hit:
+// the axis whose slab is crossed LAST is the entry face (a tie is a corner:
+// both faces). Faces the motion only grazes or leaves aren't returned — the
+// old "face nearest the entry point" pick could return the face PARALLEL to
+// the motion at a corner, so the velocity into the building was never shed.
+function wallNormalsEntered(box, x, y, rx, ry) {
+  const tx = Math.abs(rx) > 1e-12 ? ((rx > 0 ? box.minX : box.maxX) - x) / rx : -Infinity;
+  const ty = Math.abs(ry) > 1e-12 ? ((ry > 0 ? box.minY : box.maxY) - y) / ry : -Infinity;
+  const out = [];
+  if (tx >= ty - 1e-9 && tx > -Infinity) out.push({ nx: rx > 0 ? -1 : 1, ny: 0 });
+  if (ty >= tx - 1e-9 && ty > -Infinity) out.push({ nx: 0, ny: ry > 0 ? -1 : 1 });
+  return out;
+}
 
 function clampStepToBuildings(s, d, dt) {
-  const sx = d.x, sy = d.y;
-  const ex = sx + d.vx * dt, ey = sy + d.vy * dt;
-  const reach = Math.abs(ex - sx) + Math.abs(ey - sy) + OBSTACLE_CLEAR_M + 40;
-  let best = null; // earliest wall crossing this step: { t, nx, ny }
-  for (const b of buildingsNear(s.terrain, sx, sy, reach)) {
+  let x = d.x, y = d.y;
+  let rx = d.vx * dt, ry = d.vy * dt; // this tick's motion still to spend
+  const reach = Math.abs(rx) + Math.abs(ry) + OBSTACLE_CLEAR_M + 40;
+  const boxes = [];
+  for (const b of buildingsNear(s.terrain, x, y, reach)) {
     if (b.heightM <= s.altitudeM) continue; // scenery below flight level
-    const minX = b.x - b.w / 2 - OBSTACLE_CLEAR_M, maxX = b.x + b.w / 2 + OBSTACLE_CLEAR_M;
-    const minY = b.y - b.d / 2 - OBSTACLE_CLEAR_M, maxY = b.y + b.d / 2 + OBSTACLE_CLEAR_M;
-    if (sx > minX && sx < maxX && sy > minY && sy < maxY) {
+    const box = {
+      minX: b.x - b.w / 2 - OBSTACLE_CLEAR_M, maxX: b.x + b.w / 2 + OBSTACLE_CLEAR_M,
+      minY: b.y - b.d / 2 - OBSTACLE_CLEAR_M, maxY: b.y + b.d / 2 + OBSTACLE_CLEAR_M,
+    };
+    if (x > box.minX && x < box.maxX && y > box.minY && y < box.maxY) {
       // Already inside the clearance band (spawn, drift, loaded state):
       // exit through the nearest face and shed the inward velocity —
       // never trap, never teleport across the building.
       const exits = [
-        { pen: sx - minX, nx: -1, ny: 0 }, { pen: maxX - sx, nx: 1, ny: 0 },
-        { pen: sy - minY, nx: 0, ny: -1 }, { pen: maxY - sy, nx: 0, ny: 1 },
+        { pen: x - box.minX, nx: -1, ny: 0 }, { pen: box.maxX - x, nx: 1, ny: 0 },
+        { pen: y - box.minY, nx: 0, ny: -1 }, { pen: box.maxY - y, nx: 0, ny: 1 },
       ];
       let e = exits[0];
       for (const c of exits) if (c.pen < e.pen) e = c;
-      d.x = sx + e.nx * (e.pen + 0.05); d.y = sy + e.ny * (e.pen + 0.05);
+      d.x = x + e.nx * (e.pen + 0.05); d.y = y + e.ny * (e.pen + 0.05);
       const vn = d.vx * e.nx + d.vy * e.ny;
       if (vn < 0) { d.vx -= e.nx * vn; d.vy -= e.ny * vn; }
       return; // this tick's motion is spent resolving the incursion
     }
-    const hit = rayIntersectsAABB(sx, sy, ex, ey, minX, maxX, minY, maxY);
-    if (hit && hit.tmin > 0 && hit.tmin <= 1 && (!best || hit.tmin < best.t)) {
-      // Wall normal = the face the entry point lies on.
-      const px = sx + (ex - sx) * hit.tmin, py = sy + (ey - sy) * hit.tmin;
-      const faces = [
-        { m: Math.abs(px - minX), nx: -1, ny: 0 }, { m: Math.abs(px - maxX), nx: 1, ny: 0 },
-        { m: Math.abs(py - minY), nx: 0, ny: -1 }, { m: Math.abs(py - maxY), nx: 0, ny: 1 },
-      ];
-      let f = faces[0];
-      for (const c of faces) if (c.m < f.m) f = c;
-      best = { t: hit.tmin, nx: f.nx, ny: f.ny };
+    boxes.push(box);
+  }
+  // Collide and slide: advance to the first wall (a skin short), drop the
+  // wall-ward part of the REMAINING motion and of the velocity, and spend what
+  // is left sliding — a few passes cover a slide into a second wall.
+  for (let pass = 0; pass < 3 && (rx !== 0 || ry !== 0); pass++) {
+    let best = null;
+    for (const box of boxes) {
+      const hit = rayIntersectsAABB(x, y, x + rx, y + ry, box.minX, box.maxX, box.minY, box.maxY);
+      if (!hit || hit.tmin > 1 || (best && hit.tmin >= best.t)) continue;
+      const normals = wallNormalsEntered(box, x, y, rx, ry).filter(n => rx * n.nx + ry * n.ny < 0);
+      if (normals.length) best = { t: hit.tmin, normals };
+    }
+    if (!best) { x += rx; y += ry; break; }
+    const tStop = Math.max(0, best.t - WALL_SKIN_M / Math.hypot(rx, ry));
+    x += rx * tStop; y += ry * tStop;
+    rx *= 1 - tStop; ry *= 1 - tStop;
+    for (const { nx, ny } of best.normals) {
+      const rn = rx * nx + ry * ny;
+      if (rn < 0) { rx -= nx * rn; ry -= ny * rn; }
+      const vn = d.vx * nx + d.vy * ny;
+      if (vn < 0) { d.vx -= nx * vn; d.vy -= ny * vn; } // slide, don't stall
     }
   }
-  if (!best) { d.x = ex; d.y = ey; return; }
-  const f = Math.max(0, best.t - 1e-3);
-  d.x = sx + (ex - sx) * f;
-  d.y = sy + (ey - sy) * f;
-  const vn = d.vx * best.nx + d.vy * best.ny;
-  if (vn < 0) { d.vx -= best.nx * vn; d.vy -= best.ny * vn; } // slide, don't stall
+  d.x = x; d.y = y;
 }
 
 // Live link margin between two nodes: 3D slant-range path loss plus the
