@@ -583,16 +583,31 @@ const C2_TREE_TTL_SEC = 0.5;
 //   hold-down  — a parent adopted less than ROUTE_HOLD_SEC ago is only
 //     abandoned for a path ROUTE_HOLD_PEN_ETX better, i.e. when its link has
 //     collapsed. A dead or unusable parent never holds anything.
+// Neither damp may leak into a node's CHILDREN: a penalty folded into the
+// path cost made a whole subtree see its parent as falsely expensive for one
+// rebuild after the parent switched, so healthy children jumped away from a
+// 25 dB link and straight back. Hysteresis only biases each node's own
+// choice (exact, since it stays under the 1-ETX minimum link cost); the
+// hold-down is a separate pass over the finished tree.
 const ROUTE_HYST_ETX = 0.5;
 const ROUTE_HOLD_SEC = 5;
 const ROUTE_HOLD_PEN_ETX = 5;
+
+// Is `node` in the subtree hanging below `root` (following parent links)?
+function hangsBelow(prev, node, root, limit) {
+  for (let x = node, n = 0; x !== undefined && x !== 'C2' && n <= limit; x = prev.get(x), n++) {
+    if (x === root) return true;
+  }
+  return false;
+}
 
 function c2Tree(s) {
   if (s._c2Tree && s.time - s._c2Tree.at < C2_TREE_TTL_SEC) return s._c2Tree;
   const last = s._c2Tree;
   const ids = nodeIds(s);
-  // Dijkstra orders by `rank` (ETX plus the switch penalty); `dist` keeps the
-  // true ETX along the chosen tree for every consumer.
+  // Dijkstra keyed on `rank` = TRUE ETX to the parent + this node's own
+  // switch penalty; `dist` is the true ETX along the chosen tree, and it —
+  // not rank — is what children build on.
   const rank = new Map();
   const dist = new Map();
   for (let i = 0; i < ids.length; i++) { rank.set(ids[i], Infinity); dist.set(ids[i], Infinity); }
@@ -625,15 +640,36 @@ function c2Tree(s) {
       const c = linkCost(s, cur, nxt);
       if (c === Infinity) continue;
       const incumbent = last ? last.prev.get(nxt) : undefined;
-      let pen = 0;
-      if (incumbent !== undefined && incumbent !== cur && linkUsable(s, incumbent, nxt)) {
-        pen = ROUTE_HYST_ETX;
-        if (s.time - last.since.get(nxt) < ROUTE_HOLD_SEC) pen += ROUTE_HOLD_PEN_ETX;
-      }
-      if (best + c + pen < rank.get(nxt)) {
-        rank.set(nxt, best + c + pen);
+      const pen = incumbent !== undefined && incumbent !== cur && linkUsable(s, incumbent, nxt) ? ROUTE_HYST_ETX : 0;
+      if (curDist + c + pen < rank.get(nxt)) {
+        rank.set(nxt, curDist + c + pen);
         dist.set(nxt, curDist + c);
         prev.set(nxt, cur);
+      }
+    }
+  }
+  // Hold-down: a parent adopted under ROUTE_HOLD_SEC ago is kept while its
+  // link still works, it is still reachable, the new path doesn't save
+  // ROUTE_HOLD_PEN_ETX, and keeping it can't close a loop. Then the true
+  // costs are re-walked from C2 over the final tree.
+  if (last) {
+    let reverted = false;
+    for (const [id, p] of prev) {
+      const inc = last.prev.get(id);
+      if (inc === undefined || inc === p || !(s.time - last.since.get(id) < ROUTE_HOLD_SEC)) continue;
+      if (!(dist.get(inc) < Infinity) || !linkUsable(s, inc, id)) continue;
+      if (dist.get(inc) + linkCost(s, inc, id) - dist.get(id) >= ROUTE_HOLD_PEN_ETX) continue;
+      if (hangsBelow(prev, inc, id, ids.length)) continue;
+      prev.set(id, inc);
+      reverted = true;
+    }
+    if (reverted) {
+      const kids = new Map();
+      for (const [id, p] of prev) { if (!kids.has(p)) kids.set(p, []); kids.get(p).push(id); }
+      const queue = ['C2'];
+      while (queue.length) {
+        const u = queue.shift();
+        for (const v of kids.get(u) || []) { dist.set(v, dist.get(u) + linkCost(s, u, v)); queue.push(v); }
       }
     }
   }
