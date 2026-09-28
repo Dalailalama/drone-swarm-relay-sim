@@ -332,105 +332,64 @@ class AcceptanceRunner:
 
             await self.run_step("4. Telemetry freshness", step_telemetry_check)
 
-            # Step 5: Abort-to-Hold during descent
+            async def service(target_id: str, request_id: str, action: str, **extra) -> Dict[str, Any]:
+                await self.send_json({"type": "service", "id": target_id, "requestId": request_id,
+                                      "action": action, **extra})
+                ack = await self.recv_until(
+                    lambda m: (m.get("type") == "service_ack" and m.get("requestId") == request_id
+                               and m.get("action") == action), 5.0, f"{action} ack")
+                if not ack.get("accepted"):
+                    raise AssertionError(f"{action} rejected: {ack}")
+                return ack
+
+            # Step 5: abort a landing mid-descent. The vehicle must reach a
+            # CONFIRMED hold (state abort-hold; confirm-abort only means the
+            # request is pending) and resume all the way back to READY.
             async def step_abort_hold():
                 target_id = "DR-1"
                 req_id_1 = "svc-trans-1"
-                # First, initiate landing to enter a service transaction
-                await self.send_json({
-                    "type": "service", "id": target_id, "requestId": req_id_1,
-                    "action": "land", "groundAlt": 0.0
-                })
-                # Receive land ack
-                deadline = time.time() + 5.0
-                ack_land = None
-                while time.time() < deadline:
-                    msg = await self.recv_json(timeout=2.0)
-                    if msg.get("type") == "service_ack" and msg.get("requestId") == req_id_1:
-                        ack_land = msg
-                        break
-                if not ack_land or not ack_land.get("accepted"):
-                    raise AssertionError(f"Initial land command rejected: {ack_land}")
-
-                # Now command abort on the active landing service
-                await self.send_json({
-                    "type": "service", "id": target_id, "requestId": req_id_1,
-                    "action": "abort"
-                })
-                ack = None
-                deadline = time.time() + 5.0
-                while time.time() < deadline:
-                    msg = await self.recv_json(timeout=2.0)
-                    if msg.get("type") == "service_ack" and msg.get("requestId") == req_id_1 and msg.get("action") == "abort":
-                        ack = msg
-                        break
-                if not ack or not ack.get("accepted"):
-                    raise AssertionError(f"Abort rejected or missing ack: {ack}")
-
-                # Verify transition to abort-hold
-                confirmed = False
-                deadline = time.time() + 5.0
-                while time.time() < deadline:
-                    msg = await self.recv_json(timeout=2.0)
-                    if msg.get("type") == "telemetry":
-                        v = next((x for x in msg.get("vehicles", []) if x.get("id") == target_id), None)
-                        if v and (v.get("servicePhase") == "aborted" or v.get("state") in ("abort-hold", "confirm-abort")):
-                            confirmed = True
-                            break
-                if not confirmed:
-                    raise AssertionError(f"Vehicle {target_id} failed to enter abort-hold")
-
-                # Resume vehicle from abort-hold back to ready
-                await self.send_json({
-                    "type": "service", "id": target_id, "requestId": req_id_1,
-                    "action": "resume"
-                })
-                ack_resume = None
-                deadline = time.time() + 5.0
-                while time.time() < deadline:
-                    msg = await self.recv_json(timeout=2.0)
-                    if msg.get("type") == "service_ack" and msg.get("requestId") == req_id_1 and msg.get("action") == "resume":
-                        ack_resume = msg
-                        break
-                if not ack_resume or not ack_resume.get("accepted"):
-                    raise AssertionError(f"Resume rejected: {ack_resume}")
-
-                return {"abortedVehicle": target_id, "ack": ack, "resumed": True}
+                await service(target_id, req_id_1, "land", groundAlt=0.0)
+                ack = await service(target_id, req_id_1, "abort")
+                await self.wait_telemetry(
+                    lambda by: target_id in by and by[target_id].get("state") == "abort-hold", 15.0,
+                    f"{target_id} in a confirmed abort-hold")
+                await service(target_id, req_id_1, "resume")
+                vs = await self.wait_telemetry(
+                    lambda by: target_id in by and by[target_id].get("ready"), 30.0,
+                    f"{target_id} READY again after resume")
+                return {"abortedVehicle": target_id, "ack": ack,
+                        "resumedAltM": round(vs[target_id].get("alt") or 0.0, 1)}
 
             await self.run_step("5. Abort-to-hold and resume verification", step_abort_hold)
 
-            # Step 6: Command Land to Touchdown
+            # Step 6: land to a confirmed touchdown. ArduCopter descends at
+            # 1.5 m/s to 10 m and 0.5 m/s below, so a 15 m landing alone takes
+            # ~25 s: keep waiting while the descent progresses (the bridge's
+            # own rule, >= 0.5 m per window) under a hard cap; fail on a stall.
             service_tx = "svc-trans-2"
             async def step_land():
                 target_id = "DR-1"
-                await self.send_json({
-                    "type": "service", "id": target_id, "requestId": service_tx,
-                    "action": "land", "groundAlt": 0.0
-                })
-                # Verify ack
-                ack = None
-                deadline = time.time() + 5.0
-                while time.time() < deadline:
-                    msg = await self.recv_json(timeout=2.0)
-                    if msg.get("type") == "service_ack" and msg.get("requestId") == service_tx and msg.get("action") == "land":
-                        ack = msg
-                        break
-                if not ack or not ack.get("accepted"):
-                    raise AssertionError(f"Land rejected or missing ack: {ack}")
-
-                # Monitor descent until confirmed in landed phase
-                landed = False
-                deadline = time.time() + 25.0
-                while time.time() < deadline:
-                    msg = await self.recv_json(timeout=2.0)
-                    if msg.get("type") == "telemetry":
-                        v = next((x for x in msg.get("vehicles", []) if x.get("id") == target_id), None)
-                        if v and v.get("servicePhase") == "landed":
-                            landed = True
-                            break
-                if not landed:
-                    raise AssertionError(f"Vehicle {target_id} failed to complete landing within deadline")
-                return {"landedVehicle": target_id}
+                await service(target_id, service_tx, "land", groundAlt=0.0)
+                t0 = progress_at = time.time()
+                start_alt = ref_alt = None
+                while True:
+                    try:
+                        vs = await self.wait_telemetry(lambda by: target_id in by, 2.0, target_id)
+                    except AssertionError:
+                        vs = {}
+                    v = vs.get(target_id, {})
+                    if v.get("servicePhase") == "landed":
+                        return {"landedVehicle": target_id, "fromAltM": round(start_alt or 0.0, 1),
+                                "landingS": round(time.time() - t0, 1)}
+                    alt = v.get("alt")
+                    if alt is not None:
+                        start_alt = alt if start_alt is None else start_alt
+                        if ref_alt is None or alt <= ref_alt - 0.5:
+                            ref_alt, progress_at = alt, time.time()
+                    if time.time() - progress_at > 15.0:
+                        raise AssertionError(f"{target_id} descent stalled at {alt} m (phase {v.get('servicePhase')})")
+                    if time.time() - t0 > 180.0:
+                        raise AssertionError(f"{target_id} not landed after 180 s (alt {alt} m)")
 
             await self.run_step("6. Controlled descent and landing", step_land)
 

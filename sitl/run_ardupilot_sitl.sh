@@ -70,8 +70,18 @@ if [ -z "$SV_PATH" ]; then
 fi
 AP_ROOT="$(cd "$(dirname "$SV_PATH")/../.." && pwd)"
 
+# `waf configure` takes minutes on a busy machine, so a build dir already
+# configured for SITL only gets the incremental build; anything else (or a
+# failed incremental build) gets the full configure + build.
+build_sitl() {
+    if grep -qs "^BOARD = 'sitl'" build/c4che/_cache.py && ./waf copter; then
+        return 0
+    fi
+    ./waf configure --board sitl && ./waf copter
+}
+
 echo "run_ardupilot_sitl.sh: building ArduCopter SITL once in $AP_ROOT (log: sitl_build.log)"
-if ! (cd "$AP_ROOT" && ./waf configure --board sitl && ./waf copter) >sitl_build.log 2>&1; then
+if ! (cd "$AP_ROOT" && build_sitl) >sitl_build.log 2>&1; then
     tail -20 sitl_build.log >&2
     echo "run_ardupilot_sitl.sh: build failed" >&2
     exit 1
