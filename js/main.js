@@ -404,6 +404,9 @@
       swarm.baseVel = sc.baseVelMps ? { x: sc.baseVelMps.x, y: sc.baseVelMps.y } : { x: 0, y: 0 };
       swarm.targetVel = sc.targetVelMps ? { x: sc.targetVelMps.x, y: sc.targetVelMps.y } : { x: 0, y: 0 };
       if (sc.spectrumAgility != null && 'spectrumAgility' in swarm) swarm.spectrumAgility = !!sc.spectrumAgility;
+      // The capture header describes the mission at t=0 — including what this
+      // scenario just placed (soak finding R16).
+      if (swarm.time === 0 && typeof captureInitialSettings === 'function') swarm.initialSettings = captureInitialSettings(swarm);
       fitView(); updateJammerPanel(); updateZonePanel(); if (typeof updateCityLabels === 'function') updateCityLabels();
     };
     applyMissionOverrides();

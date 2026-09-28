@@ -83,23 +83,40 @@
     const settings = meta.settings || {};
     const seed = meta.seed != null ? meta.seed : 42;
 
-    const radios = RadiosMod.RADIOS || [];
-    const airframes = AirframesMod.AIRFRAMES || [];
+    // In the page, RadiosMod/AirframesMod are `window`, but radios.js and
+    // airframes.js declare RADIOS/AIRFRAMES as top-level `const` — shared
+    // across scripts, never window properties (soak finding R15: every
+    // in-page replay died on an undefined radio).
+    const radios = RadiosMod.RADIOS || (typeof RADIOS !== 'undefined' ? RADIOS : []);
+    const airframes = AirframesMod.AIRFRAMES || (typeof AIRFRAMES !== 'undefined' ? AIRFRAMES : []);
     const radio = radios.find(r => r.id === (settings.radio || meta.radio)) || radios[0];
     const airframe = airframes.find(a => a.id === settings.airframe) || airframes[1] || airframes[0];
 
     const core = opts.core || opts.ctx || (typeof window !== 'undefined' ? window : globalThis);
     const makeTerrainFn = core.makeTerrain || TerrainMod.makeTerrain || (typeof makeTerrain === 'function' ? makeTerrain : null);
-    const terrain = makeTerrainFn ? (
-      (!settings.terrain || settings.terrain === 'flat')
+    const indexBuildingsFn = core.indexBuildings || TerrainMod.indexBuildings || (typeof indexBuildings === 'function' ? indexBuildings : null);
+    let terrain;
+    if (settings.terrain === 'custom' && settings.terrainCustom) {
+      // A generator-less map (OSM, hand-built) travels as its geometry (R16).
+      const c = settings.terrainCustom;
+      const t = { seed: c.seed, groundAmpM: c.groundAmpM || 0, groundScaleM: c.groundScaleM || 1, buildings: (c.buildings || []).map(b => ({ ...b })) };
+      terrain = t.buildings.length && indexBuildingsFn ? indexBuildingsFn(t) : Object.assign(t, { _maxRoofAlt: t.groundAmpM });
+    } else if (makeTerrainFn && settings.terrainGen) {
+      terrain = makeTerrainFn(settings.terrain, settings.terrainGen); // the generator's exact inputs (R16)
+    } else if (makeTerrainFn) {
+      terrain = (!settings.terrain || settings.terrain === 'flat')
         ? makeTerrainFn('flat')
-        : makeTerrainFn(settings.terrain, {
+        : makeTerrainFn(settings.terrain, { // legacy capture: best-effort guess
             distM: Math.hypot((settings.target ? settings.target.x : 2000) - (settings.base ? settings.base.x : 0),
                               (settings.target ? settings.target.y : 0) - (settings.base ? settings.base.y : 0)),
             altM: settings.altitudeM || 50,
             seed,
-          })
-    ) : { type: 'flat', groundAmpM: 0, groundScaleM: 1, buildings: [] };
+          });
+    } else {
+      terrain = { type: 'flat', groundAmpM: 0, groundScaleM: 1, buildings: [] };
+    }
+    const relayAirframe = settings.relayWing > 0 ? airframes.find(a => a.id === settings.relayAirframe) || null : null;
+    const relayRadio = settings.relayWing > 0 ? radios.find(r => r.id === settings.relayRadio) || null : null;
 
     const makeSwarmFn = core.makeSwarm || SwarmMod.makeSwarm || (typeof makeSwarm === 'function' ? makeSwarm : null);
     if (!makeSwarmFn) throw new Error('makeSwarm function not available in environment');
@@ -129,6 +146,14 @@
       windX: settings.wind ? settings.wind.x : 0,
       windY: settings.wind ? settings.wind.y : 0,
       envFactor: settings.envFactor != null ? settings.envFactor : 1,
+      shadowSigmaDb: settings.shadowSigmaDb || 0,
+      relayWing: relayAirframe && relayRadio ? settings.relayWing : 0,
+      relayAirframe,
+      relayRadio,
+      jammers: Array.isArray(settings.jammers) ? settings.jammers : undefined,
+      gpsZones: Array.isArray(settings.gpsZones) ? settings.gpsZones : undefined,
+      baseVel: settings.baseVel ? { x: settings.baseVel.x || 0, y: settings.baseVel.y || 0 } : undefined,
+      targetVel: settings.targetVel ? { x: settings.targetVel.x || 0, y: settings.targetVel.y || 0 } : undefined,
       captureOn: true,
     });
 

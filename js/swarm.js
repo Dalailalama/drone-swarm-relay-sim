@@ -263,10 +263,29 @@ function makeSwarm(opts) {
     dr.baseKnown = { x: s.base.x, y: s.base.y, at: 0 };
     s.drones.push(dr);
   }
-  s.initialSettings = {
-    radio: (opts.radio && opts.radio.id) ? opts.radio.id : (s.radio ? s.radio.id : undefined),
-    airframe: (opts.airframe && opts.airframe.id) ? opts.airframe.id : (s.airframe ? s.airframe.id : undefined),
-    count: opts.count || 5,
+  s.initialSettings = captureInitialSettings(s);
+  return s;
+}
+
+// The mission as it stands at t=0 — everything replay.js needs to rebuild it
+// exactly (soak finding R16): the old header had no jammers, GPS zones, relay
+// wing, shadowing or moving-mission velocities, and recorded every map as
+// 'flat', so replays diverged within seconds. main.js re-captures after a
+// scenario applies its overrides (still at t=0).
+function captureInitialSettings(s) {
+  const t = s.terrain;
+  const custom = !!t && !t.name && !t.type &&
+    ((t.buildings && t.buildings.length > 0) || !!t.groundAmpM);
+  const plain = o => {
+    const out = {};
+    for (const k of Object.keys(o)) if (k[0] !== '_') out[k] = o[k]; // skip runtime caches (_obs, ...)
+    return out;
+  };
+  const wing = s.relayIdx ? s.relayIdx.length : 0;
+  return {
+    radio: s.radio ? s.radio.id : undefined,
+    airframe: s.airframe ? s.airframe.id : undefined,
+    count: s.drones.length,
     altitudeM: s.altitudeM,
     deployFrac: s.deployFrac,
     corridorRouting: s.corridorRouting,
@@ -280,9 +299,22 @@ function makeSwarm(opts) {
     target: { x: s.target.x, y: s.target.y },
     wind: { x: s.wind.x, y: s.wind.y },
     envFactor: s.envFactor != null ? s.envFactor : 1,
-    terrain: s.terrain ? (s.terrain.name || s.terrain.type || 'flat') : 'flat',
+    shadowSigmaDb: s.shadowSigmaDb || 0,
+    relayWing: wing,
+    relayAirframe: wing && s.relayAirframe ? s.relayAirframe.id : undefined,
+    relayRadio: wing && s.relayRadio ? s.relayRadio.id : undefined,
+    jammers: (s.jammers || []).map(plain),
+    gpsZones: (s.gpsZones || []).map(plain),
+    baseVel: { x: (s.baseVel && s.baseVel.x) || 0, y: (s.baseVel && s.baseVel.y) || 0 },
+    targetVel: { x: (s.targetVel && s.targetVel.x) || 0, y: (s.targetVel && s.targetVel.y) || 0 },
+    terrain: !t ? 'flat' : custom ? 'custom' : (t.name || t.type || 'flat'),
+    terrainGen: t && t.gen ? { ...t.gen } : undefined,
+    // A map with no generator (OSM, hand-built) travels as its geometry.
+    terrainCustom: custom ? {
+      seed: t.seed, groundAmpM: t.groundAmpM || 0, groundScaleM: t.groundScaleM || 1,
+      buildings: (t.buildings || []).map(b => ({ x: b.x, y: b.y, w: b.w, d: b.d, heightM: b.heightM })),
+    } : undefined,
   };
-  return s;
 }
 
 function logEvent(s, msg, kind) {
