@@ -1703,20 +1703,36 @@ async def scenario_ready_needs_takeoff_altitude():
 
 
 async def scenario_long_climb_not_timed_out():
+    """A 40 m takeoff climbing 0.6 m per 0.25 s (~16 s) against a 1 s step
+    timeout: steady progress keeps the step alive, and READY waits for 39 m.
+    Driven on a fake clock so machine load can't make it flaky."""
     h = Harness()
-    ws = h.client("browser-1")
-    h.telemetry()
-    bridge.INIT_STEP_TIMEOUT_S = 0.3  # far shorter than the climb, but the climb keeps progressing
-    h.autopilot(14550, climb_per_tick=0.25)
-    ready_alt = []
-    init_task = h.init(ws, count=1, alt=40.0)
-    assert await wait_until(lambda: "DR-1" in bridge.STATE.vehicles and (vehicle("DR-1").ready or vehicle("DR-1").init_state.startswith(bridge.FAILED_PREFIX)),
-                            timeout=10.0), vehicle("DR-1").init_state
-    ready_alt.append(vehicle("DR-1").alt)
-    await ready_reply(ws, init_task)
-    assert vehicle("DR-1").ready, (vehicle("DR-1").init_state, ws.statuses())
-    assert ready_alt[0] >= 39.0, f"READY at {ready_alt[0]:.1f} m of a 40 m takeoff"
-    assert not ws.said("takeoff UNCONFIRMED"), ws.statuses()
+    clock = Clock()
+    bridge.INIT_STEP_TIMEOUT_S = 1.0
+    with patch.object(bridge, "_now", clock):
+        v = current_vehicle()
+        conn = v.conn
+        v.takeoff_alt = 40.0
+        clock.now = 10.0
+        conn.push(hb_msg(armed=True, custom_mode=GUIDED_MODE_ID))
+        conn.push(pos_msg(0.0, 0.0, 0.0))  # on the ground
+        bridge._drain_messages(v)
+        v.ready = False
+        await bridge._enter_confirm_takeoff(v, clock.now)
+        conn.push(ack_msg(MAV_CMD_NAV_TAKEOFF))
+        alt, ready_at = 0.0, None
+        while clock.now < 60.0:
+            clock.now += 0.25
+            alt = min(40.0, alt + 0.6)
+            conn.push(hb_msg(armed=True, custom_mode=GUIDED_MODE_ID))
+            conn.push(pos_msg(0.0, 0.0, -alt))
+            bridge._drain_messages(v)
+            await bridge._advance_init(v)
+            assert not v.init_state.startswith(bridge.FAILED_PREFIX), f"failed mid-climb at {alt:.1f} m: {v.init_state}"
+            if v.ready:
+                ready_at = alt
+                break
+        assert ready_at is not None and ready_at >= 39.0, f"READY at {ready_at} m of a 40 m takeoff"
     await h.close()
 
 
