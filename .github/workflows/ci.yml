@@ -73,3 +73,6 @@ jobs:
 
       - name: Run Automated Failure Scenarios test suite
         run: python -B sitl/test_failure_scenarios.py
+
+      - name: Run end-to-end acceptance against the executable mock
+        run: python -B sitl/run_acceptance.py --mode mock --report /tmp/acceptance_mock.json

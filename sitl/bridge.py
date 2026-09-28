@@ -38,12 +38,17 @@ vehicle's MAVLink socket, and it does two things on every poll:
         confirm-arm    --(COMMAND_ACK(ARM)=ACCEPTED *and* HEARTBEAT.base_mode
                           & MAV_MODE_FLAG_SAFETY_ARMED; send NAV_TAKEOFF)-->
         confirm-takeoff--(COMMAND_ACK(TAKEOFF)=ACCEPTED, then telemetry alt
-                          climbs past TAKEOFF_CONFIRM_ALT_M)--> ready
+                          reaches the takeoff altitude within
+                          TAKEOFF_ALT_TOLERANCE_M)--> ready
 
      Each step re-sends its command every STEP_RESEND_DT and gives up after
-     INIT_STEP_TIMEOUT_S, landing in state "failed:<step>". Nothing is ever
-     reported as done that wasn't confirmed by an acknowledgement, a
-     heartbeat flag or actual measured climb (finding #12).
+     INIT_STEP_TIMEOUT_S, landing in state "failed:<step>"; the takeoff step's
+     clock restarts whenever the climb gains CLIMB_PROGRESS_M, so a tall
+     takeoff isn't failed mid-climb. Nothing is ever reported as done that
+     wasn't confirmed by an acknowledgement, a heartbeat flag or actual
+     measured climb (finding #12). "ready" releases goal forwarding, so it
+     waits for the full climb: real ArduCopter SITL showed READY at 1 m when
+     it only needed TAKEOFF_CONFIRM_ALT_M (issue #12).
 
 A failed vehicle's task keeps polling. When its heartbeat (re)appears the
 sequence restarts from the earliest *unsatisfied* step, so a SITL instance
@@ -152,7 +157,9 @@ HEARTBEAT_WAIT_TIMEOUT_S = 15.0  # how long the init state machine waits for a v
 # scenarios sub-second.
 INIT_STEP_TIMEOUT_S = 10.0  # per step (mode / arm / takeoff): give up after this long unconfirmed
 STEP_RESEND_DT = 2.0  # re-send the current step's command this often while unconfirmed
-TAKEOFF_CONFIRM_ALT_M = 1.0  # takeoff counts as confirmed only once telemetry shows this much climb
+TAKEOFF_CONFIRM_ALT_M = 1.0  # this far above the launch point counts as airborne
+TAKEOFF_ALT_TOLERANCE_M = 1.0  # "ready" = climbed to within this of the takeoff altitude (docs/PROTOCOL.md)
+CLIMB_PROGRESS_M = 0.5  # a takeoff gaining this much per INIT_STEP_TIMEOUT_S is still climbing
 RETRY_COOLDOWN_S = 5.0  # after a failed step, wait this long before retrying a still-connected vehicle
 INIT_EXTRA_WAIT_S = 20.0  # "ready" reply waits HEARTBEAT_WAIT_TIMEOUT_S + this for first-pass outcomes
 MAX_MSGS_PER_POLL = 200  # bound one poll's work so a flooding link can't starve the event loop
@@ -259,6 +266,9 @@ class Vehicle:
     descent_ref_alt: float = 0.0
     last_descent_at: float = 0.0
     takeoff_climb_m: float = 0.0
+    climb_ref_alt: float = 0.0  # altitude at the takeoff step's last climb progress
+    climb_progress_at: float = 0.0
+    climb_by_setpoint: bool = False  # airborne recovery climbs via GUIDED setpoint, not NAV_TAKEOFF
     hold_x: Optional[float] = None
     hold_y: Optional[float] = None
     hold_alt: Optional[float] = None
@@ -328,6 +338,10 @@ class Vehicle:
     @property
     def airborne(self) -> bool:
         return self.position_fresh and self.alt > self.launch_alt + TAKEOFF_CONFIRM_ALT_M
+
+    @property
+    def at_takeoff_alt(self) -> bool:
+        return self.position_fresh and self.alt >= self.takeoff_alt - TAKEOFF_ALT_TOLERANCE_M
 
     def to_telemetry(self) -> dict:
         return {
@@ -593,7 +607,23 @@ async def _enter_confirm_arm(vehicle: Vehicle, now: float) -> None:
 async def _enter_confirm_takeoff(vehicle: Vehicle, now: float) -> None:
     vehicle.acks.pop(int(mavutil.mavlink.MAV_CMD_NAV_TAKEOFF), None)
     _enter_step(vehicle, INIT_CONFIRM_TAKEOFF, now)
+    vehicle.climb_by_setpoint = False
+    vehicle.climb_ref_alt, vehicle.climb_progress_at = vehicle.alt, now
     _send_takeoff(vehicle)
+
+
+async def _enter_climb_setpoint(vehicle: Vehicle, now: float) -> None:
+    """Airborne but short of the takeoff altitude: climb in place by setpoint.
+
+    ArduCopter refuses NAV_TAKEOFF once flying, so a recovered vehicle that is
+    already up is sent a GUIDED position target at the takeoff altitude and
+    confirmed exactly like a takeoff (#12).
+    """
+    _enter_step(vehicle, INIT_CONFIRM_TAKEOFF, now)
+    vehicle.climb_by_setpoint = True
+    vehicle.climb_ref_alt, vehicle.climb_progress_at = vehicle.alt, now
+    vehicle.hold_x, vehicle.hold_y, vehicle.hold_alt = vehicle.x, vehicle.y, vehicle.takeoff_alt
+    _send_hold_target(vehicle)
 
 
 async def _become_ready(vehicle: Vehicle, now: float) -> None:
@@ -605,7 +635,7 @@ async def _become_ready(vehicle: Vehicle, now: float) -> None:
     vehicle.step_started_at = now
     await _vehicle_status(
         vehicle,
-        f"vehicle {vehicle.id}: airborne at {vehicle.alt:.1f} m (GUIDED + armed + climbing confirmed) - READY",
+        f"vehicle {vehicle.id}: airborne at {vehicle.alt:.1f} m (GUIDED + armed + takeoff altitude reached) - READY",
     )
     vehicle.first_pass_done.set()
 
@@ -636,6 +666,12 @@ async def _resume_sequence(vehicle: Vehicle, now: float) -> None:
     elif not vehicle.airborne:
         await _vehicle_status(vehicle, f"vehicle {vehicle.id}: armed, retrying takeoff to {vehicle.takeoff_alt:g} m")
         await _enter_confirm_takeoff(vehicle, now)
+    elif not vehicle.at_takeoff_alt:
+        await _vehicle_status(
+            vehicle,
+            f"vehicle {vehicle.id}: airborne at {vehicle.alt:.1f} m, climbing to {vehicle.takeoff_alt:g} m before ready",
+        )
+        await _enter_climb_setpoint(vehicle, now)
     else:
         await _become_ready(vehicle, now)
 
@@ -804,7 +840,11 @@ async def _advance_init(vehicle: Vehicle) -> None:
         return
 
     if state == INIT_CONFIRM_TAKEOFF:
-        result = _ack(vehicle, mavutil.mavlink.MAV_CMD_NAV_TAKEOFF)
+        # A setpoint climb (airborne recovery) has no NAV_TAKEOFF to ACK.
+        result = None if vehicle.climb_by_setpoint else _ack(vehicle, mavutil.mavlink.MAV_CMD_NAV_TAKEOFF)
+        commanded = vehicle.climb_by_setpoint or _accepted(result)
+        if vehicle.position_fresh and vehicle.alt >= vehicle.climb_ref_alt + CLIMB_PROGRESS_M:
+            vehicle.climb_ref_alt, vehicle.climb_progress_at = vehicle.alt, now
         if result is not None and not _accepted(result):
             await _fail(
                 vehicle,
@@ -812,21 +852,25 @@ async def _advance_init(vehicle: Vehicle) -> None:
                 f"vehicle {vehicle.id}: takeoff REJECTED - COMMAND_ACK {_result_name(result)}",
                 now,
             )
-        elif _accepted(result) and vehicle.connected and vehicle.mode_confirmed and vehicle.armed and vehicle.airborne:
+        elif commanded and vehicle.connected and vehicle.mode_confirmed and vehicle.armed and vehicle.at_takeoff_alt:
             await _become_ready(vehicle, now)
-        elif elapsed >= INIT_STEP_TIMEOUT_S:
+        elif now - vehicle.climb_progress_at >= INIT_STEP_TIMEOUT_S:
             await _fail(
                 vehicle,
                 "takeoff",
-                f"vehicle {vehicle.id}: takeoff UNCONFIRMED after {INIT_STEP_TIMEOUT_S:g}s "
-                f"(ack={_result_name(result)}, alt {vehicle.alt:.1f} m never passed {TAKEOFF_CONFIRM_ALT_M:g} m)",
+                f"vehicle {vehicle.id}: takeoff UNCONFIRMED - no climb progress for {INIT_STEP_TIMEOUT_S:g}s "
+                f"(ack={_result_name(result)}, alt {vehicle.alt:.1f} m of {vehicle.takeoff_alt:g} m)",
                 now,
             )
-        elif result is None and now - vehicle.step_sent_at >= STEP_RESEND_DT:
-            # Only re-send while UNACKNOWLEDGED: re-commanding an accepted
-            # takeoff mid-climb would restart it.
-            _send_takeoff(vehicle)
-            vehicle.step_sent_at = now
+        elif now - vehicle.step_sent_at >= STEP_RESEND_DT:
+            if vehicle.climb_by_setpoint:
+                _send_hold_target(vehicle)
+                vehicle.step_sent_at = now
+            elif result is None:
+                # Only re-send while UNACKNOWLEDGED: re-commanding an accepted
+                # takeoff mid-climb would restart it.
+                _send_takeoff(vehicle)
+                vehicle.step_sent_at = now
         return
 
 

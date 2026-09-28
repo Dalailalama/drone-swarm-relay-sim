@@ -317,10 +317,10 @@ class FakeAutopilot:
         arm_result: int = MAV_RESULT_ACCEPTED,
         takeoff_result: int = MAV_RESULT_ACCEPTED,
         climbs: bool = True,
-        climb_per_tick: float = 0.6,
+        climb_per_tick: float = 5.0,  # a 50 m takeoff in ~10 ticks: fast even on a loaded CI runner
         north: float = 0.0,
         east: float = 0.0,
-        target_alt: float = 30.0,
+        target_alt: float = None,
     ):
         self.conn = conn
         self.gate = gate
@@ -332,7 +332,10 @@ class FakeAutopilot:
         self.climb_per_tick = climb_per_tick
         self.north = north
         self.east = east
-        self.target_alt = target_alt
+        # Like ArduCopter, a takeoff climbs to param7 above where it armed;
+        # `target_alt`, if given, caps the climb (a vehicle that stalls).
+        self.cap_alt = target_alt
+        self.commanded_alt = 0.0
 
         self.armed = False
         self.mode = 0
@@ -357,8 +360,10 @@ class FakeAutopilot:
                 self.conn.push(ack_msg(MAV_CMD_NAV_TAKEOFF, self.takeoff_result))
                 if self.takeoff_result == MAV_RESULT_ACCEPTED and self.climbs:
                     self.climbing = True
-        if self.climbing and self.alt < self.target_alt:
-            self.alt = min(self.target_alt, self.alt + self.climb_per_tick)
+                    self.commanded_alt = self.alt + float(detail)
+        target = self.commanded_alt if self.cap_alt is None else min(self.commanded_alt, self.cap_alt)
+        if self.climbing and self.alt < target:
+            self.alt = min(target, self.alt + self.climb_per_tick)
         if self.heartbeats:
             self.conn.push(hb_msg(armed=self.armed, custom_mode=self.mode))
         self.conn.push(pos_msg(self.north, self.east, -self.alt))
@@ -473,7 +478,8 @@ async def scenario_happy_path() -> None:
     # produced a heartbeat, and the init reply is still outstanding. The short
     # timeout matters: telemetry must not merely arrive eventually, it must
     # arrive while the slow vehicle is STILL unresolved.
-    assert await wait_until(lambda: len(ws.of_type("telemetry")) >= 3, timeout=0.5), (
+    seen = len(ws.of_type("telemetry"))  # frames from before DR-1 went ready don't count
+    assert await wait_until(lambda: len(ws.of_type("telemetry")) >= max(3, seen + 1), timeout=0.5), (
         "telemetry must flow while a neighbour is still initializing"
     )
     assert not init_task.done(), "'ready' must not be sent before the slow vehicle resolves"
@@ -893,7 +899,7 @@ async def scenario_stale_climb_cannot_confirm():
         await bridge._advance_init(v)
         assert not v.ready and v.init_state == bridge.INIT_CONFIRM_TAKEOFF
         v.conn.push(ack_msg(MAV_CMD_NAV_TAKEOFF))
-        v.conn.push(pos_msg(0.0, 0.0, -30.0))
+        v.conn.push(pos_msg(0.0, 0.0, -v.takeoff_alt))  # a fresh sample AT the takeoff altitude (#12)
         bridge._drain_messages(v)
         await bridge._advance_init(v)
         assert v.ready and v.init_state == bridge.INIT_READY
@@ -1087,6 +1093,11 @@ async def scenario_land_service_handshake():
         assert not v.ready and v.init_state == bridge.INIT_CONFIRM_TAKEOFF, "no climb, no ready"
         clock.now += 0.1
         conn.push(pos_msg(0.0, 0.0, -1.5))
+        bridge._drain_messages(v)
+        await bridge._advance_init(v)
+        assert not v.ready and v.init_state == bridge.INIT_CONFIRM_TAKEOFF, "lift-off is not the relaunch altitude (#12)"
+        clock.now += 0.1
+        conn.push(pos_msg(0.0, 0.0, -v.takeoff_alt))
         bridge._drain_messages(v)
         await bridge._advance_init(v)
         assert v.ready and v.init_state == bridge.INIT_READY, v.init_state
@@ -1592,10 +1603,14 @@ async def scenario_acceptance_runner_real_command():
         captured["cmd"] = list(cmd)
         return _Proc()
 
-    runner = run_acceptance.AcceptanceRunner(mode="real", count=3, port=8799)
-    with patch.object(run_acceptance.subprocess, "Popen", _popen), \
-            patch.object(run_acceptance.time, "sleep", lambda _s: None):
-        runner.start_server()
+    import tempfile
+    from pathlib import Path
+    with tempfile.TemporaryDirectory() as tmp:
+        runner = run_acceptance.AcceptanceRunner(mode="real", count=3, port=8799, logs_dir=Path(tmp))
+        with patch.object(run_acceptance.subprocess, "Popen", _popen), \
+                patch.object(run_acceptance.time, "sleep", lambda _s: None):
+            runner.start_server()
+        runner._server_log.close()
     cmd = captured["cmd"]
     assert cmd[1].endswith("bridge.py"), cmd
     try:
@@ -1606,8 +1621,146 @@ async def scenario_acceptance_runner_real_command():
     assert args.ws_port == 8799 and args.count == 3, args
 
 
+def _fake_clock_patches(run_acceptance, clock):
+    async def _sleep(dt):
+        clock[0] += dt
+    return (patch.object(run_acceptance.time, "time", lambda: clock[0]),
+            patch.object(run_acceptance.asyncio, "sleep", _sleep))
+
+
+async def scenario_acceptance_runner_slow_server_start():
+    """#11: a server that needs ~10 s to start listening is still reached."""
+    import run_acceptance
+
+    clock = [0.0]
+
+    async def _connect(_uri):
+        if clock[0] < 10.0:
+            raise ConnectionRefusedError("not listening yet")
+        return "ws"
+
+    runner = run_acceptance.AcceptanceRunner(mode="real", count=3, port=8799)
+    p_time, p_sleep = _fake_clock_patches(run_acceptance, clock)
+    with p_time, p_sleep, patch.object(run_acceptance.websockets, "connect", _connect, create=True):
+        ws = await runner.connect_ws()
+    assert ws == "ws", ws
+
+
+async def scenario_acceptance_runner_dead_server_reported():
+    """#11: a server that died is reported at once, with its own output."""
+    import tempfile
+    import run_acceptance
+
+    clock = [0.0]
+
+    async def _connect(_uri):
+        raise ConnectionRefusedError("nobody home")
+
+    class _Dead:
+        def poll(self):
+            return 1
+
+    runner = run_acceptance.AcceptanceRunner(mode="real", count=3, port=8799)
+    runner.server_process = _Dead()
+    with tempfile.NamedTemporaryFile("w", suffix=".log", delete=False) as f:
+        f.write("Traceback (most recent call last):\nOSError: [Errno 98] boom: address already in use\n")
+    runner.server_log_path = f.name
+    p_time, p_sleep = _fake_clock_patches(run_acceptance, clock)
+    try:
+        with p_time, p_sleep, patch.object(run_acceptance.websockets, "connect", _connect, create=True):
+            await runner.connect_ws()
+    except RuntimeError as exc:
+        assert "boom" in str(exc), exc
+        assert clock[0] < 1.0, f"took {clock[0]:.1f}s to notice the dead server"
+    else:
+        raise AssertionError("a dead server must raise")
+    finally:
+        os.unlink(f.name)
+
+
+# ==========================================================================
+# #12 - "ready" means the takeoff altitude was reached (docs/PROTOCOL.md:
+# takeoff ACK + climb >= takeoff_alt - 1 m). Real ArduCopter SITL showed the
+# bridge declaring READY at 1.0 m, so goals flew at ground level.
+# ==========================================================================
+
+async def scenario_ready_needs_takeoff_altitude():
+    h = Harness()
+    ws = h.client("browser-1")
+    h.telemetry()
+    bridge.INIT_STEP_TIMEOUT_S = 5.0  # a hover must not trip the step timeout during the check
+    ap = h.autopilot(14550, target_alt=3.0)  # lifts off, then holds at 3 m
+    init_task = h.init(ws, count=1, alt=30.0)
+    assert await wait_until(lambda: "DR-1" in bridge.STATE.vehicles and vehicle("DR-1").alt >= 3.0 - 1e-6), "setup: the vehicle lifts off"
+    await asyncio.sleep(0.2)
+    v = vehicle("DR-1")
+    assert not v.ready and v.init_state == bridge.INIT_CONFIRM_TAKEOFF, (v.ready, v.init_state, v.alt)
+    assert not ws.said("READY"), ws.statuses()
+    ap.cap_alt = None  # let it finish the climb
+    await ready_reply(ws, init_task)
+    assert vehicle("DR-1").ready and vehicle("DR-1").alt >= 29.0, (vehicle("DR-1").ready, vehicle("DR-1").alt)
+    await h.close()
+
+
+async def scenario_long_climb_not_timed_out():
+    h = Harness()
+    ws = h.client("browser-1")
+    h.telemetry()
+    bridge.INIT_STEP_TIMEOUT_S = 0.3  # far shorter than the climb, but the climb keeps progressing
+    h.autopilot(14550, climb_per_tick=0.25)
+    ready_alt = []
+    init_task = h.init(ws, count=1, alt=40.0)
+    assert await wait_until(lambda: "DR-1" in bridge.STATE.vehicles and (vehicle("DR-1").ready or vehicle("DR-1").init_state.startswith(bridge.FAILED_PREFIX)),
+                            timeout=10.0), vehicle("DR-1").init_state
+    ready_alt.append(vehicle("DR-1").alt)
+    await ready_reply(ws, init_task)
+    assert vehicle("DR-1").ready, (vehicle("DR-1").init_state, ws.statuses())
+    assert ready_alt[0] >= 39.0, f"READY at {ready_alt[0]:.1f} m of a 40 m takeoff"
+    assert not ws.said("takeoff UNCONFIRMED"), ws.statuses()
+    await h.close()
+
+
+async def scenario_stalled_climb_fails_takeoff():
+    h = Harness()
+    ws = h.client("browser-1")
+    bridge.INIT_STEP_TIMEOUT_S = 0.3
+    h.autopilot(14550, target_alt=5.0)  # climbs to 5 m of 30 and stalls
+    reply = await ready_reply(ws, h.init(ws, count=1, alt=30.0))
+    entry = ready_entry(reply, "DR-1")
+    assert entry["ready"] is False and entry["state"] == bridge.FAILED_PREFIX + "takeoff", reply
+    assert ws.said("DR-1: takeoff UNCONFIRMED"), ws.statuses()
+    await h.close()
+
+
+async def scenario_recovery_below_takeoff_alt_climbs_first():
+    h = Harness()
+    ws = h.client("browser-1")
+    h.telemetry()
+    bridge.INIT_STEP_TIMEOUT_S = 0.3
+    bridge.RETRY_COOLDOWN_S = 0.1
+    ap = h.autopilot(14550, target_alt=5.0)  # the first climb stalls at 5 m
+    h.init(ws, count=1, alt=30.0)
+    assert await wait_until(lambda: ws.said("DR-1: takeoff UNCONFIRMED"), timeout=5.0), ws.statuses()
+    # Recovery of an airborne vehicle 25 m short: climb by setpoint (ArduCopter
+    # refuses NAV_TAKEOFF in flight), and no READY until the altitude is there.
+    conn = conn_for(14550)
+    assert await wait_until(lambda: any(abs(d["down"] + 30.0) < 1e-6 for d in conn.details("setpoint")), timeout=3.0), conn.sent
+    assert not vehicle("DR-1").ready, vehicle("DR-1").init_state
+    assert conn.count("takeoff") == 1, conn.sent
+    ap.cap_alt = None
+    assert await wait_until(lambda: vehicle("DR-1").ready, timeout=5.0), (vehicle("DR-1").init_state, ws.statuses())
+    assert vehicle("DR-1").alt >= 29.0, vehicle("DR-1").alt
+    await h.close()
+
+
 SCENARIOS = [
+    ("#12: not READY at lift-off; READY at the takeoff altitude", scenario_ready_needs_takeoff_altitude),
+    ("#12: a long steady climb is not failed by the step timeout", scenario_long_climb_not_timed_out),
+    ("#12: a climb stalled below takeoff altitude fails the takeoff step", scenario_stalled_climb_fails_takeoff),
+    ("#12: recovery below takeoff altitude climbs by setpoint before READY", scenario_recovery_below_takeoff_alt_climbs_first),
     ("#7: acceptance runner's real-mode command is accepted by bridge.py's CLI", scenario_acceptance_runner_real_command),
+    ("#11: acceptance runner waits for a slow-starting server", scenario_acceptance_runner_slow_server_start),
+    ("#11: acceptance runner reports a dead server at once, with its output", scenario_acceptance_runner_dead_server_reported),
     ("C03: landing rejection, descent progress noise rejection, late touchdown recovery", scenario_c03_landing_rejection_and_descent_timeout_recovery),
     ("C04: airborne abort holds without arming/takeoff, resumes; grounded abort never arms", scenario_c04_airborne_and_grounded_abort),
     ("C01: relaunch datum conversion at elevated and sunken landing sites", scenario_c01_relaunch_datum_elevated_and_sunken),

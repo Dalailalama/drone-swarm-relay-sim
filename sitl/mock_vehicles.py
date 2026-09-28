@@ -352,6 +352,11 @@ class Vehicle:
                 self.launch_alt = self.alt
                 self._enter_step(INIT_CONFIRM_TAKEOFF, now)
                 self.goal_alt = self.takeoff_alt
+            elif self.alt < self.takeoff_alt - TAKEOFF_CONFIRM_ALT_M:
+                # Airborne but short of the takeoff altitude: climb first (#12).
+                self.service_phase = None
+                self._enter_step(INIT_CONFIRM_TAKEOFF, now)
+                self.goal_alt = self.takeoff_alt
             else:
                 self._become_ready(now)
             return
@@ -637,12 +642,14 @@ async def handle_message(websocket, raw: str) -> None:
         WORLD.controller = websocket
         count = int(msg.get("count", 0))
         alt = float(msg.get("alt", 50))
+        # Same order as bridge.py: advisory status first, "ready" after it, so
+        # clients tested against the mock must tolerate status traffic (#10).
+        await send_status(websocket, f"mock: initializing {count} vehicle(s), target alt {alt:g} m")
         ids = WORLD.reset(count, alt, msg.get("origin"))
         await websocket.send(json.dumps({
             "type": "ready", "ids": ids,
             "vehicles": [WORLD.vehicles[i].to_ready_entry() for i in ids],
         }))
-        await send_status(websocket, f"mock: {count} vehicles initializing toward {alt} m")
 
     elif mtype == "goals":
         if WORLD.controller is not websocket:

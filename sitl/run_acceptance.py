@@ -1,17 +1,20 @@
 #!/usr/bin/env python3
 """run_acceptance.py - Repeatable real-SITL and mock acceptance runner.
 
-Automates the complete end-to-end acceptance sequence adhering to docs/PROTOCOL.md:
-1. Launches SITL (real or mock server) and WebSocket bridge.
-2. Initializes fleet through WebSocket protocol.
-3. Verifies arming, takeoff, and telemetry streaming.
-4. Commands waypoint navigation and verifies trajectory progress.
-5. Injects/simulates telemetry loss and verifies stale telemetry detection.
-6. Commands abort-to-hold and verifies transition to confirmed hold state.
-7. Commands landing and tracks descent to touchdown / disarm.
-8. Triggers battery swap cycle (authorize -> complete) and monitors service phase.
-9. Commands relaunch with home-altitude elevation offset and verifies climb.
-10. Preserves detailed failure logs, process traces, and JSON acceptance report.
+Automates the end-to-end acceptance sequence against docs/PROTOCOL.md:
+1. Starts the server: mock_vehicles.py, or (real mode) bridge.py talking to
+   ArduPilot SITL instances that must already be running
+   (sitl/run_ardupilot_sitl.sh).
+2. Initializes the fleet and verifies every vehicle reports READY only at
+   its takeoff altitude (climb >= alt - 1 m).
+3. Sends waypoints and verifies every vehicle actually flies to its goal.
+4. Verifies telemetry stays fresh (position age, heartbeat age, advancing
+   position sequence).
+5. Commands abort-to-hold during a landing and verifies hold + resume.
+6. Commands landing and tracks descent to confirmed touchdown.
+7. Runs the battery-swap handshake (authorize -> complete).
+8. Relaunches and verifies the climb back to the relaunch altitude.
+9. Keeps failure logs, the server's own output and a JSON report.
 
 Usage:
     python sitl/run_acceptance.py [--mode mock|real|auto] [--count 3] [--port 8769]
@@ -21,6 +24,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -71,6 +75,10 @@ class AcceptanceRunner:
         self.logs_dir.mkdir(parents=True, exist_ok=True)
 
         self.server_process: Optional[subprocess.Popen] = None
+        # Server output goes to a file, never an unread PIPE: a chatty bridge
+        # would fill the pipe buffer and block mid-run (#11).
+        self.server_log_path: Optional[str] = None
+        self._server_log = None
         self.sitl_processes: List[subprocess.Popen] = []
         self.ws: Optional[websockets.WebSocketClientProtocol] = None
         self.message_history: List[Dict[str, Any]] = []
@@ -99,30 +107,33 @@ class AcceptanceRunner:
 
         if self.effective_mode == "mock":
             cmd = [sys.executable, str(SITL_DIR / "mock_vehicles.py"), "--port", str(self.port)]
-            self.server_process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                env=env,
-            )
         else:
             # Real SITL bridge
             bridge_script = SITL_DIR / "bridge.py"
             cmd = [sys.executable, str(bridge_script), "--ws-port", str(self.port), "--count", str(self.count)]
-            self.server_process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                env=env,
-            )
+        self.server_log_path = str(self.logs_dir / f"server_{self.effective_mode}_{int(time.time())}.log")
+        self._server_log = open(self.server_log_path, "w", encoding="utf-8")
+        self.server_process = subprocess.Popen(
+            cmd,
+            stdout=self._server_log,
+            stderr=subprocess.STDOUT,
+            text=True,
+            env=env,
+        )
 
         # Give server time to bind port
         time.sleep(1.0)
         if self.server_process.poll() is not None:
-            _, stderr = self.server_process.communicate()
-            raise RuntimeError(f"Server process failed to start: {stderr}")
+            raise RuntimeError(f"Server process failed to start: {self.server_output_tail()}")
+
+    def server_output_tail(self, limit: int = 2000) -> str:
+        if not self.server_log_path:
+            return ""
+        try:
+            with open(self.server_log_path, encoding="utf-8", errors="replace") as f:
+                return f.read()[-limit:].strip()
+        except OSError:
+            return ""
 
     def stop_all(self) -> None:
         self.log("Tearing down processes…")
@@ -133,6 +144,9 @@ class AcceptanceRunner:
             except Exception:
                 self.server_process.kill()
             self.server_process = None
+        if self._server_log:
+            self._server_log.close()
+            self._server_log = None
 
         for proc in self.sitl_processes:
             try:
@@ -142,16 +156,27 @@ class AcceptanceRunner:
                 proc.kill()
         self.sitl_processes.clear()
 
-    async def connect_ws(self, retries: int = 15) -> websockets.WebSocketClientProtocol:
+    async def connect_ws(self, timeout_s: float = 30.0) -> websockets.WebSocketClientProtocol:
+        """Connect once the server listens (#11).
+
+        bridge.py imports pymavlink before it listens, which took 8.4 s from a
+        slow filesystem, so allow `timeout_s` — but stop at once, with the
+        server's own output, if its process has died.
+        """
         uri = f"ws://127.0.0.1:{self.port}"
-        for attempt in range(retries):
+        deadline = time.time() + timeout_s
+        while True:
+            proc = self.server_process
+            if proc is not None and proc.poll() is not None:
+                raise RuntimeError(f"server exited before accepting connections: {self.server_output_tail()}")
             try:
                 ws = await websockets.connect(uri)
                 self.log(f"Connected to {uri}")
                 return ws
             except Exception:
+                if time.time() >= deadline:
+                    raise ConnectionError(f"Failed to connect to {uri} within {timeout_s:g}s")
                 await asyncio.sleep(0.5)
-        raise ConnectionError(f"Failed to connect to {uri} after {retries} attempts")
 
     async def send_json(self, msg: Dict[str, Any]) -> None:
         assert self.ws is not None
@@ -165,6 +190,44 @@ class AcceptanceRunner:
         parsed = json.loads(raw)
         self.message_history.append({"dir": "in", "t": time.time(), "msg": parsed})
         return parsed
+
+    async def recv_until(self, want, timeout: float, what: str) -> Dict[str, Any]:
+        """Read messages until `want(msg)` holds.
+
+        Advisory `status` (and any other traffic) may arrive at any time per
+        docs/PROTOCOL.md, so it is skipped rather than failing the step (#10).
+        """
+        deadline = time.time() + timeout
+        last = None
+        while True:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                raise AssertionError(f"no {what} within {timeout:g}s (last message: {last})")
+            try:
+                msg = await self.recv_json(timeout=remaining)
+            except (asyncio.TimeoutError, TimeoutError):
+                raise AssertionError(f"no {what} within {timeout:g}s (last message: {last})")
+            if want(msg):
+                return msg
+            last = msg
+
+    async def wait_telemetry(self, pred, timeout: float, what: str) -> Dict[str, Dict[str, Any]]:
+        """Wait for a telemetry frame whose vehicles (keyed by id) satisfy `pred`."""
+        latest: Dict[str, Dict[str, Any]] = {}
+
+        def ok(m: Dict[str, Any]) -> bool:
+            if m.get("type") != "telemetry":
+                return False
+            latest.clear()
+            latest.update({v.get("id"): v for v in m.get("vehicles", [])})
+            return bool(pred(latest))
+
+        try:
+            await self.recv_until(ok, timeout, what)
+        except AssertionError:
+            snap = {k: {f: v.get(f) for f in ("x", "y", "alt", "ready", "state", "servicePhase")} for k, v in latest.items()}
+            raise AssertionError(f"no telemetry showing {what} within {timeout:g}s; last: {json.dumps(snap)}")
+        return dict(latest)
 
     async def run_step(self, name: str, coro) -> StepRecord:
         self.log(f"Starting step: {name}")
@@ -197,9 +260,10 @@ class AcceptanceRunner:
             # Step 1: Initialize vehicles
             async def step_init():
                 await self.send_json({"type": "init", "count": self.count, "alt": self.alt_m})
-                ready_msg = await self.recv_json(timeout=20.0)
-                if ready_msg.get("type") != "ready":
-                    raise AssertionError(f"Expected 'ready' msg, got {ready_msg}")
+                # bridge.py answers after its init gather (up to
+                # HEARTBEAT_WAIT_TIMEOUT_S + INIT_EXTRA_WAIT_S = 35 s), with
+                # advisory status messages ahead of the reply.
+                ready_msg = await self.recv_until(lambda m: m.get("type") == "ready", 45.0, "'ready' reply")
                 ids = ready_msg.get("ids", [])
                 if len(ids) != self.count:
                     raise AssertionError(f"Expected {self.count} vehicle ids, got {ids}")
@@ -207,48 +271,66 @@ class AcceptanceRunner:
 
             await self.run_step("1. Initialize fleet", step_init)
 
-            # Step 2: Verify arming & takeoff telemetry until all vehicles reach ready
+            ids = [f"DR-{i+1}" for i in range(self.count)]
+
+            # Step 2: READY must mean the takeoff altitude was reached
+            # (PROTOCOL.md: climb >= alt - 1 m). Real ArduCopter SITL showed
+            # the bridge saying READY at 1 m (#12), which a flag-only check missed.
             async def step_takeoff():
-                ready_ids = set()
-                deadline = time.time() + 25.0
-                while time.time() < deadline and len(ready_ids) < self.count:
-                    msg = await self.recv_json(timeout=2.0)
-                    if msg.get("type") == "telemetry":
-                        for v in msg.get("vehicles", []):
-                            vid = v.get("id")
-                            if v.get("ready") or v.get("state") == "ready":
-                                ready_ids.add(vid)
-                if len(ready_ids) < self.count:
-                    raise AssertionError(f"Not all vehicles reached confirmed ready state. Ready: {ready_ids}")
-                return {"readyCount": len(ready_ids)}
+                vs = await self.wait_telemetry(
+                    lambda by: all(by.get(i, {}).get("ready") for i in ids), 60.0, "every vehicle READY")
+                alts = {i: round(vs[i].get("alt") or 0.0, 1) for i in ids}
+                low = {i: a for i, a in alts.items() if a < self.alt_m - 1.0}
+                if low:
+                    raise AssertionError(f"READY below the {self.alt_m:g} m takeoff altitude: {low}")
+                return {"readyCount": len(ids), "altitudesM": alts}
 
-            await self.run_step("2. Arming and takeoff verification", step_takeoff)
+            await self.run_step("2. Arming and takeoff to altitude", step_takeoff)
 
-            # Step 3: Send Waypoints
+            # Step 3: every vehicle must actually fly to its waypoint, not just
+            # have one sent. Goals are re-sent at ~2 Hz like the browser does.
             async def step_waypoints():
                 goals = [{"id": f"DR-{i+1}", "x": 100.0 * (i + 1), "y": 30.0, "alt": self.alt_m}
                          for i in range(self.count)]
-                await self.send_json({"type": "goals", "goals": goals})
-                # Collect 3 telemetry frames to ensure goal receipt
-                frames = 0
-                while frames < 3:
-                    msg = await self.recv_json(timeout=3.0)
-                    if msg.get("type") == "telemetry":
-                        frames += 1
-                return {"dispatchedGoals": len(goals)}
 
-            await self.run_step("3. Waypoint navigation dispatch", step_waypoints)
+                def off(by, g):
+                    v = by[g["id"]]
+                    return math.hypot((v.get("x") or 0.0) - g["x"], (v.get("y") or 0.0) - g["y"])
 
-            # Step 4: Simulate Telemetry Loss / Stale Telemetry Check
+                start = await self.wait_telemetry(lambda by: all(g["id"] in by for g in goals), 5.0, "every vehicle")
+                deadline = time.time() + 90.0
+                while True:
+                    await self.send_json({"type": "goals", "goals": goals})
+                    try:
+                        end = await self.wait_telemetry(
+                            lambda by: all(g["id"] in by and off(by, g) <= 8.0 for g in goals), 0.5,
+                            "every vehicle within 8 m of its goal")
+                        break
+                    except AssertionError:
+                        if time.time() >= deadline:
+                            raise
+                return {"goals": len(goals),
+                        "startOffM": {g["id"]: round(off(start, g), 1) for g in goals},
+                        "endOffM": {g["id"]: round(off(end, g), 1) for g in goals}}
+
+            await self.run_step("3. Waypoint navigation to the goals", step_waypoints)
+
+            # Step 4: telemetry freshness — positions and heartbeats keep
+            # arriving (the sequence advances, ages stay small).
             async def step_telemetry_check():
-                # Pause active reading momentarily to simulate downstream processing gap
+                first = await self.wait_telemetry(lambda by: all(i in by for i in ids), 3.0, "every vehicle")
                 await asyncio.sleep(1.0)
-                msg = await self.recv_json(timeout=3.0)
-                if msg.get("type") != "telemetry":
-                    raise AssertionError(f"Expected telemetry stream resumption, got {msg}")
-                return {"resumedStream": True}
+                later = await self.wait_telemetry(
+                    lambda by: all(i in by and (by[i].get("positionSeq") or 0) > (first[i].get("positionSeq") or 0)
+                                   for i in ids), 3.0, "an advancing position sequence")
+                stale = {i: (later[i].get("positionAge"), later[i].get("heartbeatAge")) for i in ids
+                         if not ((later[i].get("positionAge") is not None and later[i]["positionAge"] < 1.0)
+                                 and (later[i].get("heartbeatAge") is None or later[i]["heartbeatAge"] < 1.5))}
+                if stale:
+                    raise AssertionError(f"stale telemetry (positionAge, heartbeatAge): {stale}")
+                return {"positionAgeS": {i: round(later[i]["positionAge"], 2) for i in ids}}
 
-            await self.run_step("4. Telemetry freshness check", step_telemetry_check)
+            await self.run_step("4. Telemetry freshness", step_telemetry_check)
 
             # Step 5: Abort-to-Hold during descent
             async def step_abort_hold():
@@ -408,44 +490,34 @@ class AcceptanceRunner:
 
             await self.run_step("7. Battery swap servicing", step_battery_swap)
 
-            # Step 8: Relaunch with Home-Altitude Elevation Offset
+            # Step 8: relaunch climbs back up. PROTOCOL.md's `alt` is the climb
+            # above the touchdown point, so it is measured from where the
+            # vehicle actually sits, and READY must wait for it (#12).
             async def step_relaunch():
                 target_id = "DR-1"
-                ground_offset_m = 5.0
-                takeoff_alt_m = 20.0
+                climb_m = 20.0
+                before = await self.wait_telemetry(lambda by: target_id in by, 3.0, target_id)
+                pad_alt = before[target_id].get("alt") or 0.0
                 await self.send_json({
                     "type": "service",
                     "id": target_id,
                     "requestId": service_tx,
                     "action": "relaunch",
-                    "alt": takeoff_alt_m,
-                    "groundAlt": ground_offset_m,
+                    "alt": climb_m,
                 })
-                ack = None
-                deadline = time.time() + 5.0
-                while time.time() < deadline:
-                    msg = await self.recv_json(timeout=2.0)
-                    if msg.get("type") == "service_ack" and msg.get("requestId") == service_tx and msg.get("action") == "relaunch":
-                        ack = msg
-                        break
-                if not ack or not ack.get("accepted"):
-                    raise AssertionError(f"Relaunch rejected or missing ack: {ack}")
+                ack = await self.recv_until(
+                    lambda m: (m.get("type") == "service_ack" and m.get("requestId") == service_tx
+                               and m.get("action") == "relaunch"), 5.0, "relaunch ack")
+                if not ack.get("accepted"):
+                    raise AssertionError(f"Relaunch rejected: {ack}")
+                vs = await self.wait_telemetry(
+                    lambda by: (target_id in by and by[target_id].get("ready")
+                                and (by[target_id].get("alt") or 0.0) >= pad_alt + climb_m - 1.0),
+                    60.0, f"{target_id} READY {climb_m:g} m above its pad")
+                return {"relaunchedVehicle": target_id, "padAltM": round(pad_alt, 2),
+                        "altM": round(vs[target_id].get("alt") or 0.0, 1)}
 
-                # Verify climb and transition back to airborne / ready
-                relaunched = False
-                deadline = time.time() + 20.0
-                while time.time() < deadline:
-                    msg = await self.recv_json(timeout=2.0)
-                    if msg.get("type") == "telemetry":
-                        v = next((x for x in msg.get("vehicles", []) if x.get("id") == target_id), None)
-                        if v and (v.get("alt", 0.0) >= ground_offset_m + 3.0 or v.get("airborne") or v.get("ready")):
-                            relaunched = True
-                            break
-                if not relaunched:
-                    raise AssertionError(f"Vehicle {target_id} failed to climb after relaunch command")
-                return {"relaunchedVehicle": target_id, "groundOffsetM": ground_offset_m}
-
-            await self.run_step("8. Relaunch with home elevation offset", step_relaunch)
+            await self.run_step("8. Relaunch and climb to the relaunch altitude", step_relaunch)
 
             overall_status = "passed"
             self.log("ALL ACCEPTANCE STEPS PASSED SUCCESSFULLY!")
@@ -486,13 +558,9 @@ class AcceptanceRunner:
         with open(fail_log, "w", encoding="utf-8") as f:
             f.write(f"ACCEPTANCE TEST FAILURE\nTime: {time.asctime()}\nError: {ex}\n\n")
 
-            if self.server_process:
-                f.write("=== SERVER OUTPUT ===\n")
-                try:
-                    stdout, stderr = self.server_process.communicate(timeout=1.0)
-                    f.write(f"STDOUT:\n{stdout}\nSTDERR:\n{stderr}\n")
-                except Exception:
-                    f.write("(server still running or closed)\n")
+            if self.server_log_path:
+                f.write(f"=== SERVER OUTPUT (tail of {self.server_log_path}) ===\n")
+                f.write(self.server_output_tail(20000) + "\n")
 
             f.write("\n=== MESSAGE STREAM TRACE ===\n")
             for entry in self.message_history[-100:]:

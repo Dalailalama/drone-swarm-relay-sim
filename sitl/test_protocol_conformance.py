@@ -211,10 +211,47 @@ async def test_mock_conformance() -> None:
                        f"Mock: relaunch datum expected 55.0m, got {v.takeoff_alt}")
 
 
+async def test_ready_means_takeoff_altitude() -> None:
+    """#12: READY only at the takeoff altitude (PROTOCOL.md: climb >= takeoff_alt - 1 m),
+    in both implementations and on both the first pass and the recovery path.
+    The bridge used to say READY at 1 m, which real ArduCopter SITL exposed."""
+    clock = [2000.0]
+    with patch.object(bridge, "_now", lambda: clock[0]):
+        bv = bridge.Vehicle(id="DR-1", index=0, port=14550, takeoff_alt=30.0)
+        bv.last_position = clock[0]
+        bv.alt = 2.0
+        assert_conform(bv.airborne and not bv.at_takeoff_alt,
+                       "Bridge: 2 m of a 30 m takeoff counts as the takeoff altitude")
+        bv.alt = 29.5
+        assert_conform(bv.at_takeoff_alt, "Bridge: 29.5 m of a 30 m takeoff not accepted")
+
+    with patch.object(mv, "_now", lambda: clock[0]):
+        mv.WORLD.reset(1, 30.0)
+        m = mv.WORLD.vehicles["DR-1"]
+        m.armed = True
+        m.custom_mode = m.guided_mode_id
+        m.last_heartbeat = m.last_position = clock[0]
+        m.position_seq = 1
+        m.alt = 2.0
+        m._enter_step(mv.INIT_CONFIRM_TAKEOFF, clock[0])
+        m.advance_init(clock[0])
+        assert_conform(not m.ready, "Mock: READY at 2 m of a 30 m takeoff")
+        # Recovery of a vehicle already airborne but short of the altitude.
+        m.init_state, m.ready, m.failed_at = mv.FAILED_PREFIX + "takeoff", False, clock[0] - 60.0
+        m.alt = 5.0
+        m.advance_init(clock[0])
+        assert_conform(not m.ready and m.init_state == mv.INIT_CONFIRM_TAKEOFF,
+                       f"Mock: recovery at 5 m of 30 m went {m.init_state!r}, ready={m.ready}")
+        m.alt = 29.5
+        m.advance_init(clock[0])
+        assert_conform(m.ready, "Mock: 29.5 m of a 30 m takeoff not READY")
+
+
 def main() -> int:
     print("Testing Protocol Conformance across Bridge and Mock implementations...")
     asyncio.run(test_bridge_conformance())
     asyncio.run(test_mock_conformance())
+    asyncio.run(test_ready_means_takeoff_altitude())
 
     if failures:
         print(f"FAILED ({len(failures)} conformance errors):")
