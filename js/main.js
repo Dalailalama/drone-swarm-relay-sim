@@ -1541,31 +1541,46 @@
   let panelAccum = 0;
   let simAccum = 0;
   const FIXED_SIM_STEP_SEC = SIM_DT_SEC; // ONE step policy across browser/batch/bench (finding #28)
+  let frameErrorMsg = null; // last frame failure already shown to the operator
   function frame(now) {
-    const realDt = Math.min(0.2, (now - lastT) / 1000);
-    lastT = now;
+    try {
+      const realDt = Math.min(0.2, (now - lastT) / 1000);
+      lastT = now;
 
-    let status;
-    if (!paused) {
-      // Real vehicles fly in real time — no fast-forward when a bridge is
-      // driving the drones; force 1x so sim time tracks the wall clock.
-      const scale = (typeof externalActive === 'function' && externalActive()) ? 1 : timeScale;
-      simAccum += realDt * scale;
-      if (simAccum > 1.0) simAccum = 1.0;
-      while (simAccum >= FIXED_SIM_STEP_SEC) {
-        status = stepSwarm(swarm, FIXED_SIM_STEP_SEC);
-        simAccum -= FIXED_SIM_STEP_SEC;
+      let status;
+      if (!paused) {
+        // Real vehicles fly in real time — no fast-forward when a bridge is
+        // driving the drones; force 1x so sim time tracks the wall clock.
+        const scale = (typeof externalActive === 'function' && externalActive()) ? 1 : timeScale;
+        simAccum += realDt * scale;
+        if (simAccum > 1.0) simAccum = 1.0;
+        while (simAccum >= FIXED_SIM_STEP_SEC) {
+          status = stepSwarm(swarm, FIXED_SIM_STEP_SEC);
+          simAccum -= FIXED_SIM_STEP_SEC;
+        }
       }
+      if (!status) status = chainStatus(swarm);
+
+      if (view3D) renderView3D(ctx, cv, swarm, status, cam3D, selected);
+      else render(ctx, cv, view, swarm, status, selected, usable());
+
+      panelAccum += realDt;
+      if (panelAccum > 0.2) { updatePanels(status); panelAccum = 0; }
+    } catch (e) {
+      // One bad frame must not end the loop (soak finding R7): it used to
+      // skip the requestAnimationFrame below and freeze the page silently.
+      // Say so once — event log, status pill, console stack — and keep going.
+      const msg = (e && e.message) || String(e);
+      if (msg !== frameErrorMsg) {
+        frameErrorMsg = msg;
+        console.error('Simulation frame failed:', e);
+        try { logEvent(swarm, 'Simulation error: ' + msg, 'error'); } catch (_) { /* swarm unusable too */ }
+        statusPill.textContent = 'Simulation error — see event log';
+        statusPill.className = 'pill lost';
+      }
+    } finally {
+      requestAnimationFrame(frame);
     }
-    if (!status) status = chainStatus(swarm);
-
-    if (view3D) renderView3D(ctx, cv, swarm, status, cam3D, selected);
-    else render(ctx, cv, view, swarm, status, selected, usable());
-
-    panelAccum += realDt;
-    if (panelAccum > 0.2) { updatePanels(status); panelAccum = 0; }
-
-    requestAnimationFrame(frame);
   }
 
   // Debug/inspection handle (also handy from the devtools console)
