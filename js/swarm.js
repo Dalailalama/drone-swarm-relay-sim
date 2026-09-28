@@ -372,12 +372,27 @@ function covAdjust(s, pos) {
   const B = s.base, T = s.target;
   const L = Math.max(1, dist2d(B, T));
   const px = -(T.y - B.y) / L, py = (T.x - B.x) / L; // perpendicular to spine
+  // Stations at k * unit metres out. A cell is 15% of usable range — 3.3 km on
+  // an RFD900x — and whole-cell steps threw a slot that only had to clear a
+  // 420 m GPS-denied zone kilometres off the corridor, where no drone could
+  // afford it (#17). So walk the first 60 stations in <= 40 m steps, then keep
+  // the original whole-cell stations beyond that: the search never reaches
+  // less far than it did. Radios whose cells are under 40 m search exactly as
+  // before.
+  const radius = COVERAGE.searchRadiusCells * cell;
+  const step = Math.min(cell, 40);
+  const stations = [];
+  for (let i = 1; i <= 60 && i * step <= radius; i++) stations.push([i, step]);
+  const reached = stations.length * step;
   for (let r = 1; r <= COVERAGE.searchRadiusCells; r++) {
+    if (r * cell > reached) stations.push([r, cell]);
+  }
+  for (const [k, unit] of stations) {
     const candidates = [
-      { x: pos.x + px * r * cell, y: pos.y + py * r * cell },
-      { x: pos.x - px * r * cell, y: pos.y - py * r * cell },
-      { x: pos.x + (T.x - B.x) / L * r * cell, y: pos.y + (T.y - B.y) / L * r * cell },
-      { x: pos.x - (T.x - B.x) / L * r * cell, y: pos.y - (T.y - B.y) / L * r * cell },
+      { x: pos.x + px * k * unit, y: pos.y + py * k * unit },
+      { x: pos.x - px * k * unit, y: pos.y - py * k * unit },
+      { x: pos.x + (T.x - B.x) / L * k * unit, y: pos.y + (T.y - B.y) / L * k * unit },
+      { x: pos.x - (T.x - B.x) / L * k * unit, y: pos.y - (T.y - B.y) / L * k * unit },
     ];
     for (const c of candidates) {
       if (!badPlan(s, c)) return c;
