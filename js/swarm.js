@@ -1788,6 +1788,16 @@ function stepDrone(s, d, dt) {
 
 // --- Status for display ----------------------------------------------------------
 // Built from TRUTH (what the map shows) plus C2's belief (what the operator sees).
+// Labelled-chain endpoint selection (#8). Route costs within tieEtx count as
+// equal (healthy links sit near 1 ETX per hop) and near-ties go to the
+// stronger last hop. The current endpoint is kept while its route is at most
+// holdEtx dearer and its last hop at most holdDb weaker than the best — or,
+// for its first dwellSec, while it merely stays within holdEtx. holdEtx is a
+// full transmission: a marginal shortcut riding the knee of the ETX curve
+// swings its cost by ~0.8 as it fades, which flipped the label (and the hop
+// count) between the shortcut and the engineered relay path.
+const CHAIN_ENTRY = { tieEtx: 0.05, holdEtx: 1.0, holdDb: 3, dwellSec: 4 };
+
 function chainStatus(s) {
   const onChain = d => alive(d) && (d.mode === 'ok' || d.mode === 'hold');
   const relays = s.drones.filter(d => onChain(d) && d.order.role === 'relay')
@@ -1802,25 +1812,37 @@ function chainStatus(s) {
     nodes.push({ kind: 'mission', x: cx / flock.length, y: cy / flock.length, label: 'flock', id: flock[0].id });
   }
 
-  // The hops shown to the operator are the ACTUAL route packets take (BFS
-  // over live links to the flock) whenever one exists — a planned-adjacency
-  // line through a tower shadow is misleading if traffic is flowing around
-  // it. Only when nothing routes do we draw the planned chain, so a truly
-  // broken chain still shows its red hops.
+  // The hops shown to the operator are the ACTUAL route packets take whenever
+  // one exists — a planned-adjacency line through a tower shadow is
+  // misleading if traffic is flowing around it. Only when nothing routes do
+  // we draw the planned chain, so a truly broken chain still shows its red
+  // hops.
+  //
+  // The labelled chain ends at the flock drone the route actually ENTERS
+  // through: the cheapest route from C2, near-ties to the strongest last hop,
+  // damped per CHAIN_ENTRY. It used to end at the drone nearest the flock
+  // centroid, which is effectively random on the orbit ring (#8).
+  const tree = c2Tree(s);                   // shared C2 tree — no fresh search
+  const routeCost = d => tree.dist.get(d.id) ?? Infinity;
+  const lastHopDb = d => {
+    const upId = tree.prev.get(d.id);
+    return upId === undefined ? -Infinity : liveMarginDb(s, upId, d.id);
+  };
+  const routed = flock.filter(d => routeCost(d) < Infinity);
   let chainPts = nodes;
-  if (flock.length) {
-    let cx2 = 0, cy2 = 0;
-    for (const d of flock) { cx2 += d.x; cy2 += d.y; }
-    cx2 /= flock.length; cy2 /= flock.length;
-    let rep = flock[0], repD = Infinity;
-    for (const d of flock) {
-      const dd = Math.hypot(d.x - cx2, d.y - cy2);
-      if (dd < repD) { repD = dd; rep = d; }
+  if (routed.length) {
+    let entry = routed[0];
+    for (const d of routed) {
+      const dc = routeCost(d) - routeCost(entry);
+      if (dc < -CHAIN_ENTRY.tieEtx || (Math.abs(dc) <= CHAIN_ENTRY.tieEtx && lastHopDb(d) > lastHopDb(entry))) entry = d;
     }
-    const route = (() => {
-      const up = pathToC2(s, rep.id);       // shared C2 tree — no fresh search
-      return up ? up.slice().reverse() : null;
-    })();
+    const was = s._chainEntry;
+    const held = was && routed.find(d => d.id === was.id);
+    if (held && held !== entry && routeCost(held) - routeCost(entry) <= CHAIN_ENTRY.holdEtx &&
+        (lastHopDb(entry) - lastHopDb(held) <= CHAIN_ENTRY.holdDb || s.time - was.since < CHAIN_ENTRY.dwellSec)) entry = held;
+    if (!was || was.id !== entry.id) s._chainEntry = { id: entry.id, since: s.time };
+    const up = pathToC2(s, entry.id);
+    const route = up ? up.slice().reverse() : null;
     if (route && route.length > 1) {
       chainPts = route.map(id => {
         if (id === 'C2') return { kind: 'base', x: s.base.x, y: s.base.y, label: 'C2', id: 'C2' };
@@ -1843,6 +1865,23 @@ function chainStatus(s) {
     });
   }
 
+  // Every live drone's actual next hop toward C2, straight from the routing
+  // tree, so the map shows the whole mesh: a drone linked through a
+  // neighbour is visibly linked instead of looking orphaned (#8).
+  const links = [];
+  for (const d of s.drones) {
+    if (!alive(d) || !(routeCost(d) < Infinity)) continue;
+    const upId = tree.prev.get(d.id);
+    const up = nodePos(s, upId);
+    if (!up) continue;
+    const margin = Math.max(-99, liveMarginDb(s, upId, d.id));
+    links.push({
+      a: { id: upId, x: up.x, y: up.y }, b: { id: d.id, x: d.x, y: d.y },
+      distM: dist2d(up, d), marginDb: margin,
+      state: margin >= FADE_MARGIN_DB ? 'ok' : margin >= 0 ? 'degraded' : 'lost',
+    });
+  }
+
   // Ground-truth connectivity, two grades (review finding #6):
   //   fleetConnected — C2 can reach at least one mission drone SOMEWHERE;
   //   connected      — the metric every consumer reads (status pill, uptime,
@@ -1852,7 +1891,6 @@ function chainStatus(s) {
   //                    function of radio range, which used to make a drone
   //                    45 km short of the target count as "at the objective"
   //                    on a long-range radio.
-  const tree = c2Tree(s);
   const fleetConnected = flock.some(d => (tree.dist.get(d.id) || Infinity) < Infinity);
   const onStationM = DRONE.orbitRadiusM * 2.5;
   const connected = flock.some(d =>
@@ -1864,7 +1902,7 @@ function chainStatus(s) {
     .filter(id => (s.time - s.c2.known[id].at) <= C2.staleSec).length;
   const aliveCount = s.drones.filter(alive).length;
 
-  return { nodes, hops, connected, fleetConnected, objectiveConnected, missionCount: flock.length, relayCount: relays.length, freshCount, aliveCount };
+  return { nodes, hops, links, connected, fleetConnected, objectiveConnected, missionCount: flock.length, relayCount: relays.length, freshCount, aliveCount };
 }
 
 // --- Red-team adversaries -----------------------------------------------------

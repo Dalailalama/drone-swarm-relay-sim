@@ -226,6 +226,28 @@ function drawRangeRing(ctx, cv, view, node, rangeM) {
   ctx.stroke(); ctx.setLineDash([]);
 }
 
+// The rest of the live mesh: every drone's real next hop toward C2 that the
+// labelled chain doesn't already cover, drawn thin and unlabelled (#8).
+function drawMeshLinks(ctx, cv, view, links, hops) {
+  if (!links || !links.length) return;
+  const U = window.uiScale || 1;
+  const labelled = new Set(hops.map(h => h.a.id + '>' + h.b.id));
+  ctx.save();
+  ctx.globalAlpha = 0.6;
+  ctx.lineWidth = 1 * U;
+  for (const l of links) {
+    if (labelled.has(l.a.id + '>' + l.b.id) || labelled.has(l.b.id + '>' + l.a.id)) continue;
+    const a = worldToScreen(view, cv, l.a.x, l.a.y);
+    const b = worldToScreen(view, cv, l.b.x, l.b.y);
+    ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y);
+    ctx.strokeStyle = l.state === 'ok' ? COLORS.linkOk : l.state === 'degraded' ? COLORS.linkDegraded : COLORS.linkLost;
+    ctx.setLineDash(l.state === 'ok' ? [] : [4 * U, 4 * U]);
+    ctx.stroke();
+  }
+  ctx.setLineDash([]);
+  ctx.restore();
+}
+
 function drawLinks(ctx, cv, view, hops, timeSec, connected) {
   const U = window.uiScale || 1;
   for (const hop of hops) {
@@ -436,6 +458,7 @@ function render(ctx, cv, view, s, status, selected, usable) {
     if (node.kind !== 'mission') drawRangeRing(ctx, cv, view, node, usable);
   }
 
+  drawMeshLinks(ctx, cv, view, status.links, status.hops);
   drawLinks(ctx, cv, view, status.hops, s.time, status.fleetConnected); // the drawn chain is the physical fleet link
   drawPackets(ctx, cv, view, s);
   drawLostMarkers(ctx, cv, view, s);

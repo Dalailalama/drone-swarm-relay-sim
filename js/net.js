@@ -529,13 +529,32 @@ function routePath(s, from, to) {
 // cadence so routes still track the moving swarm.
 const C2_TREE_TTL_SEC = 0.5;
 
+// Route damping. ETX rides the shadow-fading process and the orbit geometry,
+// so near-equal alternatives cross constantly; undamped, on-station drones
+// flipped parents 252 times in 3 min at UI defaults (127 of them straight
+// back within 3 s). Two standard mesh-routing damps:
+//   hysteresis — a node keeps its parent unless another path is cheaper by
+//     more than ROUTE_HYST_ETX (kept under one hop's worth, so a drone can
+//     still shed a needless relay hop);
+//   hold-down  — a parent adopted less than ROUTE_HOLD_SEC ago is only
+//     abandoned for a path ROUTE_HOLD_PEN_ETX better, i.e. when its link has
+//     collapsed. A dead or unusable parent never holds anything.
+const ROUTE_HYST_ETX = 0.5;
+const ROUTE_HOLD_SEC = 5;
+const ROUTE_HOLD_PEN_ETX = 5;
+
 function c2Tree(s) {
   if (s._c2Tree && s.time - s._c2Tree.at < C2_TREE_TTL_SEC) return s._c2Tree;
+  const last = s._c2Tree;
   const ids = nodeIds(s);
+  // Dijkstra orders by `rank` (ETX plus the switch penalty); `dist` keeps the
+  // true ETX along the chosen tree for every consumer.
+  const rank = new Map();
   const dist = new Map();
-  for (let i = 0; i < ids.length; i++) dist.set(ids[i], Infinity);
+  for (let i = 0; i < ids.length; i++) { rank.set(ids[i], Infinity); dist.set(ids[i], Infinity); }
   const prev = new Map();
   const done = new Set();
+  rank.set('C2', 0);
   dist.set('C2', 0);
   const maxRadio = (s.relayRadio && s.relayRadio.rangeLosM > s.radio.rangeLosM) ? s.relayRadio : s.radio;
   const maxSpan = usableRangeM(maxRadio, s.envFactor) * 2.5;
@@ -544,13 +563,14 @@ function c2Tree(s) {
     for (let i = 0; i < ids.length; i++) {
       const id = ids[i];
       if (!done.has(id)) {
-        const d = dist.get(id);
-        if (d < best) { best = d; cur = id; }
+        const r = rank.get(id);
+        if (r < best) { best = r; cur = id; }
       }
     }
     if (cur === null || best === Infinity) break; // nothing reachable remains
     done.add(cur);
     const curPos = nodePos(s, cur);
+    const curDist = dist.get(cur);
     for (let i = 0; i < ids.length; i++) {
       const nxt = ids[i];
       if (done.has(nxt)) continue;
@@ -560,10 +580,25 @@ function c2Tree(s) {
       }
       const c = linkCost(s, cur, nxt);
       if (c === Infinity) continue;
-      if (best + c < dist.get(nxt)) { dist.set(nxt, best + c); prev.set(nxt, cur); }
+      const incumbent = last ? last.prev.get(nxt) : undefined;
+      let pen = 0;
+      if (incumbent !== undefined && incumbent !== cur && linkUsable(s, incumbent, nxt)) {
+        pen = ROUTE_HYST_ETX;
+        if (s.time - last.since.get(nxt) < ROUTE_HOLD_SEC) pen += ROUTE_HOLD_PEN_ETX;
+      }
+      if (best + c + pen < rank.get(nxt)) {
+        rank.set(nxt, best + c + pen);
+        dist.set(nxt, curDist + c);
+        prev.set(nxt, cur);
+      }
     }
   }
-  s._c2Tree = { at: s.time, prev, dist };
+  // When each node adopted its current parent (drives the hold-down).
+  const since = new Map();
+  for (const [id, p] of prev) {
+    since.set(id, last && last.prev.get(id) === p ? last.since.get(id) : s.time);
+  }
+  s._c2Tree = { at: s.time, prev, dist, since };
   return s._c2Tree;
 }
 

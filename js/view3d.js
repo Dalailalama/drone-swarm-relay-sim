@@ -413,7 +413,26 @@ function renderView3D(ctx, cv, s, status, cam, selected) {
   }
 
   // Radio links, drawn above the terrain/buildings so they read as an
-  // overlay rather than something the mesh could occlude mid-hop.
+  // overlay rather than something the mesh could occlude mid-hop. The rest
+  // of the live mesh goes first, thin, under the labelled chain (#8).
+  const labelled = new Set(status.hops.map(h => h.a.id + '>' + h.b.id));
+  ctx.save();
+  ctx.globalAlpha = 0.6;
+  for (const l of status.links || []) {
+    if (labelled.has(l.a.id + '>' + l.b.id) || labelled.has(l.b.id + '>' + l.a.id)) continue;
+    const altA = terrainGroundAt(s.terrain, l.a.x, l.a.y) + (l.a.id === 'C2' ? 2 : s.altitudeM);
+    const altB = terrainGroundAt(s.terrain, l.b.x, l.b.y) + s.altitudeM;
+    const pa = project3D(cam, cv.width, cv.height, l.a.x, l.a.y, altA);
+    const pb = project3D(cam, cv.width, cv.height, l.b.x, l.b.y, altB);
+    if (!pa || !pb) continue;
+    ctx.beginPath(); ctx.moveTo(pa.x, pa.y); ctx.lineTo(pb.x, pb.y);
+    ctx.strokeStyle = l.state === 'ok' ? '#7fc95e' : l.state === 'degraded' ? '#e6b345' : '#e06050';
+    ctx.setLineDash(l.state === 'ok' ? [] : [4 * U, 4 * U]);
+    ctx.lineWidth = 1 * U;
+    ctx.stroke();
+  }
+  ctx.setLineDash([]);
+  ctx.restore();
   for (const hop of status.hops) {
     const altA = terrainGroundAt(s.terrain, hop.a.x, hop.a.y) + (hop.a.id === 'C2' ? 2 : s.altitudeM);
     const altB = terrainGroundAt(s.terrain, hop.b.x, hop.b.y) + (hop.b.id === 'C2' ? 2 : s.altitudeM);
