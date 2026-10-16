@@ -80,3 +80,9 @@ test('link-state changes and the event log are live regions', () => {
   assert.match(HTML, /<div id="eventLog"[^>]*\brole="log"/, '#eventLog must be role=log');
   assert.match(HTML, /<div id="eventLog"[^>]*\baria-live="polite"/);
 });
+
+test('the page loads nothing from a third-party origin at startup (no Google Fonts)', () => {
+  const external = [...HTML.matchAll(/<(link|script)\b[^>]*\b(href|src)="(https?:)?\/\/[^"]*"[^>]*>/g)].map(m => m[0]);
+  assert.deepStrictEqual(external, [], 'every visit leaked the operator IP to the font host');
+  assert.ok(!/@import\s+url\(\s*['"]?https?:/.test(CSS), 'no remote @import in style.css');
+});

@@ -1,8 +1,8 @@
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
-/* Console theme — IBM Plex Mono, warm olive-black surfaces, cream text,
-   lime primary actions. Fonts load from Google Fonts with monospace
-   fallback; the app works fine without them. */
+/* Console theme — system monospace, warm olive-black surfaces, cream text,
+   lime primary actions. No web fonts are fetched (no third-party request on
+   load); IBM Plex is used only if it is installed locally. */
 
 :root {
   --bg: #131410;
@@ -24,7 +24,7 @@
   --violet: #a48fe0;
   --cyan: #5ecfcf;
   --pink: #d970a8;
-  --mono: 'IBM Plex Mono', ui-monospace, Consolas, monospace;
+  --mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
   --sans: 'IBM Plex Sans', system-ui, sans-serif;
 }
 
