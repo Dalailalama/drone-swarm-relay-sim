@@ -71,11 +71,13 @@ function drawGrid(ctx, cv, view) {
   }
 }
 
-// Terrain layer: hillshaded ground rendered to a cached offscreen canvas
-// (recomputed only when the camera moves), plus building footprints.
+// Terrain layer: hillshaded ground rendered to a cached offscreen canvas,
+// plus building footprints. The layer is anchored in world space and covers
+// twice the viewport, so a pan only shifts where it is drawn; it is rebuilt
+// on zoom/resize/terrain change or when the view leaves it.
 // Buildings taller than the swarm's altitude get a red edge — those are
 // the ones that block both flight paths and radio.
-let terrainLayer = { key: '', canvas: null };
+let terrainLayer = { key: '', canvas: null, wx: 0, wy: 0 };
 
 function drawTerrain(ctx, cv, view, s) {
   const U = window.uiScale || 1;
@@ -84,17 +86,22 @@ function drawTerrain(ctx, cv, view, s) {
   if (!hasGround && !t.buildings.length) return;
 
   if (hasGround) {
-    const key = [Math.round(view.cx), Math.round(view.cy), view.pxPerM.toFixed(5), cv.width, cv.height, t.seed, t.groundAmpM].join('|');
-    if (terrainLayer.key !== key) {
-      const q = 4;
-      const w = Math.max(1, Math.floor(cv.width / q)), h = Math.max(1, Math.floor(cv.height / q));
+    const key = [view.pxPerM.toFixed(5), cv.width, cv.height, t.seed, t.groundAmpM].join('|');
+    const q = 4;
+    // Where the cached layer's top-left corner lands on screen this frame.
+    let at = terrainLayer.canvas && terrainLayer.key === key
+      ? worldToScreen(view, cv, terrainLayer.wx, terrainLayer.wy) : null;
+    if (!at || at.x > 0 || at.y > 0 ||
+        at.x + terrainLayer.canvas.width * q < cv.width || at.y + terrainLayer.canvas.height * q < cv.height) {
+      const sx0 = -cv.width / 2, sy0 = -cv.height / 2; // half a canvas of margin each side
+      const w = Math.max(1, Math.ceil(2 * cv.width / q)), h = Math.max(1, Math.ceil(2 * cv.height / q));
       const off = document.createElement('canvas'); off.width = w; off.height = h;
       const octx = off.getContext('2d');
       const img = octx.createImageData(w, h);
       const stepM = q / view.pxPerM;
       for (let py = 0; py < h; py++) {
         for (let px = 0; px < w; px++) {
-          const wpt = screenToWorld(view, cv, px * q, py * q);
+          const wpt = screenToWorld(view, cv, sx0 + px * q, sy0 + py * q);
           const g = terrainGroundAt(t, wpt.x, wpt.y);
           const gE = terrainGroundAt(t, wpt.x + stepM, wpt.y);
           const hn = Math.min(1, g / t.groundAmpM);
@@ -108,10 +115,12 @@ function drawTerrain(ctx, cv, view, s) {
         }
       }
       octx.putImageData(img, 0, 0);
-      terrainLayer = { key, canvas: off };
+      const tl = screenToWorld(view, cv, sx0, sy0);
+      terrainLayer = { key, canvas: off, wx: tl.x, wy: tl.y };
+      at = { x: sx0, y: sy0 };
     }
     ctx.imageSmoothingEnabled = true;
-    ctx.drawImage(terrainLayer.canvas, 0, 0, cv.width, cv.height);
+    ctx.drawImage(terrainLayer.canvas, at.x, at.y, terrainLayer.canvas.width * q, terrainLayer.canvas.height * q);
   }
 
   for (const b of t.buildings) {
