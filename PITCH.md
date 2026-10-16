@@ -1,6 +1,11 @@
-# The million-dollar pitch — feature brief
+# Pitch — feature brief
 
-**One-line pitch:** *"The only simulator that proves a drone swarm stays connected when distance, terrain, and jamming try to break it — calibrated to real radios, flying real autopilots, over real cities."*
+> **Read [VALUE.md](VALUE.md) first.** It states, with sources, what this project
+> is and is not worth today and which evidence would change that. This file is the
+> feature brief; uniqueness claims below were corrected after an October 2026
+> competitor review.
+
+**One-line pitch:** *"One zero-install, open-source tool that closes the loop between swarm C2, a packet-level relay mesh, datasheet-calibrated radios and real autopilots (SITL) — to test whether a drone swarm stays connected when distance, terrain and jamming try to break it."*
 
 **What the money buys (pick the buyer, not the feature):**
 a license from a defense prime, a $1M-scale government/grant award, a white-label
@@ -14,7 +19,7 @@ Every feature below exists to make one of those four signatures defensible.
 - **Comms-first distributed simulation** — three separate worlds (truth / C2's
   beliefs / each drone's beliefs) exchanging *real packets* with per-hop airtime,
   fading, retries. Kill a relay mid-chain and watch C2 notice seconds later,
-  strike it off the roster, re-plan, and heal. Nobody else demos this honestly.
+  strike it off the roster, re-plan, and heal.
 - **Real hardware radio physics** — SiK, RFD900x, LoRa EU868, Silvus/Doodle/
   Rajant-class MANET profiles; datasheet TX power, calibrated path-loss exponent,
   log-normal shadowing, 4/3-Earth radio horizon, shared-channel contention,
