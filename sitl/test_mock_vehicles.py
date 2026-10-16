@@ -514,6 +514,43 @@ async def test_two_consecutive_complete_service_cycles():
         assert v.ready and v.service_phase is None, f"cycle {cycle} failed to complete relaunch"
 
 
+async def test_foreign_origin_rejected_at_handshake():
+    """A web page on another origin cannot open the control socket (CSWSH);
+    the sim's own origins and non-browser clients (no Origin) still can."""
+    import socket
+    from websockets.asyncio.client import connect
+    from websockets.exceptions import InvalidStatus
+
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    server = asyncio.create_task(mock_vehicles.run("127.0.0.1", port))
+    uri = f"ws://127.0.0.1:{port}"
+    try:
+        for _ in range(200):
+            try:
+                async with connect(uri):
+                    break
+            except OSError:
+                await asyncio.sleep(0.01)
+        for origin in ("https://evil.example", "http://localhost.evil.example:8000"):
+            try:
+                async with connect(uri, origin=origin):
+                    raise AssertionError(f"handshake from {origin} was accepted")
+            except InvalidStatus as e:
+                assert e.response.status_code == 403, e
+        for origin in ("http://localhost:8000", "http://127.0.0.1:8000", "null",
+                       "https://dalailalama.github.io", None):
+            async with connect(uri, origin=origin) as ws:
+                await ws.send(json.dumps({"type": "noop"}))
+    finally:
+        server.cancel()
+        try:
+            await server
+        except (asyncio.CancelledError, Exception):
+            pass
+
+
 SCENARIOS = [
     ("Mock: startup, physics tick, and telemetry schema", test_startup_physics_telemetry),
     ("Mock: origin coordinates not double-offset in apply_goals", test_origin_coordinates_not_double_offset),
@@ -523,6 +560,7 @@ SCENARIOS = [
     ("Mock: airborne abort-to-hold, goal masking, resume, and grounded abort", test_airborne_and_grounded_abort),
     ("Mock: service ACKs, retryable rejection recovery, and duplicate suppression", test_service_acks_and_idempotency),
     ("Mock: two consecutive complete service cycles", test_two_consecutive_complete_service_cycles),
+    ("Mock: foreign web Origin rejected at the handshake", test_foreign_origin_rejected_at_handshake),
 ]
 
 

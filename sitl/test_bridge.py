@@ -35,6 +35,7 @@ Scenarios
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import json
 import logging
@@ -1769,6 +1770,42 @@ async def scenario_recovery_below_takeoff_alt_climbs_first():
     await h.close()
 
 
+async def scenario_foreign_origin_rejected() -> None:
+    """The bridge's serve() refuses a handshake from another web origin (CSWSH)
+    with HTTP 403 before any handler runs; the sim's own origins still pass."""
+    captured = {}
+
+    def fake_serve(handler, host, port, **kwargs):
+        captured.update(kwargs)
+        raise RuntimeError("stop after capturing serve() kwargs")
+
+    class Req:
+        def __init__(self, origin):
+            self.headers = {} if origin is None else {"Origin": origin}
+
+    class Conn:
+        def respond(self, status, body):
+            return (int(status), body)
+
+    real_serve = bridge.serve
+    bridge.serve = fake_serve
+    try:
+        args = argparse.Namespace(count=None, mav_base_port=14550, ws_host="localhost", ws_port=0, allow_origin=[])
+        try:
+            await bridge.run(args)
+        except RuntimeError:
+            pass
+    finally:
+        bridge.serve = real_serve
+    check = captured.get("process_request")
+    assert check is not None, f"serve() got no origin check: {captured}"
+    for origin in ("https://evil.example", "http://localhost.evil.example:8000"):
+        resp = check(Conn(), Req(origin))
+        assert resp is not None and resp[0] == 403, (origin, resp)
+    for origin in ("http://localhost:8000", "http://127.0.0.1:8000", "null", "https://dalailalama.github.io", None):
+        assert check(Conn(), Req(origin)) is None, origin
+
+
 SCENARIOS = [
     ("#12: not READY at lift-off; READY at the takeoff altitude", scenario_ready_needs_takeoff_altitude),
     ("#12: a long steady climb is not failed by the step timeout", scenario_long_climb_not_timed_out),
@@ -1796,6 +1833,7 @@ SCENARIOS = [
     ("late vehicle: no-heartbeat in the reply, then recovers to ready with no new init", scenario_late_vehicle_recovers),
     ("ownership: a second client's init is refused while the controller is connected", scenario_second_client_blocked),
     ("ownership: goals from a non-controller are not forwarded", scenario_goals_ownership),
+    ("CSWSH: a foreign web Origin is refused at the handshake", scenario_foreign_origin_rejected),
 ]
 
 

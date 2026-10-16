@@ -141,6 +141,8 @@ from websockets.exceptions import ConnectionClosed
 # If this import fails: `pip install pymavlink` (see requirements.txt).
 from pymavlink import mavutil
 
+from ws_origin import add_origin_argument, make_origin_check
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("bridge")
 
@@ -1363,7 +1365,8 @@ async def run(args: argparse.Namespace) -> None:
     telem_task = asyncio.create_task(telemetry_loop())
     handler = make_handler(args.count, args.mav_base_port)
     try:
-        async with serve(handler, args.ws_host, args.ws_port) as server:
+        check = make_origin_check(getattr(args, "allow_origin", ()), log.warning)
+        async with serve(handler, args.ws_host, args.ws_port, process_request=check) as server:
             log.info("bridge listening on ws://%s:%s (MAVLink base port %s)", args.ws_host, args.ws_port, args.mav_base_port)
             await asyncio.get_running_loop().create_future()  # run forever
     finally:
@@ -1408,6 +1411,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Number of vehicles to expect; if omitted, taken from each 'init' message's count field",
     )
+    add_origin_argument(parser)
     return parser.parse_args()
 
 
