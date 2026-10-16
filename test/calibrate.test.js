@@ -129,3 +129,53 @@ test('tiny or degenerate datasets fail loudly instead of lying', () => {
   ]);
   assert.strictEqual(sameSpot.ok, false, 'no spread -> no fit');
 });
+
+// Seeded Box-Muller gaussian for the statistical gates below.
+function gaussFrom(seed) {
+  let s = seed >>> 0;
+  const u = () => { s = (Math.imul(s, 1664525) + 1013904223) >>> 0; return (s + 0.5) / 4294967296; };
+  return () => Math.sqrt(-2 * Math.log(u())) * Math.cos(2 * Math.PI * u());
+}
+function fieldLog(g, count, dLo, dHi, n, A, sigma) {
+  const out = [];
+  for (let i = 0; i < count; i++) {
+    const d = dLo * Math.pow(dHi / dLo, i / (count - 1));
+    out.push({ dM: d, rssiDbm: A - 10 * n * Math.log10(d) + sigma * g() });
+  }
+  return out;
+}
+
+test('regression: 1000 samples at one single distance are degenerate, not a fit', () => {
+  for (const dM of [150, 1234.5, 77.7]) {
+    const g = gaussFrom(7);
+    const samples = [];
+    for (let i = 0; i < 1000; i++) samples.push({ dM, rssiDbm: -90 + 3 * g() });
+    const fit = C.fitPathLoss(samples);
+    assert.strictEqual(fit.ok, false, dM + ' m accepted as n=' + fit.n);
+    assert.ok(/degenerate/.test(fit.reason), fit.reason);
+  }
+});
+
+test('regression: a narrow distance span cannot determine n (no noise-only presets)', () => {
+  let wrongAccepted = 0;
+  for (let t = 0; t < 200; t++) {
+    const fit = C.fitPathLoss(fieldLog(gaussFrom(1000 + t), 20, 100, 120, 2.7, -30, 6));
+    if (fit.ok && Math.abs(fit.n - 2.7) > 1) wrongAccepted++;
+  }
+  assert.strictEqual(wrongAccepted, 0, wrongAccepted + ' narrow-span fits accepted with |n-2.7|>1');
+});
+
+test('wide-span fits pass and their 95% CI on n covers the truth', () => {
+  let covered = 0;
+  for (let t = 0; t < 50; t++) {
+    const fit = C.fitPathLoss(fieldLog(gaussFrom(5000 + t), 100, 10, 2000, 2.7, -30, 6));
+    assert.ok(fit.ok, 'trial ' + t + ': ' + fit.reason);
+    assert.ok(fit.nCi95 > 0 && fit.nCi95 <= 0.5, 'CI half-width ' + fit.nCi95);
+    if (Math.abs(fit.n - 2.7) <= fit.nCi95) covered++;
+  }
+  assert.ok(covered >= 45, 'CI covered the truth in only ' + covered + '/50');
+  const samples = fieldLog(gaussFrom(1), 100, 10, 2000, 2.7, -30, 6);
+  const fit = C.fitPathLoss(samples);
+  const md = C.validationReportMd(fit, SIK, samples, null);
+  assert.ok(md.includes('95% CI'), 'report must state the uncertainty on n');
+});

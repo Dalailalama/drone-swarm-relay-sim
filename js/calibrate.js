@@ -93,19 +93,46 @@ function parseFlightLogCsv(text) {
 }
 
 // --- Least-squares fit ----------------------------------------------------------
-// Minimise squared error of RSSI over log10(distance).
+// Acceptance gates: the slope is only determined if the distances span enough
+// of a decade, and a fit is only a calibration if its 95% CI on n is tight.
+const CAL_MIN_SPAN_DECADES = 0.5;
+const CAL_MAX_N_CI95 = 0.5;
+
+// Two-sided 95% Student-t quantile, Cornish-Fisher expansion in 1/df (within
+// ~1% of the table for df >= 3, which is all a 5-sample floor allows).
+function t975(df) {
+  const z = 1.959963985, z3 = z * z * z, z5 = z3 * z * z, z7 = z5 * z * z;
+  return z + (z3 + z) / (4 * df) + (5 * z5 + 16 * z3 + 3 * z) / (96 * df * df) +
+    (3 * z7 + 19 * z5 + 17 * z3 - 15 * z) / (384 * df * df * df);
+}
+
+// Minimise squared error of RSSI over log10(distance). Centred sums: the raw
+// n·Σx² − (Σx)² form cancels to a nonzero residue at large N, which once let
+// 1000 samples logged at ONE distance pass as a fit.
 function fitPathLoss(samples) {
   const n = samples.length;
   if (n < 5) return { ok: false, reason: 'need at least 5 samples, got ' + n };
-  let sx = 0, sy = 0, sxx = 0, sxy = 0;
+  let sx = 0, sy = 0, xMin = Infinity, xMax = -Infinity;
   for (const s of samples) {
-    const x = Math.log10(Math.max(1, s.dM)), y = s.rssiDbm;
-    sx += x; sy += y; sxx += x * x; sxy += x * y;
+    const x = Math.log10(Math.max(1, s.dM));
+    sx += x; sy += s.rssiDbm;
+    if (x < xMin) xMin = x;
+    if (x > xMax) xMax = x;
   }
-  const denom = n * sxx - sx * sx;
-  if (Math.abs(denom) < 1e-9) return { ok: false, reason: 'degenerate spread — all samples at the same distance?' };
-  const slope = (n * sxy - sx * sy) / denom;      // dB per decade
-  const intercept = (sy - slope * sx) / n;         // RSSI at d = 1 m
+  const xBar = sx / n, meanY = sy / n;
+  let sxx = 0, sxy = 0;
+  for (const s of samples) {
+    const dx = Math.log10(Math.max(1, s.dM)) - xBar;
+    sxx += dx * dx; sxy += dx * (s.rssiDbm - meanY);
+  }
+  if (!(xMax > xMin) || sxx <= 1e-12 * n) return { ok: false, reason: 'degenerate spread — all samples at the same distance?' };
+  const span = xMax - xMin;
+  if (span < CAL_MIN_SPAN_DECADES) {
+    return { ok: false, reason: 'distance span too narrow (' + span.toFixed(2) + ' decade, need ' +
+      CAL_MIN_SPAN_DECADES + ') — exponent not determined; log from near to far' };
+  }
+  const slope = sxy / sxx;                          // dB per decade
+  const intercept = meanY - slope * xBar;           // RSSI at d = 1 m
   const expN = -slope / 10;
   if (!(expN > 1) || !(expN < 8)) {
     return { ok: false, reason: 'fitted exponent n=' + expN.toFixed(2) + ' outside physical range (1..8)' };
@@ -116,11 +143,16 @@ function fitPathLoss(samples) {
     const pred = intercept + slope * Math.log10(Math.max(1, s.dM));
     ssRes += (s.rssiDbm - pred) * (s.rssiDbm - pred);
   }
-  const meanY = sy / n;
   for (const s of samples) ssTot += (s.rssiDbm - meanY) * (s.rssiDbm - meanY);
   const rmse = Math.sqrt(ssRes / n);
   const r2 = ssTot > 0 ? 1 - ssRes / ssTot : 1;
-  return { ok: true, n: expN, refPowerDbm: intercept, rmse, r2, count: n };
+  // 95% CI half-width on n: SE(slope) = sqrt(ssRes/(N−2)/Sxx), n = −slope/10.
+  const nCi95 = t975(n - 2) * Math.sqrt(ssRes / (n - 2) / sxx) / 10;
+  if (!(nCi95 <= CAL_MAX_N_CI95)) {
+    return { ok: false, reason: 'exponent not determined: n=' + expN.toFixed(2) + ' ± ' + nCi95.toFixed(2) +
+      ' (95% CI wider than ±' + CAL_MAX_N_CI95 + ') — more samples or a wider distance span needed' };
+  }
+  return { ok: true, n: expN, nCi95, refPowerDbm: intercept, rmse, r2, count: n, spanDecades: span };
 }
 
 // Derive the calibrated preset numbers: keep the datasheet TX/sensitivity/
@@ -150,7 +182,7 @@ function calibratePreset(fit, basePreset) {
       '), RMSE ' + fit.rmse.toFixed(1) + ' dB, R² ' + fit.r2.toFixed(3) +
       '. Rated LOS range re-derived to ' + fmtDist(rangeLosM) + '.',
     source: basePreset.source,
-    calibratedFrom: { nFit: fit.n, refPowerDbm: fit.refPowerDbm, rmse: fit.rmse, r2: fit.r2, samples: fit.count },
+    calibratedFrom: { nFit: fit.n, nCi95: fit.nCi95, refPowerDbm: fit.refPowerDbm, rmse: fit.rmse, r2: fit.r2, samples: fit.count },
   };
 }
 
@@ -169,7 +201,8 @@ function validationReportMd(fit, basePreset, samples, parsed) {
   }
   L.push('');
   L.push('## Fit');
-  L.push('- **Measured path-loss exponent:** n = ' + fit.n.toFixed(2));
+  L.push('- **Measured path-loss exponent:** n = ' + fit.n.toFixed(2) +
+    (fit.nCi95 != null ? ' ± ' + fit.nCi95.toFixed(2) + ' (95% CI)' : ''));
   L.push('- **Reference power at 1 m:** ' + fit.refPowerDbm.toFixed(1) + ' dBm');
   L.push('- **RMSE:** ' + fit.rmse.toFixed(1) + ' dB · **R²:** ' + fit.r2.toFixed(3));
   L.push('- **Datasheet model implied:** n = ' + pathLossExponent(basePreset).toFixed(2));

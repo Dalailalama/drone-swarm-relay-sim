@@ -1071,7 +1071,7 @@
     const drift = fit.n - dsN;
     calResult.innerHTML =
       '<b>Fit complete</b> — ' + fit.count + ' samples<br>' +
-      'measured n = <b>' + fit.n.toFixed(2) + '</b> (datasheet model: ' + dsN.toFixed(2) +
+      'measured n = <b>' + fit.n.toFixed(2) + ' ± ' + fit.nCi95.toFixed(2) + '</b> (95% CI; datasheet model: ' + dsN.toFixed(2) +
         ', drift ' + (drift >= 0 ? '+' : '') + drift.toFixed(2) + ')<br>' +
       'RMSE <b>' + fit.rmse.toFixed(1) + ' dB</b> · R² <b>' + fit.r2.toFixed(3) + '</b><br>' +
       're-derived rated range: <b>' + fmtDist(cal.rangeLosM) + '</b> (was ' + fmtDist(basePreset.rangeLosM) + ')';
