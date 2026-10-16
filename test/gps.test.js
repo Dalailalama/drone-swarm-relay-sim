@@ -79,19 +79,39 @@ test('drones cross the zone, drift, and poison C2\u2019s picture of them', () =>
   // Peak truth-vs-belief error must be well above the healthy GPS noise floor.
   const peak = Math.max(...denied.map(d => d.peakNavErr || 0));
   assert.ok(peak > 25, 'expected nav error > 25 m while denied, got ' + peak.toFixed(1) + ' m');
-  // Any drone STILL inside the zone reports a position that disagrees with
-  // truth far more than GNSS noise ever could.
-  const still = denied.find(d => d.gpsDenied && s.c2.known[d.id]);
-  if (still) {
-    const err = Math.hypot(s.c2.known[still.id].x - still.x, s.c2.known[still.id].y - still.y);
-    assert.ok(err > 15, 'C2 error for a denied drone should exceed noise, got ' + err.toFixed(1) + ' m');
+});
+
+test('telemetry from a denied drone poisons C2’s picture: C2 tracks the belief, not truth', () => {
+  // Sampled DURING the run: by the end no drone is still inside the zone, so
+  // an end-of-run check never executes. Every tick a drone is denied and its
+  // belief has drifted well past GNSS noise, ask which one C2's picture sits
+  // closer to.
+  const s = ctx.makeSwarm({
+    count: 6, airframe: Q450, radio: RFD, envFactor: 1,
+    targetX: 1400, targetY: -350, altitudeM: 60, seed: 11,
+    gpsZones: [{ id: 'GZ-test', x: 700, y: -180, rM: 280, on: true }],
+  });
+  let samples = 0, poisoned = 0;
+  while (s.time < 420) {
+    ctx.stepSwarm(s, 0.25);
+    for (const d of s.drones) {
+      const k = s.c2.known[d.id];
+      if (!d.gpsDenied || !k || Math.hypot(d.belX - d.x, d.belY - d.y) <= 25) continue;
+      samples++;
+      if (Math.hypot(k.x - d.belX, k.y - d.belY) < Math.hypot(k.x - d.x, k.y - d.y)) poisoned++;
+    }
   }
+  assert.ok(samples >= 20, 'expected drifted denied drones known to C2, got ' + samples + ' samples');
+  assert.ok(poisoned > samples / 2,
+    'C2 should hold the drifted belief, not truth: ' + poisoned + '/' + samples + ' samples');
 });
 
 test('C2 hedges: no planned relay slot deep inside an active GPS zone', () => {
-  const { s } = runGpsMission({}, 300);
+  // SiK (not the 40 km RFD900x) with 12 drones, so the objective actually
+  // needs relay slots and the hedge has something to act on.
+  const { s } = runGpsMission({ radio: SIK, count: 12 }, 300);
   const plan = s.c2.chainPlan;
-  if (!plan || !plan.slots.length) return; // nothing placed — vacuously fine
+  assert.ok(plan && plan.slots.length >= 1, 'the mission must need relay slots for this check to mean anything');
   for (const slot of plan.slots) {
     for (const z of s.gpsZones) {
       if (z.on === false) continue;
