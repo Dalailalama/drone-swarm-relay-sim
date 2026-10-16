@@ -44,3 +44,32 @@ test('every select, visible input and the map canvas has an accessible name', ()
   }
   assert.deepStrictEqual(unnamed, [], 'controls whose name falls back to their current value');
 });
+
+test('keyboard users can select a drone from the fleet list and kill it, and zoom/pan/select on the map', () => {
+  const { loadUI } = require('./helpers/dom.js');
+  const { ctx, el, fire } = loadUI();
+  const frames = () => { for (let i = 0; i < 20; i++) ctx.__raf.pump(16); }; // panels refresh every 0.2 s
+  frames();
+  const row = el('fleetBody').children[1];
+  assert.strictEqual(row.getAttribute('tabindex'), '0', 'fleet rows must be in the tab order');
+  assert.strictEqual(row.getAttribute('role'), 'button');
+  const ev = fire('fleetBody', 'keydown', { key: 'Enter', target: row });
+  assert.ok(ev.defaultPrevented, 'Enter on a row is handled');
+  assert.ok(!el('killBtn').disabled, 'Kill must enable without waiting for a frame');
+  assert.strictEqual(el('killBtn').textContent, 'Kill ' + row.dataset.id);
+  frames();
+  assert.strictEqual(row.getAttribute('aria-pressed'), 'true', 'the selected row says so');
+
+  assert.strictEqual(el('map').getAttribute('tabindex'), '0', 'the map must be focusable');
+  const z0 = ctx.sim.view.pxPerM;
+  fire('map', 'keydown', { key: '+' });
+  assert.ok(ctx.sim.view.pxPerM > z0, '+ zooms in');
+  const cx0 = ctx.sim.view.cx;
+  fire('map', 'keydown', { key: 'ArrowRight' });
+  assert.ok(ctx.sim.view.cx > cx0, 'arrows pan');
+  fire('map', 'keydown', { key: ']' });
+  assert.ok(el('killBtn').textContent.startsWith('Kill ') && el('killBtn').textContent !== 'Kill ' + row.dataset.id,
+    '] moves the selection to the next drone');
+  const unused = fire('map', 'keydown', { key: 'q' });
+  assert.ok(!unused.defaultPrevented, 'keys the map does not use are left alone');
+});

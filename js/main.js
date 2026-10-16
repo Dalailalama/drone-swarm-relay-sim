@@ -1430,14 +1430,22 @@
       const fidText = d.id + (d.cls === 'relay' ? ' \u25c6' : '') + (swarm.c2.vidGrantee === d.id ? ' \u25cf' : '');
       const batPctStr = d.batteryPct.toFixed(0) + '%';
       const targetClass = 'fleet-row role-' + role;
-      const targetOutline = sel ? '1px solid #e2e8f0' : '';
+      // Selection is an inset ring, not an outline, so the keyboard
+      // :focus-visible outline in style.css is never overridden inline.
+      const targetRing = sel ? 'inset 0 0 0 1px #e2e8f0' : '';
+      const pressed = sel ? 'true' : 'false';
+      const ariaLabel = d.id + ', ' + role + ', battery ' + batPctStr;
 
       let row = fleetRowMap.get(d.id);
       if (!row) {
         row = document.createElement('div');
         row.className = targetClass;
-        if (targetOutline) row.style.outline = targetOutline;
+        if (targetRing) row.style.boxShadow = targetRing;
         row.dataset.id = d.id;
+        row.setAttribute('tabindex', '0');
+        row.setAttribute('role', 'button');
+        row.setAttribute('aria-pressed', pressed);
+        row.setAttribute('aria-label', ariaLabel);
 
         const dot = document.createElement('span');
         dot.className = 'dot';
@@ -1474,7 +1482,9 @@
         fleetBody.appendChild(row);
       } else {
         if (row.className !== targetClass) row.className = targetClass;
-        if (row.style.outline !== targetOutline) row.style.outline = targetOutline;
+        if (row.style.boxShadow !== targetRing) row.style.boxShadow = targetRing;
+        if (row.getAttribute('aria-pressed') !== pressed) row.setAttribute('aria-pressed', pressed);
+        if (row.getAttribute('aria-label') !== ariaLabel) row.setAttribute('aria-label', ariaLabel);
         if (row._fid && row._fid.textContent !== fidText) row._fid.textContent = fidText;
         if (row._frole && row._frole.textContent !== role) row._frole.textContent = role;
         if (row._fbatFill && row._fbatFill.style.width !== batPctStr) row._fbatFill.style.width = batPctStr;
@@ -1561,8 +1571,7 @@
       }
     }
 
-    killBtn.disabled = !(selected && alive(selected));
-    killBtn.textContent = selected ? 'Kill ' + selected.id : 'Kill drone (select one)';
+    syncKillBtn();
     // Basemap credit is legally required whenever the real map is on screen —
     // and it now shows in BOTH views (3D drapes the tiles onto the ground).
     mapAttrib.style.display = swarm.terrain.geoAnchor ? 'block' : 'none';
@@ -1572,6 +1581,47 @@
   fleetBody.addEventListener('click', e => {
     const row = e.target.closest('.fleet-row');
     if (row) selected = swarm.drones.find(d => d.id === row.dataset.id) || null;
+  });
+  // Keyboard path to the same selection (rows are role=button, tabindex 0).
+  // Kill updates at once so Tab then Enter works without waiting for a panel pump.
+  function syncKillBtn() {
+    killBtn.disabled = !(selected && alive(selected));
+    killBtn.textContent = selected ? 'Kill ' + selected.id : 'Kill drone (select one)';
+  }
+  fleetBody.addEventListener('keydown', e => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    const row = e.target.closest && e.target.closest('.fleet-row');
+    if (!row) return;
+    e.preventDefault();
+    selected = swarm.drones.find(d => d.id === row.dataset.id) || null;
+    syncKillBtn();
+  });
+
+  // Map keyboard: arrows pan (orbit in 3D), +/- zoom, [ and ] step the
+  // selection through live drones. Only keys used here are consumed.
+  cv.addEventListener('keydown', e => {
+    const k = e.key;
+    const arrows = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
+    if (arrows[k]) {
+      const [ax, ay] = arrows[k];
+      if (view3D && cam3D) orbitCamera3D(cam3D, ax * 40, ay * 40);
+      else {
+        view.cx += ax * 0.1 * cv.width / view.pxPerM;
+        view.cy += ay * 0.1 * cv.height / view.pxPerM;
+      }
+    } else if (k === '+' || k === '=' || k === '-' || k === '_') {
+      const zoomIn = k === '+' || k === '=';
+      if (view3D && cam3D) zoomCamera3D(cam3D, zoomIn ? 1 / 1.15 : 1.15);
+      else view.pxPerM = Math.min(20, Math.max(0.001, view.pxPerM * (zoomIn ? 1.15 : 1 / 1.15)));
+    } else if (k === '[' || k === ']') {
+      const live = swarm.drones.filter(alive);
+      if (!live.length) return;
+      const i = live.indexOf(selected);
+      const step = k === ']' ? 1 : -1;
+      selected = live[i < 0 ? (step > 0 ? 0 : live.length - 1) : (i + step + live.length) % live.length];
+      syncKillBtn();
+    } else return;
+    e.preventDefault();
   });
 
   // --- Loop -------------------------------------------------------------------
