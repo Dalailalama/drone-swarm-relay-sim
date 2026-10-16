@@ -16,8 +16,19 @@ const OSM_ENDPOINTS = [
   'https://overpass.kumi.systems/api/interpreter',
 ];
 const OSM_NOMINATIM = 'https://nominatim.openstreetmap.org/search';
-const OSM_M_PER_DEG_LAT = 110540;
-const OSM_M_PER_DEG_LON = 111320; // × cos(lat)
+// The ONE local projection shared by OSM import, the tile basemap and TAK
+// (they all load after this file): equirectangular about the anchor, scaled
+// by the WGS-84 meridian (M) and prime-vertical (N) radii at the anchor's
+// latitude. Under 1 m of error within ~3 km of the anchor.
+const GEO_WGS84_A = 6378137, GEO_WGS84_E2 = 6.69437999014e-3;
+function geoMetresPerDeg(latDeg) {
+  const phi = latDeg * Math.PI / 180, s = Math.sin(phi);
+  const w = 1 - GEO_WGS84_E2 * s * s;
+  return {
+    lat: GEO_WGS84_A * (1 - GEO_WGS84_E2) / Math.pow(w, 1.5) * Math.PI / 180,
+    lon: GEO_WGS84_A / Math.sqrt(w) * Math.cos(phi) * Math.PI / 180,
+  };
+}
 const OSM_LEVEL_HEIGHT_M = 3.2;   // storey height when only a floor count is mapped
 const OSM_DEFAULT_HEIGHT_M = 9;   // untagged building: low-rise guess (~3 floors)
 const OSM_MAX_BUILDINGS = 6000;   // keep the biggest N; renderer & physics stay smooth
@@ -37,11 +48,11 @@ function osmParseHeight(v) {
 // (lat0, lon0) — north is up on screen like a real map.
 function osmWayToBuilding(el, lat0, lon0) {
   if (!el || el.type !== 'way' || !el.geometry || el.geometry.length < 3) return null;
-  const kLon = OSM_M_PER_DEG_LON * Math.cos(lat0 * Math.PI / 180);
+  const k = geoMetresPerDeg(lat0);
   let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
   for (const g of el.geometry) {
-    const x = (g.lon - lon0) * kLon;
-    const y = (lat0 - g.lat) * OSM_M_PER_DEG_LAT;
+    const x = (g.lon - lon0) * k.lon;
+    const y = (lat0 - g.lat) * k.lat;
     if (x < minX) minX = x; if (x > maxX) maxX = x;
     if (y < minY) minY = y; if (y > maxY) maxY = y;
   }
@@ -59,11 +70,48 @@ function osmWayToBuilding(el, lat0, lon0) {
   return { x: (minX + maxX) / 2, y: (minY + maxY) / 2, w, d, heightM, estimated };
 }
 
+// Multipolygon relation (out geom) → its outer rings as point lists. Mappers
+// split one outer ring across several untagged ways, in either direction, so
+// stitch them end to end. Inner rings (courtyards) are ignored: a box per
+// outer ring is the same approximation every building gets.
+function osmOuterRings(rel) {
+  const same = (p, q) => p.lat === q.lat && p.lon === q.lon;
+  const segs = (rel.members || [])
+    .filter(m => m.type === 'way' && m.role === 'outer' && m.geometry && m.geometry.length >= 2)
+    .map(m => m.geometry);
+  const rings = [];
+  while (segs.length) {
+    let ring = segs.shift().slice();
+    for (let grew = true; grew && !same(ring[0], ring[ring.length - 1]);) {
+      grew = false;
+      const end = ring[ring.length - 1];
+      for (let i = 0; i < segs.length; i++) {
+        const s = segs[i];
+        if (same(s[0], end)) ring = ring.concat(s.slice(1));
+        else if (same(s[s.length - 1], end)) ring = ring.concat(s.slice(0, -1).reverse());
+        else continue;
+        segs.splice(i, 1); grew = true; break;
+      }
+    }
+    rings.push(ring);
+  }
+  return rings;
+}
+
 // Full Overpass JSON → building list, biggest-footprint first, capped.
-// Pure and unit-testable; no network.
+// Ways are buildings directly; multipolygon relations carry the tags on the
+// relation and give one box per outer ring. Pure and unit-testable.
 function osmParseBuildings(json, lat0, lon0) {
   const out = [];
   for (const el of (json && json.elements) || []) {
+    if (el && el.tags && el.tags.building === 'no') continue;
+    if (el && el.type === 'relation') {
+      for (const ring of osmOuterRings(el)) {
+        const b = osmWayToBuilding({ type: 'way', tags: el.tags, geometry: ring }, lat0, lon0);
+        if (b) out.push(b);
+      }
+      continue;
+    }
     const b = osmWayToBuilding(el, lat0, lon0);
     if (b) out.push(b);
   }
@@ -104,9 +152,16 @@ async function osmGeocode(query) {
   return { lat: parseFloat(hits[0].lat), lon: parseFloat(hits[0].lon), name: hits[0].display_name };
 }
 
+// Building ways AND multipolygon building relations (whose outer ways are
+// untagged, so a way-only query never sees them); building=no is not one.
+function osmBuildingQuery(lat, lon, radiusM) {
+  const around = '(around:' + Math.round(radiusM) + ',' + lat.toFixed(6) + ',' + lon.toFixed(6) + ')';
+  return '[out:json][timeout:25];(way["building"]["building"!="no"]' + around +
+    ';relation["building"]["type"="multipolygon"]' + around + ';);out geom;';
+}
+
 async function osmFetchArea(lat, lon, radiusM) {
-  const q = '[out:json][timeout:25];way["building"](around:' + Math.round(radiusM) +
-    ',' + lat.toFixed(6) + ',' + lon.toFixed(6) + ');out geom;';
+  const q = osmBuildingQuery(lat, lon, radiusM);
   let lastErr = null;
   for (const ep of OSM_ENDPOINTS) {
     try {
@@ -124,7 +179,7 @@ async function osmFetchArea(lat, lon, radiusM) {
 // UMD-lite export so parsing is unit-testable under Node.
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
-    osmParseHeight, osmWayToBuilding, osmParseBuildings, osmClearZones, osmParseLatLon,
+    geoMetresPerDeg, osmParseHeight, osmWayToBuilding, osmParseBuildings, osmBuildingQuery, osmClearZones, osmParseLatLon,
     OSM_LEVEL_HEIGHT_M, OSM_DEFAULT_HEIGHT_M, OSM_MAX_BUILDINGS,
   };
 }

@@ -77,9 +77,10 @@ test('the sim frame is x=East, y=South', () => {
   // the inverse tells the same story from the other side
   assert.ok(T.tileLocalToLatLon(ANCHOR, ANCHOR.x, ANCHOR.y + 100).lat < ANCHOR.lat, '+y is southward');
   assert.ok(T.tileLocalToLatLon(ANCHOR, ANCHOR.x + 100, ANCHOR.y).lon > ANCHOR.lon, '+x is eastward');
-  // 0.01° of latitude is ~1105 m, and longitude shrinks by cos(lat) at 28.63° N
-  assert.ok(Math.abs((ANCHOR.y - north.y) - 1105.4) < 1, 'metres per degree of latitude');
-  assert.ok(east.x - ANCHOR.x < 1105.4, 'a degree of longitude is shorter than one of latitude here');
+  // 0.01° of latitude is ~1108 m (WGS-84 meridian at 28.63° N; the old flat
+  // 110540 m/deg was ~3 m short here), and longitude shrinks by cos(lat)
+  assert.ok(Math.abs((ANCHOR.y - north.y) - 1108.3) < 1, 'metres per degree of latitude');
+  assert.ok(east.x - ANCHOR.x < 1108.3, 'a degree of longitude is shorter than one of latitude here');
 });
 
 test('the anchor maps to itself exactly, in both directions', () => {

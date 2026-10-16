@@ -28,22 +28,25 @@ const TILE_MIN_Z = 3, TILE_MAX_Z = 19;
 const TILE_CACHE_MAX = 400;          // ~25 MB worst case; evicted oldest-first
 const TILE_GRID_CAP = 18;            // sanity cap on tiles per axis per frame
 const TILE_EQUATOR_M = 156543.03392; // metres per tile pixel at z0 on the equator
-// Local sim frame is x=East, y=South in metres — must match js/osm.js.
-const TILE_M_PER_DEG_LAT = 110540;
-const TILE_M_PER_DEG_LON = 111320;   // × cos(lat)
+// Local sim frame is x=East, y=South in metres, projected by js/osm.js's
+// shared geoMetresPerDeg (loaded first in the browser; required under Node).
+const tileGeoScale = typeof geoMetresPerDeg === 'function'
+  ? geoMetresPerDeg : require('./osm.js').geoMetresPerDeg;
 
 // anchor = { lat, lon, x, y }: the geographic point pinned to local (x, y).
 function tileLocalToLatLon(anchor, x, y) {
+  const k = tileGeoScale(anchor.lat);
   return {
-    lat: anchor.lat - (y - anchor.y) / TILE_M_PER_DEG_LAT,
-    lon: anchor.lon + (x - anchor.x) / (TILE_M_PER_DEG_LON * Math.cos(anchor.lat * Math.PI / 180)),
+    lat: anchor.lat - (y - anchor.y) / k.lat,
+    lon: anchor.lon + (x - anchor.x) / k.lon,
   };
 }
 
 function tileLatLonToLocal(anchor, lat, lon) {
+  const k = tileGeoScale(anchor.lat);
   return {
-    x: anchor.x + (lon - anchor.lon) * TILE_M_PER_DEG_LON * Math.cos(anchor.lat * Math.PI / 180),
-    y: anchor.y + (anchor.lat - lat) * TILE_M_PER_DEG_LAT,
+    x: anchor.x + (lon - anchor.lon) * k.lon,
+    y: anchor.y + (anchor.lat - lat) * k.lat,
   };
 }
 

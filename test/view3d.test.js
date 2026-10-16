@@ -60,7 +60,7 @@ for (const [name, mutate] of [
 }
 
 test('F14 ground texture invalidates for every bound and anchor coordinate', () => {
-  const { ctx } = loadUI({ scripts: ['js/tiles.js', 'js/view3d.js'] });
+  const { ctx } = loadUI({ scripts: ['js/osm.js', 'js/tiles.js', 'js/view3d.js'] });
   ctx.tileGet = () => ({ ok: true, img: {} });
   const anchor = { x: 0, y: 0, lat: 40, lon: -74 };
   const bounds = [-800, -800, 800, 800];

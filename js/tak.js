@@ -14,10 +14,12 @@
 // Georeferencing is honest about being approximate: the sim world is metres
 // in a local tangent plane. With a real OSM area loaded we reuse its exact
 // geographic anchor; otherwise an operator-entered origin converts local
-// metres to lat/lon equirectangularly — sub-metre accuracy at the few-km
-// scales this simulator flies, which is far inside CoT's own precision.
+// metres to lat/lon equirectangularly with the WGS-84 scale at the anchor —
+// the same projection OSM import and the basemap use (js/osm.js
+// geoMetresPerDeg) — under 1 m of error within ~3 km of the anchor.
 
-const M_PER_DEG_LAT = 110540;
+const takGeoScale = typeof geoMetresPerDeg === 'function'
+  ? geoMetresPerDeg : require('./osm.js').geoMetresPerDeg;
 
 // haeM: height above ellipsoid of the LOCAL FRAME's zero-ground reference —
 // the vertical datum for every exported altitude (finding #26). null means
@@ -30,18 +32,18 @@ function makeTakAnchor(latDeg, lonDeg, xLocal, yLocal, haeM) {
 // Sim frame: x east-positive, y SOUTH-positive (screen style). South is
 // negative latitude, hence the minus sign on y.
 function localToLatLon(anchor, x, y) {
-  const mPerDegLon = M_PER_DEG_LAT * Math.cos(anchor.lat * Math.PI / 180);
+  const k = takGeoScale(anchor.lat);
   return {
-    lat: anchor.lat - (y - anchor.y) / M_PER_DEG_LAT,
-    lon: anchor.lon + (x - anchor.x) / mPerDegLon,
+    lat: anchor.lat - (y - anchor.y) / k.lat,
+    lon: anchor.lon + (x - anchor.x) / k.lon,
   };
 }
 
 function latLonToLocal(anchor, lat, lon) {
-  const mPerDegLon = M_PER_DEG_LAT * Math.cos(anchor.lat * Math.PI / 180);
+  const k = takGeoScale(anchor.lat);
   return {
-    x: anchor.x + (lon - anchor.lon) * mPerDegLon,
-    y: anchor.y - (lat - anchor.lat) * M_PER_DEG_LAT,
+    x: anchor.x + (lon - anchor.lon) * k.lon,
+    y: anchor.y - (lat - anchor.lat) * k.lat,
   };
 }
 
@@ -187,7 +189,7 @@ function parseCoTFile(text) {
 
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
-    M_PER_DEG_LAT, makeTakAnchor, localToLatLon, latLonToLocal,
+    makeTakAnchor, localToLatLon, latLonToLocal,
     TAK_TYPES, cotEvent, buildCotFromSwarm, parseCoTFile,
   };
 }
