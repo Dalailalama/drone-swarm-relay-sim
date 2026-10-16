@@ -883,11 +883,22 @@ async def _advance_init(vehicle: Vehicle) -> None:
                 now,
             )
         elif _accepted(result) and vehicle.connected and vehicle.armed:
-            await _vehicle_status(
-                vehicle,
-                f"vehicle {vehicle.id}: armed (ACK + heartbeat armed flag), commanding takeoff to {vehicle.takeoff_alt:g} m",
-            )
-            await _enter_confirm_takeoff(vehicle, now)
+            # Already flying (an init while airborne): ArduCopter refuses
+            # NAV_TAKEOFF in flight, so branch like _resume_sequence does.
+            if vehicle.airborne and vehicle.at_takeoff_alt:
+                await _become_ready(vehicle, now)
+            elif vehicle.airborne:
+                await _vehicle_status(
+                    vehicle,
+                    f"vehicle {vehicle.id}: armed and airborne at {vehicle.alt:.1f} m, climbing to {vehicle.takeoff_alt:g} m before ready",
+                )
+                await _enter_climb_setpoint(vehicle, now)
+            else:
+                await _vehicle_status(
+                    vehicle,
+                    f"vehicle {vehicle.id}: armed (ACK + heartbeat armed flag), commanding takeoff to {vehicle.takeoff_alt:g} m",
+                )
+                await _enter_confirm_takeoff(vehicle, now)
         elif elapsed >= INIT_STEP_TIMEOUT_S:
             await _fail(
                 vehicle,

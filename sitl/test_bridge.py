@@ -1893,7 +1893,21 @@ async def scenario_relaunch_failure_stays_parked():
     await h.close()
 
 
+async def scenario_reinit_airborne_no_takeoff():
+    """Init of a vehicle already flying at the takeoff altitude: no NAV_TAKEOFF (ArduCopter refuses it in flight)."""
+    h = Harness()
+    ws = h.client("browser-1")
+    h.telemetry()
+    ap = h.autopilot(14550, takeoff_result=4)  # MAV_RESULT_FAILED, as ArduCopter answers a takeoff in flight
+    ap.alt, ap.armed, ap.mode = 30.0, True, GUIDED_MODE_ID
+    reply = await ready_reply(ws, h.init(ws, count=1, alt=30.0))
+    assert ready_entry(reply, "DR-1") == {"id": "DR-1", "ready": True, "state": "ready"}, (reply, ws.statuses())
+    assert conn_for(14550).count("takeoff") == 0, conn_for(14550).sent
+    await h.close()
+
+
 SCENARIOS = [
+    ("A2: init of an airborne vehicle at altitude is READY without NAV_TAKEOFF", scenario_reinit_airborne_no_takeoff),
     ("A2: a failed relaunch stays parked and is never re-armed by the bridge", scenario_relaunch_failure_stays_parked),
     ("A2: a PX4 vehicle is reported unsupported, not failed:mode, and never retried", scenario_px4_reported_unsupported),
     ("A2: READY revoked when an autopilot failsafe leaves GUIDED or disarms", scenario_ready_revoked_on_autopilot_mode_change),
