@@ -16,7 +16,7 @@ const RADIOS = [
     airRateKbps: 64,
     rangeLosM: 300,       // Holybro spec: ~300 m with stock antennas
     note: 'The default MAVLink telemetry radio. Cheap (~$40/pair), 300 m stock — antenna upgrades stretch it to a few km.',
-    source: 'https://docs.holybro.com/telemetry-radio/sik-telemetry-radio',
+    source: 'https://docs.holybro.com/radio/sik-telemetry-radio-v3',
   },
   {
     id: 'rfd900x',
@@ -28,7 +28,7 @@ const RADIOS = [
     airRateKbps: 224,     // configurable 12–224 kbps
     rangeLosM: 40000,     // RFDesign: 40+ km LOS "depending on antennas, and settings"
     note: 'The serious option. 1 W, 40+ km line of sight. What long-range fixed-wing and BVLOS people actually fly.',
-    source: 'https://rfdesign.com.au/products/rfd900x-modem/',
+    source: 'https://rfdesign.com.au/wp-content/uploads/x-Series-Datasheet-V2.0.pdf',
   },
   {
     id: 'espnow',
@@ -123,7 +123,7 @@ const RADIOS = [
     airRateKbps: 30000,
     rangeLosM: 8000,
     note: 'Industrial "never-break" mesh used in mining, ports, and disaster response — every node routes for every other, no single point of failure.',
-    source: 'https://rajant.com/products/breadcrumb-es1/',
+    source: 'https://secure.rajant.com/publicFiles/1479',
   },
 ];
 
