@@ -506,6 +506,11 @@
   }
 
   // --- Controls -------------------------------------------------------------
+  // Every mid-run change to the sim goes into the capture's userActions so
+  // replay.js re-applies it at the same sim time (audit C-replay).
+  function recordAction(action) {
+    if (swarm && typeof recordUserAction === 'function') recordUserAction(swarm, action);
+  }
   radioSel.addEventListener('change', () => {
     radio = RADIOS.find(r => r.id === radioSel.value);
     swarm.radio = radio;
@@ -517,6 +522,7 @@
     env = ENVIRONMENTS.find(e => e.id === envSel.value);
     swarm.envFactor = env.factor;
     swarm.shadowSigmaDb = env.shadowSigmaDb;
+    recordAction({ type: 'env', envFactor: swarm.envFactor, shadowSigmaDb: swarm.shadowSigmaDb });
     updateSpecCard();
     logEvent(swarm, 'Environment: ' + env.name + ' — usable range now ' + fmtDist(usable()), 'warn');
   });
@@ -570,10 +576,12 @@
     const dist = +distRange.value / 100 * defaultTargetDist();
     distOut.textContent = fmtDist(dist);
     if (swarm) { swarm.target.x = dist; swarm.target.y = -dist * 0.25; }
+    recordAction({ type: 'target', x: dist, y: -dist * 0.25 });
   });
   altRange.addEventListener('input', () => {
     altOut.textContent = altRange.value + ' m';
     if (swarm) swarm.altitudeM = +altRange.value;
+    recordAction({ type: 'set', key: 'altitudeM', value: +altRange.value });
     updateSpecCard();
     if (typeof updateCityLabels === 'function') updateCityLabels();
   });
@@ -582,7 +590,10 @@
     const rad = +windDirRange.value * Math.PI / 180;
     windSpdOut.textContent = spd + ' m/s';
     windDirOut.textContent = windDirRange.value + '°';
-    if (swarm) { swarm.wind.x = spd * Math.cos(rad); swarm.wind.y = spd * Math.sin(rad); }
+    if (swarm) {
+      swarm.wind.x = spd * Math.cos(rad); swarm.wind.y = spd * Math.sin(rad);
+      recordAction({ type: 'wind', x: swarm.wind.x, y: swarm.wind.y });
+    }
   }
   windSpdRange.addEventListener('input', applyWind);
   windDirRange.addEventListener('input', applyWind);
@@ -591,6 +602,7 @@
     const frac = +spacingRange.value / 100;
     spacingOut.textContent = spacingRange.value + '%';
     if (swarm) swarm.deployFrac = frac;
+    recordAction({ type: 'set', key: 'deployFrac', value: frac });
     const hopM = usable() * frac;
     const margin = linkMarginDb(radio, env.factor, hopM);
     const loss = (1 - pktSuccessProb(margin)) * 100;
@@ -601,12 +613,14 @@
   spacingRange.addEventListener('input', applySpacing);
   corridorChk.addEventListener('change', () => {
     if (swarm) swarm.corridorRouting = corridorChk.checked;
+    recordAction({ type: 'set', key: 'corridorRouting', value: corridorChk.checked });
     corridorOut.textContent = corridorChk.checked ? 'transits follow the chain' : 'straight-line transits';
   });
   // --- EW waveforms: spectrum agility + LPI/LPD --------------------------------
   function applyAgility() {
     if (!swarm) return;
     swarm.spectrumAgility = agilityChk.checked;
+    recordAction({ type: 'set', key: 'spectrumAgility', value: agilityChk.checked });
     const r = radio.hopGainDb;
     agilityOut.textContent = agilityChk.checked
       ? (r ? '+' + r + ' dB anti-jam on ' + radio.name.split(' ')[0] : 'no hopping capability on this radio')
@@ -615,6 +629,7 @@
   function applyLpi() {
     if (!swarm) return;
     swarm.lpiMode = lpiChk.checked;
+    recordAction({ type: 'set', key: 'lpiMode', value: lpiChk.checked });
     lpiOut.textContent = lpiChk.checked ? '\u22123 dB budget · +6 dB denial rejection' : 'harder to detect, harder to jam';
   }
   agilityChk.addEventListener('change', () => {
@@ -630,6 +645,8 @@
     if (!swarm) return;
     swarm.videoOn = videoChk.checked;
     swarm.videoKbps = +videoKbpsRange.value;
+    recordAction({ type: 'set', key: 'videoOn', value: swarm.videoOn });
+    recordAction({ type: 'set', key: 'videoKbps', value: swarm.videoKbps });
     videoKbpsRow.style.display = videoChk.checked ? 'flex' : 'none';
     videoOut.textContent = videoChk.checked
       ? swarm.videoKbps + ' kbps · C2 schedules who streams'
@@ -675,12 +692,14 @@
     // `|| 42` used to erase (finding #32).
     const tX = swarm.target.x, tY = swarm.target.y;
     const bX = swarm.base.x, bY = swarm.base.y;
-    swarm.terrain = makeTerrain(terrainSel.value, {
+    const gen = {
       distM: Math.hypot(tX - bX, tY - bY), altM: swarm.altitudeM,
       baseX: bX, baseY: bY, targetX: tX, targetY: tY,
       seed: swarm._terrainSeed != null ? swarm._terrainSeed : 42,
       density: +cityDensityRange.value / 100, heightScale: +cityHeightRange.value / 100,
-    });
+    };
+    swarm.terrain = makeTerrain(terrainSel.value, gen);
+    recordAction({ type: 'terrain', name: terrainSel.value, gen: { ...gen } });
     updateCityLabels();
   }
   // O8: dragging a slider fires dozens of input events per second, and each
@@ -791,9 +810,13 @@
   });
   bcastChk.addEventListener('change', () => {
     if (swarm) swarm.broadcastC2 = bcastChk.checked;
+    recordAction({ type: 'set', key: 'broadcastC2', value: bcastChk.checked });
   });
   captureChk.addEventListener('change', () => {
     if (swarm) swarm.captureOn = captureChk.checked;
+    // The header says when packet events begin; user actions are recorded
+    // from t=0 regardless, so the replay still starts from the seed.
+    if (swarm && captureChk.checked && !(swarm.net && swarm.net.cap && swarm.net.cap.length)) swarm.captureStartT = swarm.time;
     captureOut.textContent = captureChk.checked ? 'recording…' : 'off';
     exportBtn.disabled = !captureChk.checked;
   });
@@ -874,23 +897,31 @@
     const off = (R * 0.9 + Math.floor(n / 2) * R * 0.6) * ((n % 2) ? -1 : 1); // beside it, alternating, spreading out
     const j = makeJammer(B.x + ux * L * alongF + px * off, B.y + uy * L * alongF + py * off, erp);
     swarm.jammers.push(j);
+    recordAction({ type: 'jammer_add', jammer: { ...j } });
     selectedJammer = j;
     updateJammerPanel();
   });
   clearJammersBtn.addEventListener('click', () => {
     swarm.jammers = []; selectedJammer = null; updateJammerPanel();
+    recordAction({ type: 'jammer_clear' });
   });
   jammerPowerRange.addEventListener('input', () => {
     jammerPowerOut.textContent = jammerPowerRange.value + ' dBm';
-    if (selectedJammer) { selectedJammer.erpDbm = +jammerPowerRange.value; updateJammerPanel(); }
+    if (selectedJammer) {
+      selectedJammer.erpDbm = +jammerPowerRange.value;
+      recordAction({ type: 'jammer_power', id: selectedJammer.id, erpDbm: selectedJammer.erpDbm });
+      updateJammerPanel();
+    }
   });
   jammerToggleBtn.addEventListener('click', () => {
     if (!selectedJammer) return;
     selectedJammer.on = selectedJammer.on === false;
+    recordAction({ type: 'jammer_toggle', id: selectedJammer.id, on: selectedJammer.on });
     updateJammerPanel();
   });
   jammerRemoveBtn.addEventListener('click', () => {
     if (!selectedJammer) return;
+    recordAction({ type: 'jammer_remove', id: selectedJammer.id });
     swarm.jammers = swarm.jammers.filter(j => j !== selectedJammer);
     // Keep the panel useful: fall to the next remaining source instead of
     // hiding all controls (which looked like the whole thing vanished).
@@ -924,6 +955,7 @@
   // --- Red-team adversary mode ---------------------------------------------------
   advChk.addEventListener('change', () => {
     if (swarm) swarm.adversaryMode = advChk.checked;
+    recordAction({ type: 'set', key: 'adversaryMode', value: advChk.checked });
     if (swarm && advChk.checked) logEvent(swarm, 'RED TEAM: interference sources now direction-find swarm traffic', 'error');
   });
 
@@ -939,16 +971,19 @@
     const rM = Math.max(150, Math.min(800, usable() * 0.5));
     const z = makeGpsZone(B.x + ux * L * f + px * off, B.y + uy * L * f + py * off, rM);
     swarm.gpsZones.push(z);
+    recordAction({ type: 'zone_add', zone: { ...z } });
     selectedJammer = null; selectedZone = z;
     updateZonePanel(); updateJammerPanel();
   });
   zoneToggleBtn.addEventListener('click', () => {
     if (!selectedZone) return;
     selectedZone.on = selectedZone.on === false;
+    recordAction({ type: 'zone_toggle', id: selectedZone.id, on: selectedZone.on });
     updateZonePanel();
   });
   zoneRemoveBtn.addEventListener('click', () => {
     if (!selectedZone) return;
+    recordAction({ type: 'zone_remove', id: selectedZone.id });
     swarm.gpsZones = swarm.gpsZones.filter(z => z !== selectedZone);
     selectedZone = swarm.gpsZones[swarm.gpsZones.length - 1] || null;
     updateZonePanel();
@@ -1150,6 +1185,7 @@
     const m = swarm.takMarks[+btn.dataset.i];
     if (!m) return;
     swarm.target.x = m.x; swarm.target.y = m.y;
+    recordAction({ type: 'target', x: m.x, y: m.y });
     logEvent(swarm, 'ATAK: objective moved to imported mark "' + m.callsign + '"', 'info');
   });
   takClearBtn.addEventListener('click', () => { swarm.takMarks = []; renderTakList(); });
@@ -1326,21 +1362,26 @@
     } else if (dragMode === 'zone' && selectedZone) {
       const w = screenToWorld(view, cv, p.x, p.y);
       selectedZone.x = w.x; selectedZone.y = w.y;
-    } else if (dragMode === 'pan' && lastMouse) {
+    }
+    recordDrag();
+    if (dragMode === 'pan' && lastMouse) {
       view.cx -= (p.x - lastMouse.x) / view.pxPerM;
       view.cy -= (p.y - lastMouse.y) / view.pxPerM;
     }
     lastMouse = p;
   });
 
+  // The sim reads the dragged position at every step, so a drag is recorded
+  // on each move (coalesced per sim time), not only on release (audit C-replay).
+  function recordDrag() {
+    if (dragMode === 'target') recordAction({ type: 'target', x: swarm.target.x, y: swarm.target.y });
+    else if (dragMode === 'base') recordAction({ type: 'base', x: swarm.base.x, y: swarm.base.y });
+    else if (dragMode === 'jammer' && selectedJammer) recordAction({ type: 'jammer_move', id: selectedJammer.id, x: selectedJammer.x, y: selectedJammer.y });
+    else if (dragMode === 'zone' && selectedZone) recordAction({ type: 'zone_move', id: selectedZone.id, x: selectedZone.x, y: selectedZone.y });
+  }
   cv.addEventListener('pointerup', e => {
     pointers.delete(e.pointerId);
-    if (swarm && typeof recordUserAction === 'function') {
-      if (dragMode === 'target') recordUserAction(swarm, { type: 'target', x: swarm.target.x, y: swarm.target.y });
-      else if (dragMode === 'base') recordUserAction(swarm, { type: 'base', x: swarm.base.x, y: swarm.base.y });
-      else if (dragMode === 'jammer' && selectedJammer) recordUserAction(swarm, { type: 'jammer_move', id: selectedJammer.id, x: selectedJammer.x, y: selectedJammer.y });
-      else if (dragMode === 'zone' && selectedZone) recordUserAction(swarm, { type: 'zone_move', id: selectedZone.id, x: selectedZone.x, y: selectedZone.y });
-    }
+    recordDrag();
     if (dragMode === 'pinch') {
       // Keep pinching only while two fingers remain; one finger left ends it
       // cleanly rather than falling back into a surprise pan.

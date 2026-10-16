@@ -920,10 +920,23 @@ function stepNet(s, dt) {
 //     deliver {pid, kind, src, dst}
 //     drop    {pid?, kind, reason, from?, to?, marginDb?}  reason: no-route|link-fail
 //     bcast   {seqNo, from, to, marginDb}
+// Mid-run UI actions are recorded ALWAYS, not only while capture is on: the
+// header describes t=0, so an action taken before capture was switched on
+// must still be in the file or the replay diverges (audit C-replay). They
+// are tiny and consume no RNG. Value actions repeated at the same sim time
+// (a slider dragged while paused, a drag between frames) keep only the last.
+const COALESCED_ACTIONS = new Set(['target', 'base', 'jammer_move', 'zone_move', 'jammer_power', 'wind', 'set', 'env', 'terrain']);
 function recordUserAction(s, action) {
-  if (!s || !s.captureOn) return;
+  if (!s) return;
   if (!s.userActions) s.userActions = [];
-  s.userActions.push({ t: s.time, ...action });
+  const rec = { t: s.time, ...action };
+  const last = s.userActions[s.userActions.length - 1];
+  if (last && last.t === rec.t && last.type === rec.type && COALESCED_ACTIONS.has(rec.type) &&
+      last.id === rec.id && last.key === rec.key) {
+    s.userActions[s.userActions.length - 1] = rec;
+  } else {
+    s.userActions.push(rec);
+  }
 }
 
 function exportCaptureJSONL(s) {
@@ -955,6 +968,9 @@ function exportCaptureJSONL(s) {
     radio: s.radio ? s.radio.id : undefined,
     broadcast: !!s.broadcastC2,
     settings: { ...baseSettings },
+    // Packet events before this sim time are absent (capture switched on
+    // late); replay regenerates them from the seed.
+    captureStartT: s.captureStartT || 0,
     userActions: s.userActions ? [...s.userActions] : [],
     events: (s.net && s.net.cap) ? s.net.cap.length : 0,
   };
