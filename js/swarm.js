@@ -1709,7 +1709,9 @@ function updateBattery(s, d, dt, vAirMs) {
     const whHome = flightPowerW(af, af.maxSpeedMs) * secsHome / 3600 * BATTERY.homeMargin;
     if (d.energyWh <= whHome + usableWh(af) * BATTERY.reserveFrac) {
       d.mode = 'rtb';
-      logEvent(s, d.id + ' battery low — RTB (' + d.batteryPct.toFixed(0) + '%)', 'warn');
+      logEvent(s, d.id + (isFinite(secsHome) ? ' battery low'
+        : ' home leg unflyable (wind ' + Math.hypot(s.wind.x, s.wind.y).toFixed(0) + ' m/s vs ' + af.maxSpeedMs + ' m/s airspeed)') +
+        ' — RTB (' + d.batteryPct.toFixed(0) + '%)', 'warn');
       sendPacket(s, 'tlm', d.id, 'C2', { x: d.x, y: d.y, battery: d.batteryPct, role: 'rtb' });
     }
   }
@@ -2384,13 +2386,17 @@ function afterActionReport(s) {
 function explainDroneDecision(s, d) {
   if (!d) return null;
   const af = afOf(s, d);
-  const vAirMs = Math.hypot(d.vx, d.vy);
+  const groundSpeedMs = Math.hypot(d.vx, d.vy); // d.vx/vy are ground velocity, wind included
   const homeK = d.baseKnown || s.base;
   const gHome = groundSpeedAlong(af, s.wind, d, homeK);
   const secsHome = gHome > 0.05 ? dist2d(d, homeK) / gHome : Infinity;
+  const homeFlyable = isFinite(secsHome);
   const whHome = flightPowerW(af, af.maxSpeedMs) * secsHome / 3600 * BATTERY.homeMargin;
-  const reqWh = whHome + usableWh(af) * BATTERY.reserveFrac;
-  const reqPct = (reqWh / usableWh(af)) * 100;
+  // An unflyable home leg has no finite energy cost: report null, not Infinity
+  // (which also serialises to null in JSON with no reason attached).
+  const reqWh = homeFlyable ? whHome + usableWh(af) * BATTERY.reserveFrac : null;
+  const reqPct = homeFlyable ? (reqWh / usableWh(af)) * 100 : null;
+  const windMs = Math.hypot(s.wind.x, s.wind.y);
   const silenceSec = s.time - d.lastC2;
 
   let summary = '';
@@ -2398,6 +2404,8 @@ function explainDroneDecision(s, d) {
     summary = 'Vehicle down (destroyed or battery exhausted)';
   } else if (d.mode === 'landed') {
     summary = 'Landed on base pad (swapping or waiting for launch)';
+  } else if (d.mode === 'rtb' && !homeFlyable) {
+    summary = 'Returning to base: home leg unflyable (wind ' + windMs.toFixed(1) + ' m/s exceeds ' + af.maxSpeedMs + ' m/s airspeed toward home)';
   } else if (d.mode === 'rtb') {
     summary = 'Returning to base: low battery (' + d.batteryPct.toFixed(1) + '% remaining, requires ' + reqPct.toFixed(1) + '% to fly home against wind)';
   } else if (d.mode === 'rtl') {
@@ -2430,7 +2438,9 @@ function explainDroneDecision(s, d) {
     energyWh: d.energyWh,
     requiredWh: reqWh,
     requiredPct: reqPct,
-    speedMs: vAirMs,
+    requiredReason: homeFlyable ? null : 'home leg unflyable: wind exceeds airspeed',
+    speedMs: groundSpeedMs, // ground speed, not airspeed
+    groundSpeedMs,
     tethered: Boolean(d.tethered),
     gpsDenied: Boolean(d.gpsDenied),
     streaming: Boolean(s.c2 && s.c2.vidGrantee === d.id),
