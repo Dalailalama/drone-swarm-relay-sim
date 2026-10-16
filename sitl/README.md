@@ -67,8 +67,10 @@ pip install -r requirements.txt
 python bridge.py --count 3
 ```
 
-Then point the browser sim (external-vehicle mode) at
-`ws://<that box's address>:8765`. The bridge will, per vehicle: wait for a
+Then point the browser sim (external-vehicle mode) at `ws://localhost:8765`.
+The bridge binds `localhost` by default; for a browser on another machine
+start it with `--ws-host 0.0.0.0` and use `ws://<that box's address>:8765`
+(any client that can reach the port can then send `init`). The bridge will, per vehicle: wait for a
 MAVLink heartbeat, switch it to `GUIDED` mode, arm it, command takeoff to
 the requested altitude, then forward `goals` as MAVLink position setpoints
 and stream back `telemetry` from the vehicle's real position.
@@ -78,16 +80,26 @@ and stream back `telemetry` from the vehicle's real position.
 ### (C) MOCK-LEVEL TESTS for the bridge itself — nothing installed
 
 ```
-python sitl/test_bridge.py
+python -B sitl/test_bridge.py
+python -B sitl/test_mock_vehicles.py
+python -B sitl/test_protocol_conformance.py
+python -B sitl/test_failure_scenarios.py
+python -B sitl/run_acceptance.py --mode mock --report acceptance_mock.json
 ```
 
-Runs `bridge.py`'s per-vehicle init state machine against stub
-`pymavlink`/`websockets` modules and a scripted fake autopilot: no firmware,
-no sockets, no dependencies, plain asserts (exit code 0/1). It covers
-confirmed readiness, arm rejection, a takeoff that is ACKed but never
-climbs, a vehicle that boots long after `ready` was sent, and the
-controller-ownership rules. It proves protocol/state-machine behaviour only
-— **not** that anything flies.
+These are the suites CI runs. `test_bridge.py` drives `bridge.py`'s
+per-vehicle init state machine against stub `pymavlink`/`websockets` modules
+and a scripted fake autopilot: no firmware, no sockets, plain asserts (exit
+code 0/1). It covers confirmed readiness, arm rejection, a takeoff that is
+ACKed but never climbs, a vehicle that boots long after `ready` was sent,
+and the controller-ownership rules. `test_mock_vehicles.py` covers the mock
+server, `test_protocol_conformance.py` checks both servers against
+`docs/PROTOCOL.md`, and `test_failure_scenarios.py` injects faults (late
+ACKs, stale heartbeats, frozen positions, controller handoffs, service
+phase mismatches). `run_acceptance.py --mode mock` runs the full acceptance sequence (READY, waypoints, abort/resume, landing,
+battery swap) against `mock_vehicles.py`; `--mode real` runs it against
+SITL started with `run_ardupilot_sitl.sh`. All of this proves
+protocol/state-machine behaviour only — **not** that anything flies.
 
 ## What the real bridge confirms before saying "ready"
 
@@ -100,7 +112,7 @@ never delays anyone else's) and drives this sequence, per vehicle:
 | `wait-heartbeat` | a HEARTBEAT arriving on that vehicle's UDP port |
 | `confirm-mode` | HEARTBEAT `custom_mode` == the firmware's own `GUIDED` id |
 | `confirm-arm` | `COMMAND_ACK(MAV_CMD_COMPONENT_ARM_DISARM)` = ACCEPTED **and** HEARTBEAT `base_mode` carrying `MAV_MODE_FLAG_SAFETY_ARMED` |
-| `confirm-takeoff` | `COMMAND_ACK(MAV_CMD_NAV_TAKEOFF)` = ACCEPTED **and** `LOCAL_POSITION_NED` showing the vehicle above 1 m |
+| `confirm-takeoff` | `COMMAND_ACK(MAV_CMD_NAV_TAKEOFF)` = ACCEPTED **and** `LOCAL_POSITION_NED` showing the vehicle climbed to within 1 m of the takeoff altitude (`alt >= takeoff_alt - 1`) |
 
 Nothing is reported as done that wasn't confirmed this way. A step that
 times out leaves the vehicle in `failed:<step>` (`failed:no-heartbeat`,
@@ -118,8 +130,10 @@ fleet keeps flying and the next `init` from anyone takes over.
 Shared by the browser sim, `mock_vehicles.py`, and `bridge.py`:
 
 - **sim world** (what the browser and both servers' WebSocket messages use):
-  metres, `x` = East, `y` = South (screen-down positive), `alt` = height
-  above ground in metres.
+  metres, `x` = East, `y` = South (screen-down positive), `alt` = metres
+  above the origin ground elevation (`origin.groundM`, sent in `init`).
+  Positions on the wire are origin-relative; the browser adds the origin
+  back. `alt` equals height above ground only over flat terrain.
 - **MAVLink** (what `bridge.py` speaks to SITL, internally — never exposed
   over the WebSocket): local NED (North, East, Down), metres.
 
@@ -136,14 +150,13 @@ JSON text messages. Both `mock_vehicles.py` and `bridge.py` implement the
 **server** side; the browser sim is the **client**. Unknown message types
 are ignored gracefully by both servers. Vehicle IDs are `"DR-1".."DR-N"`.
 
-| Direction | Message | Meaning |
-|---|---|---|
-| client -> server | `{"type":"init","count":N,"alt":50}` | Spawn/prepare `N` vehicles at the origin, target altitude in metres. |
-| server -> client | `{"type":"ready","ids":["DR-1",...,"DR-N"]}` | Reply to `init` once vehicles are prepared (or connection attempts have resolved, for the real bridge). |
-| server -> client | `bridge.py` adds `"vehicles":[{"id":"DR-1","ready":true,"state":"ready"}, ...]` to that same `ready` message | Per-vehicle truth: `ready` is true only for confirmed GUIDED + armed + climbing vehicles, `state` is the init-machine state (`ready` or `failed:<step>`). `ids` still lists every vehicle, ready or not; clients that only read `ids` are unaffected. |
-| client -> server | `{"type":"goals","goals":[{"id":"DR-1","x":<m East>,"y":<m South>,"alt":<m>}, ...]}` | Commanded setpoints for each drone. Sent ~2 Hz by the browser. |
-| server -> client | `{"type":"telemetry","t":<server seconds>,"vehicles":[{"id":"DR-1","x":<m East>,"y":<m South>,"alt":<m>,"connected":true}, ...]}` | Actual positions. Streamed ~10 Hz. |
-| server -> client | `{"type":"status","msg":"..."}` | Human-readable status lines (arming, takeoff, connection issues, etc). |
+The message set (`init` with `origin`, `goals`, `service`, `ready`,
+`telemetry`, `service_ack`, `status`), the per-vehicle telemetry fields the
+browser requires (including `positionSeq`/`positionAge` before it sends
+goals and `landedSeq`/`landedAge` before it confirms a touchdown) and the
+battery-swap/abort handshakes are specified in
+[`docs/PROTOCOL.md`](../docs/PROTOCOL.md); `test_protocol_conformance.py`
+checks both servers against its examples.
 
 ## Files
 
@@ -153,6 +166,15 @@ are ignored gracefully by both servers. Vehicle IDs are `"DR-1".."DR-N"`.
   `websockets` and `pymavlink`.
 - `test_bridge.py` — mock-level tests for `bridge.py` (stubbed MAVLink and
   WebSocket layers; no dependencies, no firmware). `python test_bridge.py`.
+- `test_mock_vehicles.py` — tests for `mock_vehicles.py`.
+- `test_protocol_conformance.py` — runs the same checks against both
+  servers and compares their messages with `docs/PROTOCOL.md`.
+- `test_failure_scenarios.py` — fault-injection scenarios for both servers.
+- `run_acceptance.py` — end-to-end acceptance runner, `--mode mock` (CI)
+  or `--mode real` against running SITL; `--report` writes a JSON report.
+- `tak_bridge.py` — separate relay from the browser's Cursor-on-Target
+  live feed (`js/tak.js`) to ATAK clients over UDP multicast; unrelated to
+  the vehicle protocol.
 - `requirements.txt` — Python dependencies for `bridge.py` (and
   `mock_vehicles.py`, which only needs the `websockets` half of it).
 - `run_ardupilot_sitl.sh` — convenience launcher for N ArduCopter SITL

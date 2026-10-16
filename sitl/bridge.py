@@ -15,7 +15,8 @@ and MAVLink LOCAL_POSITION_NED <-> JSON telemetry, per vehicle.
 
 Coordinate frame (shared contract with the browser sim and mock_vehicles.py):
     sim world:  x = metres East, y = metres South (screen-down positive),
-                alt = metres above ground.
+                alt = metres above the origin ground elevation (origin-relative,
+                equal to height above ground only over flat terrain).
     MAVLink:    local NED = (North, East, Down), metres.
 
     sim -> NED:  ned_north = -sim_y ; ned_east = sim_x ; ned_down = -alt
