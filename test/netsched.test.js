@@ -520,3 +520,24 @@ for (const agility of [false, true]) {
     }
   });
 }
+
+// NET-05: a unicast order round ran a fresh all-pairs Dijkstra per drone
+// (O(N^3) per round, ~0.5 s CPU at 100 drones). C2-sourced packets must ride
+// the shared C2-rooted tree: same routes, no per-packet route search.
+test('NET-05: C2 unicast orders follow the shared C2 tree without a per-packet Dijkstra', () => {
+  const s = mk(6);
+  s.drones.forEach((d, i) => { d.x = 150 * (i + 1); d.y = (i % 2) * 40; });
+  let searches = 0;
+  const orig = ctx.routePath;
+  ctx.routePath = function (...args) { searches++; return orig(...args); };
+  try {
+    for (const d of s.drones) assert.ok(ctx.sendPacket(s, 'cmd', 'C2', d.id, { role: 'mission' }));
+  } finally {
+    ctx.routePath = orig;
+  }
+  assert.strictEqual(searches, 0, 'per-packet route search for a C2 order');
+  for (const d of s.drones) {
+    const p = s.net.packets.find(q => q.dst === d.id);
+    assert.strictEqual(p.path.join('>'), ctx.pathToC2(s, d.id).slice().reverse().join('>'));
+  }
+});

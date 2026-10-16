@@ -735,6 +735,11 @@ function sendPacket(s, kind, src, dst, payload, bytesOverride) {
   let path = null;
   if (src !== 'C2' && dst !== 'C2' && linkUsable(s, src, dst, 0)) {
     path = [src, dst];
+  } else if (src === 'C2') {
+    // C2 orders ride the shared C2-rooted tree (symmetric ETX), not a fresh
+    // all-pairs Dijkstra per drone per round (NET-05).
+    const up = pathToC2(s, dst);
+    path = up ? up.slice().reverse() : null;
   } else {
     path = dst === 'C2' ? pathToC2(s, src) : routePath(s, src, dst);
   }
