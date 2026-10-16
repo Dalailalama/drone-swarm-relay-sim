@@ -2,14 +2,26 @@
 //
 // When the mission is georeferenced (a real area is loaded), the 2D canvas
 // stops being an abstract dark plane and becomes the map: genuine OSM tiles
-// (CARTO's dark style) draw as the ground, and the swarm, links, coverage
+// (the OSM standard style) draw as the ground, and the swarm, links, coverage
 // and interference draw on top. The map is the picture; the fetched
 // buildings remain the physics — a park or river on the tile does not
 // affect radio, and we don't pretend otherwise.
 //
 // Zero dependencies on purpose: a slippy map is Web-Mercator arithmetic
 // plus an image cache, and the app already owns pan/zoom/pinch. Tiles
-// © OpenStreetMap contributors, style © CARTO (credited in the corner).
+// © OpenStreetMap contributors (credited in the corner).
+//
+// Provider: the OSMF standard tile server, keyless. CARTO's raster basemaps
+// now require an API key and answer keyless requests with a 200-OK
+// "API KEY REQUIRED" watermark tile, so they cannot be the default.
+// OSMF Tile Usage Policy (https://operations.osmfoundation.org/policies/tiles/)
+// permits interactive viewing like this provided we: show visible
+// "© OpenStreetMap contributors" attribution linking the copyright page
+// (#mapAttrib), use the single tile.openstreetmap.org host (the a/b/c
+// subdomains are deprecated), send a valid Referer (the browser does when
+// served over http/https), honour HTTP caching (the browser cache plus this
+// in-memory cache), never bulk-download or prefetch tiles (we fetch only
+// the tiles in view, at most z19), and back off on failures (finding #31).
 
 const TILE_SIZE = 256;
 const TILE_MIN_Z = 3, TILE_MAX_Z = 19;
@@ -101,7 +113,7 @@ function tileGet(z, x, y) {
   e.img.crossOrigin = 'anonymous';
   e.img.onload = () => { e.ok = true; e.failed = false; };
   e.img.onerror = () => { e.failed = true; e.failedAt = tileNowMs(); e.attempts += 1; };
-  e.img.src = 'https://' + 'abcd'[(wx + y) % 4] + '.basemaps.cartocdn.com/dark_all/' + key + '.png';
+  e.img.src = 'https://tile.openstreetmap.org/' + key + '.png';
   tileCache.set(key, e);
   return e;
 }
