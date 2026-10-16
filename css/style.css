@@ -119,7 +119,10 @@ main { flex: 1; display: flex; min-height: 0; }
 #legend .lg-mission::before { background: var(--ok); }
 #legend .lg-relay::before { background: var(--warn); }
 #legend .lg-hold::before { background: var(--pink); }
+#legend .lg-relink::before { background: var(--cyan); }
+#legend .lg-rescue::before { background: var(--accent); }
 #legend .lg-rtb::before { background: var(--violet); }
+#legend .lg-landed::before { background: var(--dim); }
 #legend .lg-dead::before { background: var(--lost); }
 
 aside {
