@@ -8,8 +8,13 @@ TAK multicast group every ATAK client listens on by default:
     browser sim  <--WebSocket (CoT XML lines)-->  tak_bridge.py  <--UDP multicast-->  ATAK
 
 Usage:
-    python tak_bridge.py [--ws-port 8087] [--group 239.2.3.1] [--port 6969]
-                         [--ttl 3] [--unicast HOST:PORT ...]
+    python tak_bridge.py [--ws-host localhost] [--ws-port 8087] [--group 239.2.3.1]
+                         [--port 6969] [--ttl 3] [--unicast HOST:PORT ...]
+                         [--allow-origin ORIGIN ...]
+
+The WebSocket binds loopback only by default and refuses handshakes from web
+pages on other origins (see ws_origin.py), so neither a LAN host nor a page
+open in the operator's browser can inject CoT into the TAK group.
 
 Only dependency: `websockets` (already in requirements.txt for bridge.py).
 ATAK side: add the multicast stream, or point a TAK Client / FOG server at
@@ -21,7 +26,9 @@ import argparse
 import asyncio
 import socket
 
-from websockets.server import serve
+from websockets.asyncio.server import serve
+
+from ws_origin import add_origin_argument, make_origin_check
 
 # TAK's conventional CoT multicast: everyone who matters already listens here.
 DEFAULT_GROUP = "239.2.3.1"
@@ -57,12 +64,14 @@ async def handle_client(ws, udp: socket.socket, targets):
 
 async def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--ws-host", default="localhost", help="WebSocket host to bind (default: localhost)")
     ap.add_argument("--ws-port", type=int, default=8087, help="WebSocket port for the browser sim (default 8087)")
     ap.add_argument("--group", default=DEFAULT_GROUP, help=f"TAK multicast group (default {DEFAULT_GROUP})")
     ap.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"CoT UDP port (default {DEFAULT_PORT})")
     ap.add_argument("--ttl", type=int, default=3, help="multicast TTL: 1 = same subnet only (default 3)")
     ap.add_argument("--unicast", action="append", default=[], metavar="HOST:PORT",
                     help="also send unicast to HOST:PORT (repeatable); e.g. a FOG server relay")
+    add_origin_argument(ap)
     args = ap.parse_args()
 
     targets = [(args.group, args.port)]
@@ -77,8 +86,9 @@ async def main() -> None:
     async def handler(ws):
         await handle_client(ws, udp, targets)
 
-    async with serve(handler, "0.0.0.0", args.ws_port):
-        print(f"[tak_bridge] WebSocket on :{args.ws_port} -> CoT UDP -> {mode} (ttl {args.ttl})")
+    check = make_origin_check(args.allow_origin, lambda line: print(f"[tak_bridge] {line}"))
+    async with serve(handler, args.ws_host, args.ws_port, process_request=check):
+        print(f"[tak_bridge] WebSocket on {args.ws_host}:{args.ws_port} -> CoT UDP -> {mode} (ttl {args.ttl})")
         await asyncio.Future()
 
 
