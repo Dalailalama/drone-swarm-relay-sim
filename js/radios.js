@@ -11,7 +11,7 @@ const RADIOS = [
     name: 'Holybro SiK V3 telemetry',
     freqMHz: 915,
     txDbm: 20,            // 100 mW
-    sensDbm: -117,        // at 64 kbps air rate
+    sensDbm: -105,        // at 64 kbps air rate (Holybro V3 spec)
     antGainDbi: 2,        // stock duck antenna, each end
     airRateKbps: 64,
     rangeLosM: 300,       // Holybro spec: ~300 m with stock antennas

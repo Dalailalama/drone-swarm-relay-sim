@@ -7,7 +7,7 @@ calibration anchor for the path-loss model.
 
 | Preset | Freq | TX | RX sens | Air rate | Rated LOS | Source |
 |---|---|---|---|---|---|---|
-| Holybro SiK V3 telemetry | 915 MHz | 20 dBm | −117 dBm | 64 kbps | 300 m | [Holybro docs](https://docs.holybro.com/telemetry-radio/sik-telemetry-radio) |
+| Holybro SiK V3 telemetry | 915 MHz | 20 dBm | −105 dBm | 64 kbps | 300 m | [Holybro docs](https://docs.holybro.com/telemetry-radio/sik-telemetry-radio) |
 | RFD900x long range | 915 MHz | 30 dBm | −105 dBm | 224 kbps | 40 km | [RFDesign](https://rfdesign.com.au/products/rfd900x-modem/) |
 | ESP32 ESP-NOW | 2.4 GHz | 20 dBm | −98 dBm | 1 Mbps | 300 m | [Espressif](https://www.espressif.com/en/solutions/low-power-solutions/esp-now) |
 | ExpressLRS 2.4 GHz (100 mW) | 2.4 GHz | 20 dBm | −108 dBm | ~5 kbps telemetry | 10 km | [ExpressLRS docs](https://www.expresslrs.org/info/signal-health/) |
@@ -16,7 +16,8 @@ calibration anchor for the path-loss model.
 
 Notes and judgment calls:
 
-- **SiK V3**: sensitivity −117 dBm is at the 64 kbps air rate. Rated range
+- **SiK V3**: sensitivity −105 dBm is Holybro's figure at the default 64 kbps
+  air rate (−121 dBm is only reached at 2 kbps). Rated range
   is with the stock duck antennas; the community routinely gets several km
   with better antennas — model that by editing `rangeLosM`.
 - **RFD900x**: air rate is configurable 12–224 kbps; sensitivity varies with
