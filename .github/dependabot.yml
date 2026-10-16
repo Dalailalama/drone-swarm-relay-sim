@@ -1,0 +1,7 @@
+version: 2
+updates:
+  # Zero runtime dependencies: the only pinned versions are CI actions.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
