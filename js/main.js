@@ -762,7 +762,8 @@
       resetSwarm(rebuild && rebuild.target ? { base: rebuild.base, target: rebuild.target } : undefined);
       forcedSeed = null;
       syncTakOrigin();
-      logEvent(swarm, 'Real area loaded: ' + escHtml(area.name) + ' — ' + area.buildings.length + ' buildings', 'info');
+      // Raw text: the event log escapes on render (escaping here doubled it).
+      logEvent(swarm, 'Real area loaded: ' + area.name + ' — ' + area.buildings.length + ' buildings', 'info');
       return true;
     } catch (e) {
       if (token !== osmLoadToken) return false;
