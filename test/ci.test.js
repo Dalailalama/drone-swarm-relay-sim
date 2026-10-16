@@ -68,6 +68,24 @@ test('CI keeps acceptance diagnostics on failure and runs with a read-only token
   assert.match(up[1], /acceptance-logs/);
 });
 
+// missing-citation-changelog: no CITATION.cff ("Cite this repository"),
+// changelog or security policy.
+test('CITATION.cff, CHANGELOG.md and SECURITY.md exist and agree', () => {
+  const cff = fs.readFileSync(path.join(ROOT, 'CITATION.cff'), 'utf8');
+  for (const key of ['cff-version', 'message', 'title', 'authors', 'license', 'repository-code']) {
+    assert.match(cff, new RegExp('^' + key + ':', 'm'), 'CITATION.cff needs ' + key);
+  }
+  assert.match(cff, /^license: MIT$/m);
+  assert.match(fs.readFileSync(path.join(ROOT, 'LICENSE'), 'utf8'), /^MIT License/);
+  const log = fs.readFileSync(path.join(ROOT, 'CHANGELOG.md'), 'utf8');
+  const latest = (log.match(/^## \[?([^\]\s]+)/m) || [])[1];
+  assert.ok(latest, 'CHANGELOG.md has a release heading');
+  const ver = (cff.match(/^version:\s*"?([^"\s]+)/m) || [])[1];
+  if (ver) assert.strictEqual(ver, latest.replace(/^v/, ''), 'CITATION.cff version matches the latest CHANGELOG heading');
+  else assert.strictEqual(latest, 'Unreleased', 'an untagged CITATION.cff goes with an Unreleased changelog head');
+  assert.ok(fs.existsSync(path.join(ROOT, 'SECURITY.md')));
+});
+
 // gitignore-out-dir: tools/batch.js writes its reports to ./out by default
 // (repo root, per the README's command); local venvs for the sitl/ Python
 // dependencies were not ignored either.
