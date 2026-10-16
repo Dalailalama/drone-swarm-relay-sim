@@ -3,6 +3,8 @@
 // air rate) silently shifts every calibrated range in the sim.
 const { test } = require('node:test');
 const assert = require('node:assert');
+const fs = require('node:fs');
+const path = require('node:path');
 const R = require('../js/radios.js');
 
 const byId = id => R.RADIOS.find(r => r.id === id);
@@ -25,4 +27,20 @@ test('MANET presets use the vendor datasheet sensitivity / TX figures', () => {
   assert.strictEqual(byId('silvus-sc4400').sensDbm, -102);
   // Rajant ES1 spec sheet: "Max. RF Transmit Power 29 dBm ± 2 dB".
   assert.strictEqual(byId('rajant-es1').txDbm, 29);
+});
+
+test('RADIOS.md documents every preset, with its source', () => {
+  const md = fs.readFileSync(path.join(__dirname, '..', 'RADIOS.md'), 'utf8');
+  for (const r of R.RADIOS) {
+    const row = md.split('\n').find(l => l.startsWith('| ' + r.name + ' |'));
+    assert.ok(row, r.id + ' has no row in the RADIOS.md table');
+    assert.ok(row.includes(r.source), r.id + ' row must cite ' + r.source);
+  }
+  // hopGainDb has no vendor figure: each value must be listed and labelled.
+  const hop = md.slice(md.indexOf('`hopGainDb`'));
+  assert.ok(md.includes('`hopGainDb`') && /modelling estimate/.test(hop));
+  for (const r of R.RADIOS.filter(x => x.hopGainDb)) {
+    const line = hop.split('\n').find(l => l.includes('**' + r.name + '**'));
+    assert.ok(line && line.includes(r.hopGainDb + ' dB (estimate)'), r.id + ' hopGainDb not documented');
+  }
 });
