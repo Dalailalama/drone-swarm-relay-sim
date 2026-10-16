@@ -141,3 +141,48 @@ test('zoomCamera3D clamps dist to [200, 400000]', () => {
   V.zoomCamera3D(cam, 1e9);
   assert.ok(Math.abs(cam.dist - 400000) < 1e-9, 'dist should clamp to max: ' + cam.dist);
 });
+
+// Audit ui-render/project3d-recomputes-basis: the camera basis (4 trig calls,
+// 2 normalisations, 2 cross products) was rebuilt for EVERY projected vertex,
+// ~34k times per scene rebuild. It must be built once per frame, and the
+// hoisted projector must give exactly what project3D gives.
+test('makeProjector matches project3D bit-for-bit, including culled points', () => {
+  const cams = [V.makeCamera3D(STUB_SWARM), { yaw: 0.7, pitch: 1.2, dist: 900, cx: -300, cy: 450 },
+    { yaw: -3.1, pitch: 0.12, dist: 5000, cx: 2000, cy: -800 }];
+  let seed = 7;
+  const rnd = () => ((seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648);
+  let culled = 0;
+  for (const cam of cams) {
+    const proj = V.makeProjector(cam, 1024, 700);
+    for (let i = 0; i < 400; i++) {
+      const x = (rnd() - 0.5) * 12000, y = (rnd() - 0.5) * 12000, z = rnd() * 600;
+      const a = proj(x, y, z), b = V.project3D(cam, 1024, 700, x, y, z);
+      assert.deepStrictEqual(a, b);
+      if (!b) culled++;
+    }
+  }
+  assert.ok(culled > 0, 'the sample must include behind-camera points');
+});
+
+test('a full 3D scene rebuild builds the camera basis once, not per vertex', () => {
+  const { ctx, document } = loadUI({ scripts: ['js/terrain.js', 'js/view3d.js'] });
+  const s = {
+    base: { x: 0, y: 0 }, target: { x: 1000, y: 0 }, altitudeM: 70, drones: [],
+    terrain: { seed: 42, groundAmpM: 100, groundScaleM: 800,
+      buildings: [{ x: 300, y: 0, w: 70, d: 90, heightM: 90 }] },
+  };
+  const cv = document.createElement('canvas');
+  cv.width = 800; cv.height = 600;
+  const cam = ctx.makeCamera3D(s);
+  // The basis is the only cross product taken against world-up (0,0,1);
+  // terrain normals cross two ground edges.
+  const realCross = ctx.v3cross;
+  let bases = 0;
+  ctx.v3cross = (a, b) => {
+    if (b.x === 0 && b.y === 0 && b.z === 1) bases++;
+    return realCross(a, b);
+  };
+  ctx.renderView3D(cv.getContext('2d'), cv, s, { hops: [] }, cam, null);
+  assert.ok(vm.runInContext('view3dScene.items.length', ctx) > 1000, 'the rebuild projected the full ground mesh');
+  assert.ok(bases <= 2, 'camera basis built ' + bases + ' times in one frame');
+});
