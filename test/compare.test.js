@@ -92,3 +92,15 @@ test('compare energy keeps what was burned before a battery swap reset the pack 
   assert.ok(swapped);
   assert.ok(r.meanWhConsumed >= 0.99 * burnedBeforeSwap / sc.count, `${r.meanWhConsumed} vs ${burnedBeforeSwap / sc.count}`);
 });
+
+test('compare arrival statistics say how many seeds arrived, so 1-of-5 cannot read as faster than 5-of-5', () => {
+  const { calcStats, renderMarkdownDashboard, renderTextDashboard } = require('../tools/compare.js');
+  const row = (title, arr) => ({ title, uptime: calcStats([50, 50]), arrival: calcStats(arr), droppedPct: calcStats([1, 1]), energyWh: calcStats([2, 2]) });
+  const results = [row('A', [148, 150, 152, 149, 151]), row('B', [100, null, null, null, null])];
+  const md = renderMarkdownDashboard(results, [1, 2, 3, 4, 5], 300);
+  const txt = renderTextDashboard(results, [1, 2, 3, 4, 5], 300);
+  for (const out of [md, txt]) {
+    assert.ok(out.includes('1/5'), out);
+    assert.ok(out.includes('5/5'), out);
+  }
+});

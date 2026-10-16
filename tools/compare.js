@@ -15,13 +15,20 @@ const { SIM_DT_SEC } = require('../js/swarm.js');
 
 function calcStats(vals) {
   const valid = vals.filter(v => v !== null && v !== undefined && isFinite(v));
-  if (!valid.length) return { mean: 0, sd: 0, variance: 0, min: null, max: null, count: 0 };
+  const total = vals.length; // count/total keeps survivorship visible (arrivals)
+  if (!valid.length) return { mean: 0, sd: 0, variance: 0, min: null, max: null, count: 0, total };
   const mean = valid.reduce((sum, v) => sum + v, 0) / valid.length;
   const variance = valid.reduce((acc, v) => acc + Math.pow(v - mean, 2), 0) / valid.length;
   const sd = Math.sqrt(variance);
   const min = Math.min(...valid);
   const max = Math.max(...valid);
-  return { mean, sd, variance, min, max, count: valid.length };
+  return { mean, sd, variance, min, max, count: valid.length, total };
+}
+
+// Arrival time only exists for seeds that arrived: always say how many did,
+// or a 1-of-5 success reads faster and more certain than 5-of-5.
+function arrivedOf(st) {
+  return `${st.count}/${st.total} arrived`;
 }
 
 function resolveScenario(spec) {
@@ -211,8 +218,8 @@ function compareScenarios(scenarioSpecs, options = {}) {
 function renderMarkdownDashboard(results, seeds, durationSec) {
   const rows = results.map(r => {
     const arrivalStr = r.arrival.count > 0
-      ? `${r.arrival.mean.toFixed(1)} s (±${r.arrival.sd.toFixed(1)})`
-      : 'N/A (unreached)';
+      ? `${r.arrival.mean.toFixed(1)} s (±${r.arrival.sd.toFixed(1)}), ${arrivedOf(r.arrival)}`
+      : `N/A (${arrivedOf(r.arrival)})`;
     return `| **${r.title}** | ${r.uptime.mean.toFixed(1)}% (±${r.uptime.sd.toFixed(1)}%) | ${arrivalStr} | ${r.droppedPct.mean.toFixed(1)}% (±${r.droppedPct.sd.toFixed(1)}%) | ${r.energyWh.mean.toFixed(2)} Wh (±${r.energyWh.sd.toFixed(2)}) |`;
   });
 
@@ -227,7 +234,7 @@ function renderMarkdownDashboard(results, seeds, durationSec) {
     '',
     '### Metric Definitions',
     '- **Uptime**: % of mission time fleet maintains active C2 connectivity to ground station.',
-    '- **Arrival Time**: Seconds from takeoff until the first tactical drone arrives within objective perimeter (200m).',
+    '- **Arrival Time**: Seconds from takeoff until the first tactical drone arrives within objective perimeter (200m), over the seeds that arrived; k/N says how many did.',
     '- **Packet Loss**: Total link and routing drops as a percentage of total transmitted packets.',
     '- **Energy Consumed**: Mean per-drone battery consumption in Watt-hours over the mission.',
     '- **Variance (SD)**: Standard deviation across the identical seed Monte Carlo iterations.',
@@ -245,7 +252,8 @@ function renderTextDashboard(results, seeds, durationSec) {
   for (const r of results) {
     const name = r.title.length > 30 ? r.title.slice(0, 27) + '…' : r.title;
     const uptime = `${r.uptime.mean.toFixed(1)}% (±${r.uptime.sd.toFixed(1)})`;
-    const arrival = r.arrival.count > 0 ? `${r.arrival.mean.toFixed(1)}s (±${r.arrival.sd.toFixed(1)})` : 'N/A';
+    const arrived = `${r.arrival.count}/${r.arrival.total}`;
+    const arrival = r.arrival.count > 0 ? `${r.arrival.mean.toFixed(1)}s (±${r.arrival.sd.toFixed(1)}) ${arrived}` : `N/A ${arrived}`;
     const loss = `${r.droppedPct.mean.toFixed(1)}% (±${r.droppedPct.sd.toFixed(1)})`;
     const energy = `${r.energyWh.mean.toFixed(1)}Wh (±${r.energyWh.sd.toFixed(1)})`;
     lines.push(`${name.padEnd(32)} ${uptime.padEnd(16)} ${arrival.padEnd(18)} ${loss.padEnd(16)} ${energy.padEnd(16)}`);
