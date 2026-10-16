@@ -442,7 +442,7 @@
       if (sc.osm.radiusM) { osmRadiusRange.value = sc.osm.radiusM; osmRadiusOut.textContent = fmtDist(sc.osm.radiusM); }
     }
     updateOsmRow();
-    updateSpecCard(); updateAirframeInfo(); applySpacing();
+    updateSpecCard(); updateAirframeInfo(); updateHeteroRow(); applySpacing();
     forcedSeed = sc.seed != null ? sc.seed : null; // exact same map if the file has a seed
     resetSwarm({ base: sc.base, target: sc.target });
     forcedSeed = null;
@@ -513,6 +513,7 @@
     radio = RADIOS.find(r => r.id === radioSel.value);
     swarm.radio = radio;
     updateSpecCard();
+    updateHeteroRow(); // the band warning compares the wing radio to this one
     applyAgility();
     resetSwarm();
   });
@@ -521,6 +522,7 @@
     swarm.envFactor = env.factor;
     swarm.shadowSigmaDb = env.shadowSigmaDb;
     updateSpecCard();
+    updateHeteroRow();
     logEvent(swarm, 'Environment: ' + env.name + ' — usable range now ' + fmtDist(usable()), 'warn');
   });
   countRange.addEventListener('input', () => {
@@ -537,6 +539,7 @@
   airframeSel.addEventListener('change', () => {
     airframe = AIRFRAMES.find(a => a.id === airframeSel.value);
     updateAirframeInfo();
+    updateHeteroRow();
     resetSwarm();
   });
 
