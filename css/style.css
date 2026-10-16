@@ -306,3 +306,12 @@ td.dim { color: var(--dim); }
   .fleet-row { padding: 8px 6px; }
   td, th { padding-top: 7px; padding-bottom: 7px; }
 }
+
+/* Short landscape phones: stacking leaves no room for the panel
+   (map min-height 300px + header ~48px >= viewport height), so go back to
+   side-by-side with a narrower panel. */
+@media (max-width: 820px) and (max-height: 500px) and (orientation: landscape) {
+  main { flex-direction: row; }
+  #mapWrap { flex: 1; height: auto; min-height: 0; }
+  aside { width: min(45%, 330px); flex: none; border-top: none; border-left: 1px solid var(--line); }
+}
