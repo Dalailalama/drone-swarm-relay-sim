@@ -152,8 +152,15 @@ function err(msg, code) {
 function createApp(opts) {
   const stats = { active: 0, peak: 0, timedOut: 0, terminated: 0 };
   const pool = makePool(opts || {}, stats);
+  const allowedOrigins = (opts && opts.allowedOrigins) || [];
   const app = http.createServer(async (req, res) => {
     try {
+      // No auth here: a browser page on any site could otherwise POST
+      // text/plain without a preflight and burn the workers (CSRF).
+      // Browsers always send Origin cross-origin; curl and the CLI do not.
+      if (req.headers.origin && !allowedOrigins.includes(req.headers.origin)) {
+        return send(res, 403, JSON.stringify({ error: 'cross-origin requests are not allowed' }));
+      }
       if (req.method === 'GET' && req.url === '/api/health') {
         return send(res, 200, JSON.stringify({ ok: true, limits: LIMITS }));
       }
@@ -210,14 +217,23 @@ function createApp(opts) {
   return app;
 }
 
-module.exports = { createApp };
+// Loopback by default: there is no auth, so exposing the API beyond this
+// machine needs --host plus a reverse proxy that authenticates.
+const DEFAULT_HOST = '127.0.0.1';
+
+module.exports = { createApp, DEFAULT_HOST };
 
 // --- CLI ----------------------------------------------------------------------
 if (require.main === module) {
-  const port = (() => {
-    const i = process.argv.indexOf('--port');
-    return i >= 0 && process.argv[i + 1] ? +process.argv[i + 1] : 8090;
-  })();
-  createApp().listen(port, () => console.log('[batch-api] listening on http://localhost:' + port +
-    '  (POST /api/batch, GET /api/schema)'));
+  const arg = (name, dflt) => {
+    const i = process.argv.indexOf(name);
+    return i >= 0 && process.argv[i + 1] ? process.argv[i + 1] : dflt;
+  };
+  const port = +arg('--port', 8090);
+  const host = arg('--host', DEFAULT_HOST);
+  const app = createApp();
+  app.listen(port, host, () => {
+    const a = app.address();
+    console.log('[batch-api] listening on ' + a.address + ':' + a.port + '  (POST /api/batch, GET /api/schema)');
+  });
 }

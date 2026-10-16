@@ -165,6 +165,27 @@ function post(port, body, opts) {
   });
 }
 
+test('audit: a cross-origin browser POST is refused with 403; the CLI binds loopback by default', async () => {
+  const { DEFAULT_HOST } = require('../tools/server.js');
+  assert.strictEqual(DEFAULT_HOST, '127.0.0.1');
+  const app = createApp({ workers: 1, queue: 1, timeoutMs: 60000 });
+  await new Promise(r => app.listen(0, '127.0.0.1', r));
+  const port = app.address().port;
+  const send = headers => new Promise((resolve, reject) => {
+    const req = http.request({ port, host: '127.0.0.1', path: '/api/batch', method: 'POST', headers }, res => {
+      res.resume(); res.on('end', () => resolve(res.statusCode));
+    });
+    req.on('error', reject);
+    req.end(JSON.stringify(GOOD));
+  });
+  try {
+    assert.strictEqual(await send({ 'Content-Type': 'text/plain', Origin: 'http://evil.example' }), 403);
+    assert.strictEqual(await send({ 'Content-Type': 'text/plain' }), 200);
+  } finally {
+    app.close();
+  }
+});
+
 test('regression #14: the server queues bounded work and rejects overflow with 429', async () => {
   const app = createApp({ workers: 1, queue: 1, timeoutMs: 60000 });
   await new Promise(r => app.listen(0, r));
