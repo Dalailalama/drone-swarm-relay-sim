@@ -915,6 +915,14 @@ function interferencePenaltyDb(s, aPos, aAlt, bPos, bAlt, ra, rb) {
     isNaN(fb) ? -Infinity : fb - rB.sensDbm);
 }
 
+// The same penalty for one receiver: its floor against its own sensitivity.
+function endPenaltyDb(s, pos, alt, radio) {
+  if (!s.jammers || !s.jammers.length) return 0;
+  const r = radio || s.radio;
+  const f = interferenceFloorDbm(s, pos, alt, r);
+  return Math.max(0, isNaN(f) ? -Infinity : f - r.sensDbm);
+}
+
 // Is a position inside a denial zone — i.e. would a relay's receiver there be
 // jammed below usable? C2 uses this in path planning to route the chain AROUND
 // interference (a relay placed inside the red zone has a jammed receiver and
@@ -996,9 +1004,18 @@ function liveMarginDb(s, aId, bId) {
   const slant = Math.hypot(ground, altA - altB);
   // LPI/LPD waveform: pay a fixed link-budget cost for the spread spectrum.
   const lpiCost = s.lpiMode ? AGILITY.lpiCostDb : 0;
-  const res = mixedLinkMarginDb(ra, rb, s.envFactor, slant) + fadeDb(s, aId, bId)
-    - lpiCost
-    - interferencePenaltyDb(s, a, altA, b, altB, ra, rb);
+  // Always read the fade: it registers the entry stepFades advances with the
+  // seeded RNG, so skipping it would shift the stream.
+  const fade = fadeDb(s, aId, bId);
+  // Each receiver's interference degrades only the direction it hears.
+  let res;
+  if (!bandCompatible(ra, rb)) res = -Infinity;
+  else {
+    const pa = endPenaltyDb(s, a, altA, ra), pb = endPenaltyDb(s, b, altB, rb);
+    res = Math.min(
+      rssiDirectionalDb(ra, rb, s.envFactor, slant) - rb.sensDbm + fade - lpiCost - pb,
+      rssiDirectionalDb(rb, ra, s.envFactor, slant) - ra.sensDbm + fade - lpiCost - pa);
+  }
   if (s && s._marginCache) s._marginCache.set(cacheKey, res);
   return res;
 }
