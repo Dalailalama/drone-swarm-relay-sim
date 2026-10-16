@@ -96,6 +96,12 @@
     for (const k of ['freqMHz', 'txDbm', 'sensDbm', 'airRateKbps', 'rangeLosM']) {
       if (p[k] == null) return null; // unusable by the link-budget math
     }
+    if (p.nFit == null) {
+      // In-bounds fields can still imply an exponent <= 0 (signal rising with
+      // distance) or ~20: hold the derived one to the same bounds as nFit.
+      const n = pathLossExponent(p);
+      if (!(n >= PRESET_NUM_FIELDS.nFit[0] && n <= PRESET_NUM_FIELDS.nFit[1])) return null;
+    }
     return p;
   }
 

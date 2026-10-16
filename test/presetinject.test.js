@@ -70,6 +70,30 @@ test('regression #7: non-numeric preset fields never reach the physics', () => {
   }
 });
 
+test('a preset whose fields imply a non-physical path-loss exponent is rejected (audit)', () => {
+  const bad = [
+    { freqMHz: 5800, txDbm: -20, sensDbm: -50, antGainDbi: 0, rangeLosM: 100 },   // n < 0
+    { freqMHz: 24000, txDbm: 10, sensDbm: -50, antGainDbi: 0, rangeLosM: 1000 },  // n ~ 0
+    { freqMHz: 915, txDbm: 30, sensDbm: -140, antGainDbi: 30, rangeLosM: 10 },    // n ~ 20
+  ];
+  bad.forEach((f, i) => {
+    const ui = loadUI();
+    const id = 'bad-n-' + i;
+    loadScenario(ui, Object.assign({}, BASE, {
+      radio: id,
+      radioPreset: Object.assign({ id, name: 'Bad ' + i, note: 'n', airRateKbps: 64 }, f),
+    }));
+    assert.ok(!radiosOf(ui).some(r => r.id === id), 'preset ' + id + ' with n=' +
+      ui.ctx.pathLossExponent(Object.assign({ antGainDbi: 0 }, f)).toFixed(3) + ' must be rejected');
+  });
+  // Every stock radio still imports under a fresh id.
+  const ui = loadUI();
+  for (const r of radiosOf(ui).slice()) {
+    loadScenario(ui, Object.assign({}, BASE, { radio: r.id + '-x', radioPreset: Object.assign({}, r, { id: r.id + '-x' }) }));
+    assert.strictEqual(ui.ctx.sim.radio.id, r.id + '-x', 'stock ' + r.id + ' must still import');
+  }
+});
+
 test('a well-formed calibrated preset still registers and selects (guard)', () => {
   const ui = loadUI();
   loadScenario(ui, Object.assign({}, BASE, {
