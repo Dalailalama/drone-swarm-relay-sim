@@ -84,6 +84,7 @@
     p.note = String(raw.note || '').slice(0, 400);
     if (raw.source != null) p.source = String(raw.source).slice(0, 200);
     if (raw.band != null) p.band = String(raw.band).slice(0, 16);
+    if (raw.air != null) p.air = String(raw.air).slice(0, 32);
     if (raw.calibrated != null) p.calibrated = !!raw.calibrated;
     for (const k of Object.keys(PRESET_NUM_FIELDS)) {
       if (raw[k] == null) continue;
@@ -558,7 +559,7 @@
       heteroInfo.innerHTML =
         '<b>Relay wing:</b> ' + escHtml(waf.name) + ' (~' + Math.round(hoverEnduranceMin(waf)) +
         ' min hover) on <b>' + escHtml(wr.name) + '</b> — usable ' + fmtDist(usableRangeM(wr, env.factor)) +
-        (bandOk ? '' : ' <b style="color:var(--lost)">· different band from the tactical radio: the wing can bridge C2↔wing and wing↔wing, but tactical drones only link to their own kind</b>') +
+        (bandOk ? '' : ' <b style="color:var(--lost)">· different radio protocol/band from the tactical radio: the wing can bridge C2↔wing and wing↔wing, but tactical drones only link to their own kind</b>') +
         '.<br><b>Tactical:</b> ' + escHtml(airframe.name) + ' on ' + escHtml(radio.name) + ' — usable ' + fmtDist(usableRangeM(radio, env.factor)) + '.';
     }
   }

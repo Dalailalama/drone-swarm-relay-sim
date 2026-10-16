@@ -133,6 +133,7 @@ function calibratePreset(fit, basePreset) {
     id: basePreset.id + '-calibrated',
     name: basePreset.name + ' (field-calibrated)',
     freqMHz: basePreset.freqMHz,
+    air: basePreset.air,
     txDbm: basePreset.txDbm,
     sensDbm: basePreset.sensDbm,
     antGainDbi: basePreset.antGainDbi,

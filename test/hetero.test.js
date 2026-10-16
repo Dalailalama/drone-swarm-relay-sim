@@ -38,6 +38,22 @@ test('radios in different bands cannot link at all', () => {
   assert.strictEqual(F.bandCompatible(SIK, RFD), true, '915 vs 915 MHz is fine');
 });
 
+test('radios link only when they share an air protocol, not merely a nearby frequency (audit)', () => {
+  const LORA = R.RADIOS.find(r => r.id === 'lora868');
+  const ELRS = R.RADIOS.find(r => r.id === 'elrs24');
+  const DOODLE = R.RADIOS.find(r => r.id === 'doodle-rm');
+  const XBEE = R.RADIOS.find(r => r.id === 'xbee900');
+  assert.strictEqual(F.mixedLinkMarginDb(SIK, LORA, 1, 200), -Infinity, 'SiK GFSK cannot demodulate LoRa CSS');
+  assert.strictEqual(F.bandCompatible(ESP, DOODLE), false);
+  assert.strictEqual(F.bandCompatible(ESP, ELRS), false);
+  assert.strictEqual(F.bandCompatible(LORA, XBEE), false);
+  assert.strictEqual(F.bandCompatible(SIK, RFD), true, 'RFD900x speaks the SiK protocol');
+  assert.ok(F.mixedLinkMarginDb(SIK, RFD, 1, 20) > 0);
+  // An un-keyed custom preset still links to copies of itself.
+  const custom = { id: 'my-radio', freqMHz: 433, txDbm: 20, sensDbm: -110, antGainDbi: 2, airRateKbps: 10, rangeLosM: 2000 };
+  assert.strictEqual(F.bandCompatible(custom, Object.assign({}, custom)), true);
+});
+
 test('relay-wing class assignment spreads evenly and stays deterministic', () => {
   const a = F.relayClassIndices(10, 4);
   const b = F.relayClassIndices(10, 4);

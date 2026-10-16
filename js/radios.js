@@ -10,6 +10,7 @@ const RADIOS = [
     id: 'sik-v3',
     name: 'Holybro SiK V3 telemetry',
     freqMHz: 915,
+    air: 'sik',        // air protocol: only radios that share it can link
     txDbm: 20,            // 100 mW
     sensDbm: -117,        // at 64 kbps air rate
     antGainDbi: 2,        // stock duck antenna, each end
@@ -22,6 +23,7 @@ const RADIOS = [
     id: 'rfd900x',
     name: 'RFD900x long range',
     freqMHz: 915,
+    air: 'sik',
     txDbm: 30,            // 1 W
     sensDbm: -105,
     antGainDbi: 2,        // dipoles
@@ -34,6 +36,7 @@ const RADIOS = [
     id: 'espnow',
     name: 'ESP32 ESP-NOW (2.4 GHz)',
     freqMHz: 2400,
+    air: 'esp-now',
     txDbm: 20,
     sensDbm: -98,         // at 1 Mbps
     antGainDbi: 2,
@@ -46,6 +49,7 @@ const RADIOS = [
     id: 'elrs24',
     name: 'ExpressLRS 2.4 GHz (100 mW)',
     freqMHz: 2400,
+    air: 'elrs',
     txDbm: 20,
     sensDbm: -108,        // SX1280 LoRa mode, 150 Hz packet rate
     antGainDbi: 2,
@@ -59,6 +63,7 @@ const RADIOS = [
     id: 'lora868',
     name: 'LoRa SX1276 (EU868, SF10)',
     freqMHz: 869,
+    air: 'lora-css',
     txDbm: 20,
     sensDbm: -132,        // SF10 / BW125
     antGainDbi: 2,
@@ -76,6 +81,7 @@ const RADIOS = [
     id: 'xbee900',
     name: 'XBee-PRO 900HP',
     freqMHz: 900,
+    air: 'digimesh',
     txDbm: 24,            // 250 mW
     sensDbm: -101,        // at 200 kbps
     antGainDbi: 2.1,
@@ -91,6 +97,7 @@ const RADIOS = [
     id: 'silvus-sc4400',
     name: 'Silvus StreamCaster 4400E (MN-MIMO)',
     freqMHz: 2200,
+    air: 'silvus-mn-mimo',
     txDbm: 33,            // up to 2 W per channel
     sensDbm: -98,
     antGainDbi: 3,
@@ -104,6 +111,7 @@ const RADIOS = [
     id: 'doodle-rm',
     name: 'Doodle Labs Mesh Rider (2.4 GHz)',
     freqMHz: 2450,
+    air: 'doodle-meshrider',
     txDbm: 30,            // 1 W
     sensDbm: -101,
     antGainDbi: 3,
@@ -117,6 +125,7 @@ const RADIOS = [
     id: 'rajant-es1',
     name: 'Rajant Kinetic Mesh (ES1)',
     freqMHz: 2400,
+    air: 'rajant-kinetic',
     txDbm: 27,
     sensDbm: -96,
     antGainDbi: 3,
