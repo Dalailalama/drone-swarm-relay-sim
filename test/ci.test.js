@@ -42,3 +42,15 @@ test('Node matrix covers the supported LTS lines and actions are on node24 major
   assert.ok(!/actions\/setup-python@v[1-5]\b/.test(CI), 'setup-python@v5 and older declare node20');
   assert.ok(fs.existsSync(path.join(ROOT, '.github/dependabot.yml')), 'dependabot keeps action majors current');
 });
+
+// test-count-and-entrypoint: bare `node --test` matches **/test/**/*.js, so
+// test/helpers/*.js ran as test files and inflated the count by two; there
+// was no `npm test` and no declared Node floor.
+test('npm test runs exactly the *.test.js files, and CI uses it', () => {
+  const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
+  assert.strictEqual(pkg.private, true);
+  assert.ok(!pkg.dependencies && !pkg.devDependencies, 'zero dependencies');
+  assert.match(pkg.scripts.test, /node --test "test\/\*\.test\.js"/);
+  assert.match(pkg.engines.node, />=\s*22/);
+  assert.match(job('test-javascript'), /run: npm test/);
+});

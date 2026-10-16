@@ -48,7 +48,7 @@ jobs:
           node-version: ${{ matrix.node-version }}
 
       - name: Run JavaScript tests
-        run: node --test
+        run: npm test
 
   test-python:
     name: Python SITL Bridge & Mock Test Suites

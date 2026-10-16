@@ -1,0 +1,13 @@
+{
+  "name": "drone-swarm-relay-sim",
+  "private": true,
+  "description": "Zero-dependency browser drone-swarm relay-mesh simulator. No build step; this file only names the test and bench commands and the Node floor.",
+  "license": "MIT",
+  "scripts": {
+    "test": "node --test \"test/*.test.js\"",
+    "bench": "node bench/run.js"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
