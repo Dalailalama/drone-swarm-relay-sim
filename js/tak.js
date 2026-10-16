@@ -160,9 +160,10 @@ function parseCoTFile(text) {
   const evRe = /<event\b[^>]*>/g;
   // Quotes match their OPENING delimiter via backreference (finding #27):
   // the old ["']...["'] class let either quote end either style, truncating
-  // callsign="O'Brien" to "O". The opposite quote inside is data.
+  // callsign="O'Brien" to "O". The opposite quote inside is data. The name
+  // must start after whitespace, or parent_callsign= would match callsign=.
   const attrRaw = (str, name) => {
-    const m = str.match(new RegExp(name + '=(["\'])([\\s\\S]*?)\\1'));
+    const m = str.match(new RegExp('(?:^|\\s)' + name + '=(["\'])([\\s\\S]*?)\\1'));
     return m ? m[2] : null;
   };
   const attr = (tag, name) => {
@@ -183,12 +184,14 @@ function parseCoTFile(text) {
     const lon = parseFloat(attrRaw(pm[0], 'lon'));
     const hae = parseFloat(attrRaw(pm[0], 'hae'));
     if (!isFinite(lat) || !isFinite(lon)) continue;
-    const cs = attrRaw(scope, 'callsign');
+    // The mark's own name is on <contact>, not <link parent_callsign=...>.
+    const cm = scope.match(/<contact\b[^>]*>/);
+    const cs = cm ? attrRaw(cm[0], 'callsign') : null;
     marks.push({
       uid: uid || 'cot-' + marks.length,
       cotType: type,
       lat, lon,
-      hae: isFinite(hae) ? hae : null,
+      hae: isFinite(hae) && hae < 9999999 ? hae : null, // 9999999: TAK unknown
       callsign: cs != null ? unesc(cs) : uid || 'marker'
     });
   }
