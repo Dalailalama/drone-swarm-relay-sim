@@ -42,45 +42,84 @@ function resolveScenario(spec) {
   throw new Error(`Unknown scenario: ${spec}`);
 }
 
+// A scenario file must run exactly as written or not at all: an unknown radio,
+// airframe or environment silently replaced by a default is a different
+// experiment, which is worse than an error.
+function lookup(list, id, what) {
+  const hit = list.find(x => x.id === id);
+  if (!hit) throw new Error(`unknown ${what}: ${id}`);
+  return hit;
+}
+
+// Saved calibrated presets travel with the scenario (radioPreset /
+// relayRadioPreset); use them when the id matches, else a built-in radio.
+function resolveRadio(id, preset, what) {
+  if (preset && typeof preset === 'object' && preset.id === id) {
+    for (const k of ['freqMHz', 'txDbm', 'sensDbm', 'airRateKbps', 'rangeLosM']) {
+      if (!isFinite(preset[k])) throw new Error(`${what} preset ${id} lacks a finite ${k}`);
+    }
+    return { ...preset };
+  }
+  return lookup(R.RADIOS, id, what);
+}
+
+const posOf = (p, dx, dy) => (p ? { x: p.x, y: p.y } : { x: dx, y: dy });
+
+// Same geometry the page builds (main.js applyScenario): the city follows the
+// real base->target corridor and a density of 0 really is 0.
+function buildCompareTerrain(ctx, sc, seed) {
+  if (sc.terrain === 'osm') throw new Error('terrain osm needs the network; compare cannot run it offline');
+  const b = posOf(sc.base, 0, 0), t = posOf(sc.target, 2000, -500);
+  return ctx.makeTerrain(sc.terrain || 'flat', {
+    distM: Math.hypot(t.x - b.x, t.y - b.y),
+    altM: sc.altitudeM ?? 70,
+    baseX: b.x, baseY: b.y, targetX: t.x, targetY: t.y,
+    seed,
+    density: (sc.cityDensity ?? 40) / 100,
+    heightScale: (sc.cityHeight ?? 40) / 100,
+  });
+}
+
 function runScenarioSeed(ctx, scenarioObj, seed, durationSec) {
   const sc = scenarioObj.scenario;
-  const radio = R.RADIOS.find(r => r.id === sc.radio) || R.RADIOS[0];
-  const envMap = { open: [1.0, 2.5], suburban: [0.45, 4.5], urban: [0.2, 6.5] };
-  const [envFactor, shadowSigmaDb] = envMap[sc.env] || [1.0, 0];
+  const radio = resolveRadio(sc.radio || R.RADIOS[0].id, sc.radioPreset, 'radio');
+  const env = lookup(R.ENVIRONMENTS, sc.env || R.ENVIRONMENTS[0].id, 'env');
+  const airframe = lookup(A.AIRFRAMES, sc.airframe || A.AIRFRAMES[0].id, 'airframe');
+  const relayAirframe = sc.relayAirframe ? lookup(A.AIRFRAMES, sc.relayAirframe, 'relay airframe') : null;
+  const relayRadio = sc.relayRadio ? resolveRadio(sc.relayRadio, sc.relayRadioPreset, 'relay radio') : null;
+  const terrain = buildCompareTerrain(ctx, sc, seed);
+  const b = posOf(sc.base, 0, 0), t = posOf(sc.target, 2000, -500);
 
   const s = ctx.makeSwarm({
-    count: sc.count || 8,
-    airframe: A.AIRFRAMES.find(a => a.id === sc.airframe) || A.AIRFRAMES[0],
-    altitudeM: sc.altitudeM || 70,
-    deployFrac: (sc.spacingPct || 80) / 100,
+    count: sc.count ?? 8,
+    airframe,
+    altitudeM: sc.altitudeM ?? 70,
+    deployFrac: (sc.spacingPct ?? 80) / 100,
     corridorRouting: sc.corridor !== false,
     broadcastC2: sc.broadcast !== false,
-    windX: (sc.windSpd || 0) * Math.cos((sc.windDir || 0) * Math.PI / 180),
-    windY: (sc.windSpd || 0) * Math.sin((sc.windDir || 0) * Math.PI / 180),
-    baseX: sc.base ? sc.base.x : 0,
-    baseY: sc.base ? sc.base.y : 0,
-    targetX: sc.target ? sc.target.x : 2000,
-    targetY: sc.target ? sc.target.y : -500,
+    windX: (sc.windSpd ?? 0) * Math.cos((sc.windDir ?? 0) * Math.PI / 180),
+    windY: (sc.windSpd ?? 0) * Math.sin((sc.windDir ?? 0) * Math.PI / 180),
+    baseX: b.x,
+    baseY: b.y,
+    targetX: t.x,
+    targetY: t.y,
+    baseVel: sc.baseVelMps ? { x: sc.baseVelMps.x, y: sc.baseVelMps.y } : undefined,
+    targetVel: sc.targetVelMps ? { x: sc.targetVelMps.x, y: sc.targetVelMps.y } : undefined,
+    adversaryMode: !!sc.adversaryMode,
     radio,
-    envFactor,
-    shadowSigmaDb,
+    envFactor: env.factor,
+    shadowSigmaDb: env.shadowSigmaDb,
     seed,
-    terrain: ctx.makeTerrain(sc.terrain || 'flat', {
-      distM: Math.hypot(sc.target ? sc.target.x : 2000, sc.target ? sc.target.y : -500),
-      altM: sc.altitudeM || 70,
-      seed,
-      density: (sc.cityDensity || 40) / 100,
-      heightScale: (sc.cityHeight || 40) / 100,
-    }),
-    relayWing: sc.hetero ? (sc.relayWing || 0) : 0,
-    relayAirframe: sc.relayAirframe ? A.AIRFRAMES.find(a => a.id === sc.relayAirframe) : null,
-    relayRadio: sc.relayRadio ? R.RADIOS.find(r => r.id === sc.relayRadio) : null,
+    terrain,
+    relayWing: sc.hetero ? (sc.relayWing ?? 0) : 0,
+    relayAirframe,
+    relayRadio,
     jammers: sc.jammers || [],
     gpsZones: sc.gpsZones || [],
     spectrumAgility: !!sc.spectrumAgility,
     lpiMode: !!sc.lpiMode,
     videoOn: !!sc.videoBackhaul,
-    videoKbps: sc.videoKbps || 250,
+    videoKbps: sc.videoKbps ?? 250,
   });
 
   // Calculate starting energy Wh
@@ -259,6 +298,7 @@ module.exports = {
   calcStats,
   resolveScenario,
   runScenarioSeed,
+  buildCompareTerrain,
   compareScenarios,
   renderMarkdownDashboard,
   renderTextDashboard,

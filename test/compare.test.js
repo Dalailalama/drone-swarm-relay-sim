@@ -34,3 +34,41 @@ test('Item 10: compareScenarios computes uptime, arrival, packet loss, energy an
   assert.ok(result.markdown.includes('ddil-disrupted') || result.markdown.includes('Disrupted'));
   assert.ok(result.text.includes('Scenario Comparison Dashboard'));
 });
+
+// audit: compare must run the scenario file exactly or refuse.
+const { runScenarioSeed, buildCompareTerrain } = require('../tools/compare.js');
+const { loadCore } = require('./helpers/sim.js');
+const R = require('../js/radios.js');
+
+test('compare refuses unknown radio, airframe, env and the network-only osm terrain', () => {
+  const ctx = loadCore(['scenarios.js']);
+  const base = resolveScenario('ddil-disrupted').scenario;
+  for (const patch of [{ radio: 'nope' }, { airframe: 'nope' }, { env: 'nope' }, { terrain: 'osm' }, { relayRadio: 'nope' }]) {
+    const sc = { ...base, ...patch };
+    assert.throws(() => runScenarioSeed(ctx, { id: 'x', title: 'x', scenario: sc }, 101, 1), /unknown|osm/i, JSON.stringify(patch));
+  }
+});
+
+test('compare honours a calibrated radioPreset instead of falling back to the stock radio', () => {
+  const ctx = loadCore(['scenarios.js']);
+  const base = resolveScenario('ddil-disrupted').scenario;
+  const stock = R.RADIOS.find(r => r.id === base.radio);
+  const preset = { ...stock, id: base.radio + '-calibrated', rangeLosM: stock.rangeLosM / 5, txDbm: stock.txDbm - 25 };
+  const a = runScenarioSeed(ctx, { id: 'a', title: 'a', scenario: base }, 101, 40);
+  const b = runScenarioSeed(ctx, { id: 'b', title: 'b', scenario: { ...base, radio: preset.id, radioPreset: preset } }, 101, 40);
+  assert.notDeepStrictEqual([a.delivered, a.dropped, a.uptimePct], [b.delivered, b.dropped, b.uptimePct]);
+});
+
+test('compare lays the city along the real base->target corridor and honours cityDensity 0', () => {
+  const ctx = loadCore(['scenarios.js']);
+  const sc = resolveScenario('ddil-intermittent').scenario;
+  const page = density => ctx.makeTerrain(sc.terrain, {
+    distM: Math.hypot(sc.target.x - sc.base.x, sc.target.y - sc.base.y), altM: sc.altitudeM,
+    baseX: sc.base.x, baseY: sc.base.y, targetX: sc.target.x, targetY: sc.target.y, seed: 101,
+    density, heightScale: (sc.cityHeight ?? 40) / 100,
+  });
+  const t = buildCompareTerrain(ctx, sc, 101);
+  assert.deepStrictEqual(t.gen, page((sc.cityDensity ?? 40) / 100).gen);
+  assert.strictEqual(t.buildings.length, page((sc.cityDensity ?? 40) / 100).buildings.length);
+  assert.strictEqual(buildCompareTerrain(ctx, { ...sc, cityDensity: 0 }, 101).buildings.length, page(0).buildings.length);
+});
