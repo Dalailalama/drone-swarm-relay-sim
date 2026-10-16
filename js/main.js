@@ -1043,7 +1043,9 @@
     reader.onload = () => {
       calText = String(reader.result || '');
       calFitBtn.disabled = !calText;
-      if (calText) calResult.textContent = file.name + ' loaded (' + file.size + ' bytes) — ready to fit.';
+      calResult.textContent = calText ? file.name + ' loaded (' + file.size + ' bytes) — ready to fit.'
+        : file.name + ' is empty.';
+      calResult.style.display = 'block';
       calOutRow.style.display = 'none';
     };
     reader.readAsText(file);
@@ -1054,7 +1056,9 @@
     const basePreset = RADIOS.find(r => r.id === calRadioSel.value) || radio;
     const parsed = parseFlightLogCsv(calText);
     const fit = fitPathLoss(parsed.samples);
+    calResult.style.display = 'block';
     if (!fit.ok) {
+      calOutRow.style.display = 'none';
       calResult.innerHTML = '<b style="color:var(--lost)">Fit failed:</b> ' + escHtml(fit.reason) +
         (parsed.notes.length ? '<br>' + parsed.notes.map(escHtml).join('<br>') : '');
       return;
