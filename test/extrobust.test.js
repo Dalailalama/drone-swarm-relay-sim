@@ -96,3 +96,16 @@ test('R12: a one-sample position spike is rejected; a confirmed relocation is ad
   assert.ok(Math.abs(d.x - ox - 5003) < 1e-9, 'a relocation confirmed by consecutive fixes must be adopted');
   assert.ok(Math.hypot(d.vx, d.vy) < 100, 'no velocity is derived across the jump');
 });
+
+test('R12: a service_ack for id __proto__ cannot pollute Object.prototype', () => {
+  const { ui, s, ws } = connect();
+  const proto = vm.runInContext('Object.prototype', ui.ctx);
+  for (const accepted of [false, true]) {
+    assert.doesNotThrow(() => ws.onmessage({ data: JSON.stringify({ type: 'service_ack', id: '__proto__', accepted, retryable: false, code: 'X' }) }));
+  }
+  for (const k of ['phase', 'pendingAction', 'failureReason', 'lastAction', 'retries']) {
+    assert.ok(!Object.prototype.hasOwnProperty.call(proto, k), 'Object.prototype.' + k + ' must not be written by a bridge ack');
+  }
+  ui.ctx.__raf.pump(100);
+  assert.ok(Number.isFinite(s.net.utilization), 'net.utilization stays finite');
+});
