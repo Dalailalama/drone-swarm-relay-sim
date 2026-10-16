@@ -122,15 +122,22 @@ test('tactical-only fleet cannot bridge the same distance the wing can', () => {
     'short-range radios alone must NOT close a 2.6 km chain');
 });
 
-test('per-drone energy uses its own airframe (wing lasts longer)', () => {
+test('per-drone energy uses its own airframe (wing burns X8 watts)', () => {
+  // With the coaxial shared-disc correction (audit EN-1) an X8 and a micro
+  // hover for about the same time, so compare Wh drawn, not % left: a 2.9 kg
+  // X8 pulls >10x the micro's watts, and % must be against its OWN pack.
   const { s } = runHeteroMission({}, 300); // 5 minutes of flight
   const wing = s.drones.filter(d => d.cls === 'relay');
   const tac = s.drones.filter(d => d.cls === 'mission' && ctx.alive(d));
   assert.ok(wing.length && tac.length);
-  const wingPct = wing.reduce((a, d) => a + d.batteryPct, 0) / wing.length;
-  const tacPct = tac.reduce((a, d) => a + d.batteryPct, 0) / tac.length;
-  assert.ok(wingPct > tacPct,
-    'X8 wing (' + wingPct.toFixed(1) + '%) should drain slower than micros (' + tacPct.toFixed(1) + '%)');
+  const used = d => A.usableWh(d.af) - d.energyWh;
+  const wingWh = wing.reduce((a, d) => a + used(d), 0) / wing.length;
+  const tacWh = tac.reduce((a, d) => a + used(d), 0) / tac.length;
+  assert.ok(wingWh > 5 * tacWh,
+    'X8 wing (' + wingWh.toFixed(1) + ' Wh) should draw far more than micros (' + tacWh.toFixed(1) + ' Wh)');
+  for (const d of wing.concat(tac)) {
+    assert.ok(Math.abs(d.batteryPct - d.energyWh / A.usableWh(d.af) * 100) < 0.5, d.id + ' % against own pack');
+  }
 });
 
 test('telemetry carries fleet class so C2 knows who is who', () => {
