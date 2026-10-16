@@ -108,3 +108,15 @@ test('text tokens meet WCAG AA 4.5:1 on every panel surface they are drawn on', 
     .map(([n, r]) => n + ' ' + r.toFixed(2));
   assert.deepStrictEqual(low, []);
 });
+
+test('a Content-Security-Policy contains any future unescaped innerHTML sink', () => {
+  const m = HTML.match(/<meta http-equiv="Content-Security-Policy" content="([^"]+)">/);
+  assert.ok(m, 'index.html must carry a CSP meta (static servers set no header)');
+  const dir = Object.fromEntries(m[1].split(';').map(s => s.trim().split(/\s+/)).map(([k, ...v]) => [k, v]));
+  assert.deepStrictEqual(dir['script-src'], ["'self'"], 'scripts only from the page origin, no inline/eval');
+  assert.deepStrictEqual(dir['object-src'], ["'none'"]);
+  for (const need of ['ws:', 'wss:']) assert.ok(dir['connect-src'].includes(need), 'bridges run on any host: ' + need);
+  assert.ok(dir['img-src'].some(s => s.includes('basemaps.cartocdn.com')), 'basemap tiles still load');
+  assert.ok(!/<script(?![^>]*\bsrc=)[^>]*>/.test(HTML), 'no inline <script> bodies');
+  assert.ok(!/\son[a-z]+="/.test(HTML), 'no inline on* handlers');
+});
