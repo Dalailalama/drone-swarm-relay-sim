@@ -209,6 +209,14 @@ GCS_HEARTBEAT_DT = 1.0
 MAV_TYPE_GCS = 6
 MAV_AUTOPILOT_INVALID = 8
 MAV_STATE_ACTIVE = 4
+
+# ArduPilot forwards traffic between its links, so a GCS (Mission Planner,
+# MAVProxy), gimbal, ADS-B receiver or companion on another port reaches the
+# bridge too. Only the vehicle's own autopilot -- locked from the first
+# heartbeat that looks like one (pymavlink's probably_vehicle_heartbeat, plus
+# compid MAV_COMP_ID_AUTOPILOT1) -- may update its state or answer commands.
+NON_VEHICLE_MAV_TYPES = (6, 18, 26, 27)  # GCS, ONBOARD_CONTROLLER, GIMBAL, ADSB
+MAV_COMP_ID_AUTOPILOT1 = 1
 LOCAL_POSITION_NED_INTERVAL_US = int(1_000_000 / TELEMETRY_HZ)
 
 MAVLINK_MSG_ID_EXTENDED_SYS_STATE = 245
@@ -263,6 +271,7 @@ class Vehicle:
     custom_mode: Optional[int] = None  # latest HEARTBEAT.custom_mode (ArduPilot flight mode id)
     guided_mode_id: Optional[int] = None  # from conn.mode_mapping()["GUIDED"], resolved after heartbeat
     acks: dict = field(default_factory=dict)  # MAV_CMD id -> latest COMMAND_ACK result
+    autopilot_src: Optional[tuple] = None  # (sysid, compid) of the vehicle's autopilot, once heard
     # Latest known position, already converted into the *sim* coordinate frame.
     x: float = 0.0
     y: float = 0.0
@@ -548,6 +557,14 @@ def _drain_messages(vehicle: Vehicle) -> None:
         if msg is None:
             return
         mtype = msg.get_type()
+        src = (msg.get_srcSystem(), msg.get_srcComponent())
+        if (mtype == "HEARTBEAT" and vehicle.autopilot_src is None
+                and src[1] == MAV_COMP_ID_AUTOPILOT1
+                and getattr(msg, "type", None) not in NON_VEHICLE_MAV_TYPES
+                and getattr(msg, "autopilot", None) != MAV_AUTOPILOT_INVALID):
+            vehicle.autopilot_src = src
+        if src != vehicle.autopilot_src:
+            continue  # another system routed onto this link (see NON_VEHICLE_MAV_TYPES)
         if mtype == "HEARTBEAT":
             vehicle.last_heartbeat = _now()
             vehicle.base_mode = int(getattr(msg, "base_mode", 0) or 0)
