@@ -1273,6 +1273,20 @@ async def scenario_c04_airborne_and_grounded_abort():
         # Ensure hold setpoint was dispatched
         assert conn.count("setpoint") >= 1
 
+        # ...and re-sent at most every STEP_RESEND_DT, not on every 20 ms
+        # poll (an identical target at 50/s floods a telemetry radio)
+        holds = conn.count("setpoint")
+        for _ in range(10):
+            await bridge._advance_init(v)
+        assert conn.count("setpoint") == holds, f"hold target re-sent {conn.count('setpoint') - holds}x within one poll window"
+        clock.now = 0.5 + bridge.STEP_RESEND_DT
+        conn.push(hb_msg(armed=True, custom_mode=GUIDED_MODE_ID))
+        conn.push(pos_msg(-8.0, 12.0, -20.0))
+        bridge._drain_messages(v)
+        await bridge._advance_init(v)
+        await bridge._advance_init(v)
+        assert conn.count("setpoint") == holds + 1, "the hold target is refreshed once per STEP_RESEND_DT"
+
         # While in abort-hold, regular goals are ignored
         sent_before = len(conn.sent)
         await dispatch_goals(ws)
@@ -1353,8 +1367,9 @@ async def scenario_c04_airborne_and_grounded_abort():
         sp1 = conn.details("setpoint")[0]
         assert sp1["north"] == -20.0 and sp1["east"] == 15.0 and sp1["down"] == -18.0
 
-        # Further ticks retain the captured hold target despite drift
-        clock.now += 0.1
+        # Further ticks retain the captured hold target despite drift (the
+        # target is refreshed once per STEP_RESEND_DT, not on every poll)
+        clock.now += bridge.STEP_RESEND_DT
         conn.push(pos_msg(-19.0, 16.0, -18.2))
         bridge._drain_messages(v)
         await bridge._advance_init(v)

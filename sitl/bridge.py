@@ -766,9 +766,13 @@ async def _advance_init(vehicle: Vehicle) -> None:
         return
 
     if state == INIT_ABORT_HOLD:
-        # Airborne hold after abort: hold current position in GUIDED
-        if vehicle.conn is not None and vehicle.connected and vehicle.mode_confirmed and vehicle.position_fresh:
+        # Airborne hold after abort: hold current position in GUIDED. GUIDED
+        # position targets don't time out, so refresh it every STEP_RESEND_DT
+        # rather than on every poll (50/s would flood a telemetry radio).
+        if vehicle.conn is not None and vehicle.connected and vehicle.mode_confirmed and vehicle.position_fresh \
+                and now - vehicle.step_sent_at >= STEP_RESEND_DT:
             _send_hold_target(vehicle)
+            vehicle.step_sent_at = now
         return
 
     if state == "aborted" or vehicle.service_phase == "aborted":
