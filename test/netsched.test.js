@@ -487,3 +487,36 @@ test('NET-01: C2 duty/tx clocks are per radio unit, not shared across bands', ()
     ctx.commitPacket = orig;
   }
 });
+
+// NET-03: pins the documented channel model — each channel is ONE swarm-wide
+// collision-free timeline. Simultaneous sends from different drones (agility
+// on or off) are serialized; no two billed intervals on a channel overlap.
+for (const agility of [false, true]) {
+  test('NET-03: same-channel transmissions never overlap (agility ' + agility + ')', () => {
+    const s = ctx.makeSwarm({
+      count: 4, airframe: Q450, radio: SIK, envFactor: 1, spectrumAgility: agility,
+      targetX: 600, targetY: 0, altitudeM: 50, seed: 42,
+    });
+    s.time = 0;
+    s.drones.forEach((d, i) => { d.x = 60 + 20 * i; d.y = 10 * i; });
+    const billed = [];
+    const orig = ctx.billAir;
+    ctx.billAir = function (s2, chan, start, end) {
+      billed.push({ chan, start, end });
+      return orig(s2, chan, start, end);
+    };
+    try {
+      for (const d of s.drones) assert.ok(ctx.sendPacket(s, 'tlm', d.id, 'C2', { x: d.x, y: d.y }));
+      for (const d of s.drones) assert.ok(ctx.sendPacket(s, 'cmd', 'C2', d.id, { role: 'mission' }));
+      run(s, 0, 2, 0.05);
+    } finally {
+      ctx.billAir = orig;
+    }
+    assert.ok(billed.length >= 8, 'every packet aired');
+    billed.sort((x, y) => x.start - y.start);
+    for (let i = 1; i < billed.length; i++) {
+      if (billed[i].chan !== billed[i - 1].chan) continue;
+      assert.ok(billed[i].start >= billed[i - 1].end - 1e-12, 'overlap on ' + billed[i].chan);
+    }
+  });
+}
