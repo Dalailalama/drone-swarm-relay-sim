@@ -1552,7 +1552,7 @@ function droneComms(s, d) {
       d.rejectedRole = o.role;
       if (d.rejectedSig !== sig) {
         d.rejectedSig = sig;
-        const pct = (d.energyWh / usableWh(s.airframe) * 100).toFixed(0);
+        const pct = (d.energyWh / usableWh(afOf(s, d)) * 100).toFixed(0);
         logEvent(s, d.id + ' declines ' + o.role + ' tasking — recovery plan does not close (' + pct + '% battery)', 'warn');
       }
       continue;

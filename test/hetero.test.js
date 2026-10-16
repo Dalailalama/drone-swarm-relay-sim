@@ -146,3 +146,30 @@ test('telemetry carries fleet class so C2 knows who is who', () => {
   assert.ok(classes.includes('relay'), 'C2 must have heard from a wing unit');
   assert.ok(classes.includes('mission'), 'C2 must have heard from a tactical unit');
 });
+
+test('decline log reports battery % against the drone\'s own airframe, not the fleet\'s (audit EN-7)', () => {
+  const s = ctx.makeSwarm({
+    count: 8, airframe: MICRO, radio: SIK, envFactor: 1,
+    targetX: 2600, targetY: -650, altitudeM: 60, seed: 7,
+    relayWing: 3, relayAirframe: X8, relayRadio: RFD,
+  });
+  const x8ids = new Set(s.drones.filter(d => d.af && d.af.id === 'x8').map(d => d.id));
+  let drained = null;
+  while (s.time < 60) {
+    ctx.stepSwarm(s, 0.05);
+    if (drained) continue;
+    const ev = s.events.find(e => /C2 orders (DR-\d+) to relay/.test(e.msg) && x8ids.has(e.msg.match(/DR-\d+/)[0]));
+    if (ev) {
+      drained = s.drones.find(d => d.id === ev.msg.match(/DR-\d+/)[0]);
+      drained.energyWh = 25; // ~13% of the X8's own usable pack
+    }
+  }
+  assert.ok(drained, 'an X8 must be ordered to relay');
+  const declines = s.events.filter(e => e.msg.startsWith(drained.id + ' declines'));
+  assert.ok(declines.length, 'the drained X8 must decline');
+  for (const e of declines) {
+    const pct = Number(e.msg.match(/\((\d+)% battery\)/)[1]);
+    assert.ok(pct <= 100, 'battery % above 100: ' + e.msg);
+    assert.strictEqual(pct, Math.round(25 / A.usableWh(X8) * 100), e.msg);
+  }
+});
