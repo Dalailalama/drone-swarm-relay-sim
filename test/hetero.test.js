@@ -122,15 +122,22 @@ test('tactical-only fleet cannot bridge the same distance the wing can', () => {
     'short-range radios alone must NOT close a 2.6 km chain');
 });
 
-test('per-drone energy uses its own airframe (wing lasts longer)', () => {
+test('per-drone energy uses its own airframe (wing burns X8 watts)', () => {
+  // With the coaxial shared-disc correction (audit EN-1) an X8 and a micro
+  // hover for about the same time, so compare Wh drawn, not % left: a 2.9 kg
+  // X8 pulls >10x the micro's watts, and % must be against its OWN pack.
   const { s } = runHeteroMission({}, 300); // 5 minutes of flight
   const wing = s.drones.filter(d => d.cls === 'relay');
   const tac = s.drones.filter(d => d.cls === 'mission' && ctx.alive(d));
   assert.ok(wing.length && tac.length);
-  const wingPct = wing.reduce((a, d) => a + d.batteryPct, 0) / wing.length;
-  const tacPct = tac.reduce((a, d) => a + d.batteryPct, 0) / tac.length;
-  assert.ok(wingPct > tacPct,
-    'X8 wing (' + wingPct.toFixed(1) + '%) should drain slower than micros (' + tacPct.toFixed(1) + '%)');
+  const used = d => A.usableWh(d.af) - d.energyWh;
+  const wingWh = wing.reduce((a, d) => a + used(d), 0) / wing.length;
+  const tacWh = tac.reduce((a, d) => a + used(d), 0) / tac.length;
+  assert.ok(wingWh > 5 * tacWh,
+    'X8 wing (' + wingWh.toFixed(1) + ' Wh) should draw far more than micros (' + tacWh.toFixed(1) + ' Wh)');
+  for (const d of wing.concat(tac)) {
+    assert.ok(Math.abs(d.batteryPct - d.energyWh / A.usableWh(d.af) * 100) < 0.5, d.id + ' % against own pack');
+  }
 });
 
 test('telemetry carries fleet class so C2 knows who is who', () => {
@@ -138,4 +145,31 @@ test('telemetry carries fleet class so C2 knows who is who', () => {
   const classes = Object.values(s.c2.known).map(k => k.cls);
   assert.ok(classes.includes('relay'), 'C2 must have heard from a wing unit');
   assert.ok(classes.includes('mission'), 'C2 must have heard from a tactical unit');
+});
+
+test('decline log reports battery % against the drone\'s own airframe, not the fleet\'s (audit EN-7)', () => {
+  const s = ctx.makeSwarm({
+    count: 8, airframe: MICRO, radio: SIK, envFactor: 1,
+    targetX: 2600, targetY: -650, altitudeM: 60, seed: 7,
+    relayWing: 3, relayAirframe: X8, relayRadio: RFD,
+  });
+  const x8ids = new Set(s.drones.filter(d => d.af && d.af.id === 'x8').map(d => d.id));
+  let drained = null;
+  while (s.time < 60) {
+    ctx.stepSwarm(s, 0.05);
+    if (drained) continue;
+    const ev = s.events.find(e => /C2 orders (DR-\d+) to relay/.test(e.msg) && x8ids.has(e.msg.match(/DR-\d+/)[0]));
+    if (ev) {
+      drained = s.drones.find(d => d.id === ev.msg.match(/DR-\d+/)[0]);
+      drained.energyWh = 25; // ~13% of the X8's own usable pack
+    }
+  }
+  assert.ok(drained, 'an X8 must be ordered to relay');
+  const declines = s.events.filter(e => e.msg.startsWith(drained.id + ' declines'));
+  assert.ok(declines.length, 'the drained X8 must decline');
+  for (const e of declines) {
+    const pct = Number(e.msg.match(/\((\d+)% battery\)/)[1]);
+    assert.ok(pct <= 100, 'battery % above 100: ' + e.msg);
+    assert.strictEqual(pct, Math.round(25 / A.usableWh(X8) * 100), e.msg);
+  }
 });

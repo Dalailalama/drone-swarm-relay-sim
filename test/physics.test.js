@@ -61,7 +61,9 @@ test('chain throughput divides by hop count', () => {
 });
 
 test('momentum-theory endurance lands inside published real-world figures', () => {
-  const expected = { micro: [28, 42], q450: [17, 27], x8: [38, 55] }; // minutes
+  // x8 band moved down with the coaxial shared-disc correction (audit EN-1):
+  // the old [38, 55] only held while 8 coaxial rotors counted as 8 free discs.
+  const expected = { micro: [28, 42], q450: [17, 27], x8: [30, 42] }; // minutes
   for (const af of A.AIRFRAMES) {
     const e = A.hoverEnduranceMin(af);
     const [lo, hi] = expected[af.id];
@@ -75,6 +77,25 @@ test('forward flight power: equals hover at 0, rises toward max speed', () => {
     const h = A.hoverPowerW(af);
     assert.ok(Math.abs(A.flightPowerW(af, 0) - h) < 1e-9);
     assert.ok(A.flightPowerW(af, af.maxSpeedMs) > h * 1.2, 'max-speed flight should cost >20% over hover');
+  }
+});
+
+test('coaxial presets share one disc per stack and pay the coaxial interference loss (audit EN-1)', () => {
+  const coax = A.AIRFRAMES.filter(af => af.coaxial);
+  assert.ok(coax.length >= 1, 'a preset described as coaxial must be flagged coaxial');
+  for (const af of A.AIRFRAMES) {
+    if (/coax/i.test(af.note + af.name)) assert.ok(af.coaxial, af.id + ' is described as coaxial but not flagged');
+  }
+  for (const af of coax) {
+    const r2 = Math.PI * af.rotorRadiusM * af.rotorRadiusM;
+    assert.ok(Math.abs(A.discAreaM2(af) - af.nRotors / 2 * r2) < 1e-12, af.id + ': one swept disc per coaxial stack');
+    const T = af.massKg * 9.81;
+    const isolated = Math.pow(T, 1.5) / Math.sqrt(2 * A.AIR_RHO * af.nRotors * r2) / A.POWERTRAIN_EFF;
+    const sharedDisc = isolated * Math.SQRT2;
+    const h = A.hoverPowerW(af);
+    // Between the ideal isolated-rotor case (no wake interaction) and the
+    // coplanar shared-disc bound; Leishman's coaxial value is 1.281 x isolated.
+    assert.ok(h > isolated * 1.2 && h < sharedDisc, af.id + ': hover ' + h.toFixed(1) + ' W outside coaxial band');
   }
 });
 

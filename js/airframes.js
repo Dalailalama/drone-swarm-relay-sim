@@ -12,6 +12,13 @@ const AIR_RHO = 1.225;      // kg/m^3, sea level
 const G = 9.81;
 const POWERTRAIN_EFF = 0.55; // prop FM x motor x ESC, hobby grade
 const BATT_USABLE_FRAC = 0.80; // land before the pack is truly empty
+// Coaxial stacks: both rotors sweep ONE disc, and the lower rotor works in the
+// upper's contracted wake. Momentum theory (Leishman, Principles of Helicopter
+// Aerodynamics, 2nd ed., sec. 3.6, equal-thrust coaxial) puts induced power at
+// 1.281x the same rotors running isolated, i.e. 1.281/sqrt(2) = 0.906x one
+// shared disc carrying the whole thrust. Measured coaxial rigs often do a
+// little better (~1.16x isolated), so this is mildly pessimistic.
+const COAX_KAPPA_INT = 1.281 / Math.SQRT2;
 
 const AIRFRAMES = [
   {
@@ -40,20 +47,23 @@ const AIRFRAMES = [
     massKg: 2.9,
     rotorRadiusM: 0.14,
     nRotors: 8,
-    batteryWh: 240,         // Li-ion endurance pack
+    coaxial: true,          // 4 arms x 2 stacked rotors
+    batteryWh: 240,        // Li-ion endurance pack
     maxSpeedMs: 16,
-    note: 'Coaxial octo with a fat Li-ion pack. Slow to react, flies for the better part of an hour.',
+    note: 'Coaxial octo with a fat Li-ion pack. Slow to react, flies for over half an hour.',
   },
 ];
 
+// Swept disc area: a coaxial stack's two rotors share one disc.
 function discAreaM2(af) {
-  return af.nRotors * Math.PI * af.rotorRadiusM * af.rotorRadiusM;
+  const discs = af.coaxial ? af.nRotors / 2 : af.nRotors;
+  return discs * Math.PI * af.rotorRadiusM * af.rotorRadiusM;
 }
 
 function hoverPowerW(af) {
   const thrustN = af.massKg * G;
   const pIdeal = Math.pow(thrustN, 1.5) / Math.sqrt(2 * AIR_RHO * discAreaM2(af));
-  return pIdeal / POWERTRAIN_EFF;
+  return pIdeal * (af.coaxial ? COAX_KAPPA_INT : 1) / POWERTRAIN_EFF;
 }
 
 // Electrical power at a given airspeed. Mild dip at low speed (translational
@@ -74,5 +84,5 @@ function hoverEnduranceMin(af) {
 
 // UMD-lite export so the physics is unit-testable under Node.
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { AIRFRAMES, discAreaM2, hoverPowerW, flightPowerW, usableWh, hoverEnduranceMin, AIR_RHO, POWERTRAIN_EFF, BATT_USABLE_FRAC };
+  module.exports = { AIRFRAMES, discAreaM2, hoverPowerW, flightPowerW, usableWh, hoverEnduranceMin, AIR_RHO, POWERTRAIN_EFF, BATT_USABLE_FRAC, COAX_KAPPA_INT };
 }
