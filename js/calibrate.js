@@ -88,6 +88,18 @@ function parseFlightLogCsv(text) {
     if (dM < 1) { out.dropped++; if (!out.notes.includes('dropped samples inside the 1 m noise floor')) out.notes.push('dropped samples inside the 1 m noise floor'); continue; }
     out.samples.push({ dM, rssiDbm: rssi });
   }
+  // Received power in dBm is negative; a positive median means device-scale
+  // RSSI (SiK/MAVLink RADIO_STATUS is 0..254), which would fit as nonsense.
+  if (out.samples.length) {
+    const sorted = out.samples.map(s => s.rssiDbm).sort((a, b) => a - b);
+    const med = sorted[sorted.length >> 1];
+    if (med > 0) {
+      out.notes.push('RSSI median is +' + med.toFixed(0) + ' — looks like device units (e.g. MAVLink RADIO_STATUS ' +
+        '0..254), not dBm; convert to dBm first (SiK: dBm ≈ raw/1.9 − 127)');
+      out.dropped += out.samples.length;
+      out.samples = [];
+    }
+  }
   if (!out.samples.length) out.notes.push('no usable samples');
   return out;
 }
@@ -97,6 +109,11 @@ function parseFlightLogCsv(text) {
 // of a decade, and a fit is only a calibration if its 95% CI on n is tight.
 const CAL_MIN_SPAN_DECADES = 0.5;
 const CAL_MAX_N_CI95 = 0.5;
+// The ONE acceptance window for a calibrated preset — main.js's preset
+// sanitizer uses these same bounds, so a fit that passes here is never
+// silently dropped on registration or scenario import.
+const CAL_N_RANGE = [1.2, 6.5];
+const CAL_REF_POWER_RANGE = [-120, 40];   // dBm at 1 m
 
 // Two-sided 95% Student-t quantile, Cornish-Fisher expansion in 1/df (within
 // ~1% of the table for df >= 3, which is all a 5-sample floor allows).
@@ -134,8 +151,17 @@ function fitPathLoss(samples) {
   const slope = sxy / sxx;                          // dB per decade
   const intercept = meanY - slope * xBar;           // RSSI at d = 1 m
   const expN = -slope / 10;
-  if (!(expN > 1) || !(expN < 8)) {
-    return { ok: false, reason: 'fitted exponent n=' + expN.toFixed(2) + ' outside physical range (1..8)' };
+  if (!(intercept <= CAL_REF_POWER_RANGE[1])) {
+    return { ok: false, reason: 'fitted reference power ' + intercept.toFixed(0) + ' dBm at 1 m is not physical — ' +
+      'the RSSI column is probably in device units (e.g. MAVLink RADIO_STATUS 0..254), not dBm' };
+  }
+  if (!(intercept >= CAL_REF_POWER_RANGE[0])) {
+    return { ok: false, reason: 'fitted reference power ' + intercept.toFixed(0) + ' dBm at 1 m is below ' +
+      CAL_REF_POWER_RANGE[0] + ' dBm — check the RSSI units and the distance column' };
+  }
+  if (!(expN >= CAL_N_RANGE[0]) || !(expN <= CAL_N_RANGE[1])) {
+    return { ok: false, reason: 'fitted exponent n=' + expN.toFixed(2) + ' outside physical range (' +
+      CAL_N_RANGE[0] + '..' + CAL_N_RANGE[1] + ')' };
   }
   // goodness of fit
   let ssRes = 0, ssTot = 0;
@@ -243,5 +269,6 @@ function validationReportMd(fit, basePreset, samples, parsed) {
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     parseFlightLogCsv, fitPathLoss, calibratePreset, validationReportMd, CAL_ALIASES,
+    CAL_N_RANGE, CAL_REF_POWER_RANGE,
   };
 }

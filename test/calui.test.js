@@ -41,6 +41,26 @@ test('calibration: loaded, fitted and failed states are all visible in the panel
   assert.strictEqual(ui.el('calOutRow').style.display, 'none');
 });
 
+// Audit calibrate-ui-silent-reject: the panel used to say 'Fit complete' while
+// registerRadioPreset silently refused the preset (n in (6.5,8), intercept
+// outside -120..40, range outside the sanitizer bounds).
+function radioOptionCount(ui) { return ui.el('radioSel').children.length; }
+
+for (const [label, n, A] of [['n = 7.0', 7.0, -30], ['n = 1.25 (range beyond sanitizer bound)', 1.25, -30]]) {
+  test('regression: a fit the preset sanitizer refuses is reported as rejected (' + label + ')', () => {
+    const ui = loadUI();
+    const before = radioOptionCount(ui);
+    loadCsv(ui, 'walk.csv', csvFor(n, A));
+    ui.fire('calFitBtn', 'click');
+    const html = ui.el('calResult').innerHTML;
+    if (radioOptionCount(ui) === before) {
+      assert.ok(!html.includes('Fit complete'), 'says Fit complete but registered nothing: ' + html);
+      assert.ok(/rejected|failed/i.test(html), html);
+      assert.strictEqual(ui.el('calOutRow').style.display, 'none', 'downloads offered for a rejected preset');
+    }
+  });
+}
+
 test('calibration: an empty file says so instead of staying silent', () => {
   const ui = loadUI();
   loadCsv(ui, 'empty.csv', '');

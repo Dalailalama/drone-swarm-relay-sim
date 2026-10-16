@@ -72,7 +72,7 @@
   const PRESET_NUM_FIELDS = {
     freqMHz: [30, 60000], txDbm: [-20, 60], sensDbm: [-140, -50],
     antGainDbi: [-10, 30], airRateKbps: [0.05, 2e6], rangeLosM: [10, 5e6],
-    dutyCycle: [0.0001, 1], refPowerDbm: [-120, 40], nFit: [1.2, 6.5], hopGainDb: [-10, 30],
+    dutyCycle: [0.0001, 1], refPowerDbm: CAL_REF_POWER_RANGE, nFit: CAL_N_RANGE, hopGainDb: [-10, 30],
   };
   function sanitizeRadioPreset(raw) {
     if (!raw || typeof raw !== 'object') return null;
@@ -1063,7 +1063,13 @@
       return;
     }
     const cal = calibratePreset(fit, basePreset);
-    registerRadioPreset(cal);
+    if (!registerRadioPreset(cal)) {
+      calOutRow.style.display = 'none';
+      calResult.innerHTML = '<b style="color:var(--lost)">Fit rejected:</b> the calibrated preset fails the ' +
+        'radio sanity bounds (re-derived range ' + escHtml(fmtDist(cal.rangeLosM)) + ', n = ' + fit.n.toFixed(2) +
+        ', ' + fit.refPowerDbm.toFixed(0) + ' dBm at 1 m) — not registered.';
+      return;
+    }
     calReport = validationReportMd(fit, basePreset, parsed.samples, parsed);
     calPresetJson = JSON.stringify(cal, null, 1);
     const dsN = pathLossExponent(basePreset);

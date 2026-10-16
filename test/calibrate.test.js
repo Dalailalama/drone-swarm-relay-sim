@@ -165,6 +165,25 @@ test('regression: a narrow distance span cannot determine n (no noise-only prese
   assert.strictEqual(wrongAccepted, 0, wrongAccepted + ' narrow-span fits accepted with |n-2.7|>1');
 });
 
+test('regression: device-scale RSSI (SiK RADIO_STATUS 0..254) is refused as not-dBm', () => {
+  const g = gaussFrom(3);
+  const real = fieldLog(g, 200, 10, 2000, 2.7, -30, 3);
+  const rows = ['dist,rssi'].concat(real.map(s =>
+    s.dM.toFixed(1) + ',' + Math.max(0, Math.min(254, Math.round((s.rssiDbm + 127) * 1.9)))));
+  const parsed = C.parseFlightLogCsv(rows.join('\n'));
+  const fit = C.fitPathLoss(parsed.samples);
+  assert.strictEqual(fit.ok, false, 'raw units fitted as dBm: n=' + fit.n + ' A=' + fit.refPowerDbm);
+  assert.ok(/unit/i.test(fit.reason + ' ' + parsed.notes.join(' ')), fit.reason + ' / ' + parsed.notes);
+  // A positive-intercept dataset fed straight to the fit is refused too.
+  const shifted = real.map(s => ({ dM: s.dM, rssiDbm: s.rssiDbm + 220 }));
+  const f2 = C.fitPathLoss(shifted);
+  assert.strictEqual(f2.ok, false);
+  assert.ok(/unit/i.test(f2.reason), f2.reason);
+  // Real dBm data still fits.
+  const csv = ['dist,rssi'].concat(real.map(s => s.dM.toFixed(1) + ',' + s.rssiDbm.toFixed(1))).join('\n');
+  assert.ok(C.fitPathLoss(C.parseFlightLogCsv(csv).samples).ok);
+});
+
 test('wide-span fits pass and their 95% CI on n covers the truth', () => {
   let covered = 0;
   for (let t = 0; t < 50; t++) {
