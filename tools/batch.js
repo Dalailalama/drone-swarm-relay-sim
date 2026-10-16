@@ -41,7 +41,18 @@ const LIMITS = {
   // grid-cell replans of the batch (~12 us per cell-replan measured).
   maxPlanGridCells: 1000000,
   maxTotalPlanCellReplans: 40000000,
+  // Every link evaluation and every A* cell probe loops over the jammers, so
+  // the lists are capped (the shipped scenarios use a handful) and active
+  // jammers weight both budgets below (~0.12x of base tick cost each).
+  maxJammers: 64,
+  maxGpsZones: 64,
 };
+
+// Active jammers (on !== false) — the term that multiplies per-tick RF cost.
+function activeJammers(cfg) {
+  const j = cfg.features && Array.isArray(cfg.features.jammers) ? cfg.features.jammers : [];
+  return j.filter(x => x && x.on !== false).length;
+}
 
 // Mirrors the search box js/swarm.js planChain builds (not its internals):
 // the grid cell follows the chain radio's usable range (>= 40 m, capped by
@@ -124,6 +135,8 @@ function validateFeatures(f, count) {
   for (const k of ['jammers', 'gpsZones']) {
     if (!has(f, k)) continue;
     if (!Array.isArray(f[k])) return 'features.' + k + ' must be an array';
+    const cap = k === 'jammers' ? LIMITS.maxJammers : LIMITS.maxGpsZones;
+    if (f[k].length > cap) return 'features.' + k + ' has more than ' + cap + ' entries';
     for (const [i, entry] of f[k].entries()) {
       const at = 'features.' + k + '[' + i + ']';
       if (!object(entry)) return at + ' must be a JSON object';
@@ -223,9 +236,12 @@ function validateConfig(cfg) {
   if (cfg.cityDensity != null && !numIn(cfg.cityDensity, 0, 100)) return 'cityDensity must be 0..100';
   if (cfg.cityHeight != null && !numIn(cfg.cityHeight, 0, 100)) return 'cityHeight must be 0..100';
 
-  // Work budget in drone-seconds — the quantity that predicts compute.
-  if (totalRuns * dur * count > LIMITS.maxTotalWorkDroneSec) {
-    return 'total workload (' + (totalRuns * dur * count) + ' drone-seconds) exceeds the ' +
+  // Work budget in drone-seconds — the quantity that predicts compute —
+  // weighted by the active jammers each tick has to evaluate.
+  const jammers = activeJammers(cfg);
+  const work = Math.round(totalRuns * dur * count * (1 + jammers / 8));
+  if (work > LIMITS.maxTotalWorkDroneSec) {
+    return 'total workload (' + work + ' jammer-weighted drone-seconds) exceeds the ' +
       LIMITS.maxTotalWorkDroneSec + ' budget — fewer runs, shorter duration, or a smaller fleet';
   }
 
@@ -249,6 +265,7 @@ function validateConfig(cfg) {
     worstGrid = Math.max(worstGrid, grid);
     planWork += grid * seeds.length * Math.ceil(dur / PLAN_REPLAN_SEC);
   }
+  planWork *= 1 + jammers; // inDenialZone runs per probed cell per jammer
   if (worstGrid > LIMITS.maxPlanGridCells) {
     return 're-planning the relay chain to a ' + (Math.hypot(t.targetX, t.targetY) / 1000).toFixed(1) + ' km objective on ' +
       cfg.radio + ' searches a ' + worstGrid + '-cell grid every ' + PLAN_REPLAN_SEC + ' sim-s (limit ' + LIMITS.maxPlanGridCells +
