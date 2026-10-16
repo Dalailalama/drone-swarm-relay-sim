@@ -1822,6 +1822,30 @@ async def scenario_init_count_bounded() -> None:
         await h.close()
 
 
+async def scenario_malformed_messages_keep_connection() -> None:
+    """Shape-invalid JSON is logged and skipped; it must not end the
+    connection (1011) and with it drop the controller."""
+    h = Harness()
+
+    class StreamWebsocket(FakeWebsocket):
+        def __init__(self, name, raws):
+            super().__init__(name)
+            self.raws = raws
+
+        async def __aiter__(self):
+            for raw in self.raws:
+                yield raw
+
+    bad = ["[]", "42", '{"type":"goals","goals":[1]}', '{"type":"goals","goals":null}',
+           '{"type":"init","count":"three"}', '{"type":"service","id":["DR-1"],"requestId":"r","action":"land"}']
+    ws = StreamWebsocket("browser-1", bad + [json.dumps({"type": "init", "count": 0, "alt": 40.0})])
+    try:
+        await bridge.make_handler(None, 14550)(ws)
+        assert ws.of_type("ready"), f"the init after the malformed messages was never handled: {ws.messages}"
+    finally:
+        await h.close()
+
+
 SCENARIOS = [
     ("#12: not READY at lift-off; READY at the takeoff altitude", scenario_ready_needs_takeoff_altitude),
     ("#12: a long steady climb is not failed by the step timeout", scenario_long_climb_not_timed_out),
@@ -1851,6 +1875,7 @@ SCENARIOS = [
     ("ownership: goals from a non-controller are not forwarded", scenario_goals_ownership),
     ("CSWSH: a foreign web Origin is refused at the handshake", scenario_foreign_origin_rejected),
     ("init: a huge vehicle count is clamped", scenario_init_count_bounded),
+    ("malformed messages are skipped without dropping the connection", scenario_malformed_messages_keep_connection),
 ]
 
 

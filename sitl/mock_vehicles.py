@@ -724,7 +724,15 @@ async def handler(websocket) -> None:
     WORLD.clients.add(websocket)
     try:
         async for raw in websocket:
-            await handle_message(websocket, raw)
+            try:
+                await handle_message(websocket, raw)
+            except ConnectionClosed:
+                raise
+            except Exception as e:
+                # Same as bridge.py: a shape-invalid message is skipped, it
+                # must not end the connection (1011) and drop the controller.
+                log.warning("ignoring malformed message %r: %r", str(raw)[:200], e)
+                await send_status(websocket, "mock: ignored a malformed message")
     except ConnectionClosed:
         pass
     finally:

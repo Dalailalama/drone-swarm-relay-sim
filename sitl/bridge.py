@@ -1354,7 +1354,16 @@ def make_handler(cli_count: Optional[int], base_port: int):
         client_connected(websocket)
         try:
             async for raw in websocket:
-                await handle_message(websocket, raw, cli_count, base_port)
+                try:
+                    await handle_message(websocket, raw, cli_count, base_port)
+                except ConnectionClosed:
+                    raise
+                except Exception as e:
+                    # A shape-invalid message (a list, a non-numeric count, a
+                    # null goals list...) must not end the connection (1011)
+                    # and with it drop the controller: skip it and say so.
+                    log.warning("ignoring malformed message %r: %r", str(raw)[:200], e)
+                    await send_status(websocket, "bridge: ignored a malformed message")
         except ConnectionClosed:
             pass
         finally:
