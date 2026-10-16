@@ -443,10 +443,13 @@
       if (sc.osm.radiusM) { osmRadiusRange.value = sc.osm.radiusM; osmRadiusOut.textContent = fmtDist(sc.osm.radiusM); }
     }
     updateOsmRow();
-    updateSpecCard(); updateAirframeInfo(); applySpacing();
+    updateSpecCard(); updateAirframeInfo(); updateHeteroRow(); applySpacing();
     forcedSeed = sc.seed != null ? sc.seed : null; // exact same map if the file has a seed
     resetSwarm({ base: sc.base, target: sc.target });
     forcedSeed = null;
+    // The toggles were set above but their status texts were not: rewrite
+    // them (these only re-write values makeSwarm already used; nothing logs).
+    applyCorridor(); applyAgility(); applyLpi(); applyVideo();
     const applyMissionOverrides = () => {
       if (sc.base) { swarm.base.x = sc.base.x; swarm.base.y = sc.base.y; }
       if (sc.target) { swarm.target.x = sc.target.x; swarm.target.y = sc.target.y; }
@@ -511,6 +514,7 @@
     radio = RADIOS.find(r => r.id === radioSel.value);
     swarm.radio = radio;
     updateSpecCard();
+    updateHeteroRow(); // the band warning compares the wing radio to this one
     applyAgility();
     resetSwarm();
   });
@@ -519,6 +523,7 @@
     swarm.envFactor = env.factor;
     swarm.shadowSigmaDb = env.shadowSigmaDb;
     updateSpecCard();
+    updateHeteroRow();
     logEvent(swarm, 'Environment: ' + env.name + ' — usable range now ' + fmtDist(usable()), 'warn');
   });
   countRange.addEventListener('input', () => {
@@ -535,6 +540,7 @@
   airframeSel.addEventListener('change', () => {
     airframe = AIRFRAMES.find(a => a.id === airframeSel.value);
     updateAirframeInfo();
+    updateHeteroRow();
     resetSwarm();
   });
 
@@ -600,10 +606,11 @@
       (margin < 3 ? ' — fragile: shadowing swings will break these links' : '');
   }
   spacingRange.addEventListener('input', applySpacing);
-  corridorChk.addEventListener('change', () => {
+  function applyCorridor() {
     if (swarm) swarm.corridorRouting = corridorChk.checked;
     corridorOut.textContent = corridorChk.checked ? 'transits follow the chain' : 'straight-line transits';
-  });
+  }
+  corridorChk.addEventListener('change', applyCorridor);
   // --- EW waveforms: spectrum agility + LPI/LPD --------------------------------
   function applyAgility() {
     if (!swarm) return;
@@ -1515,7 +1522,9 @@
     }
 
     if (droneDecisionCard) {
-      if (selected && alive(selected) && typeof explainDroneDecision === 'function') {
+      // Gate on 'dead', not alive(): a drone landed for a battery swap is not
+      // alive() but is not down either — its card says so.
+      if (selected && selected.mode !== 'dead' && typeof explainDroneDecision === 'function') {
         const exp = explainDroneDecision(swarm, selected);
         const marginStr = exp.marginDb != null ? exp.marginDb.toFixed(1) + ' dB' : '—';
         const silenceStr = exp.c2AgeSec != null ? exp.c2AgeSec.toFixed(1) + 's' : '0.0s';
@@ -1532,7 +1541,7 @@
             '<div><b>Battery:</b> ' + selected.batteryPct.toFixed(1) + '%</div>' +
             '<div><b>Energy:</b> ' + selected.energyWh.toFixed(1) + ' Wh</div>' +
           '</div>';
-      } else if (selected && !alive(selected)) {
+      } else if (selected && selected.mode === 'dead') {
         droneDecisionCard.innerHTML = '<div style="color:var(--lost)"><b>' + escHtml(selected.id) + '</b> is down (destroyed or battery exhausted).</div>';
       } else {
         droneDecisionCard.textContent = 'Select a drone on the map or fleet list to inspect its decision logic and live measurements.';
