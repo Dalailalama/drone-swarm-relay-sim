@@ -19,3 +19,10 @@ test('RFD900x air rate and sensitivity are one row of the x-Series V2.0 table', 
   assert.strictEqual(rfd.sensDbm, -93, 'x-Series datasheet V2.0 p32: 224 kbit/s -93 dBm');
   assert.strictEqual(rfd.antGainDbi, 3, 'the datasheet stock dipole is 3 dBi');
 });
+
+test('MANET presets use the vendor datasheet sensitivity / TX figures', () => {
+  // SC4400E datasheet: -102 dBm @ 5 MHz BW; -98 dBm appears nowhere.
+  assert.strictEqual(byId('silvus-sc4400').sensDbm, -102);
+  // Rajant ES1 spec sheet: "Max. RF Transmit Power 29 dBm ± 2 dB".
+  assert.strictEqual(byId('rajant-es1').txDbm, 29);
+});
