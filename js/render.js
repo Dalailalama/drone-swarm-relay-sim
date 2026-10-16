@@ -20,6 +20,7 @@ const COLORS = {
   rescue: '#6f9fe6',
   landed: '#8a887a',
   dead: '#e06050',
+  lost: '#e06050', // C2's ghost of a lost drone (css --lost)
   text: '#d6d4c8',
   textDim: '#8a887a',
   packetCmd: '#6f9fe6',
@@ -396,7 +397,7 @@ function drawLostMarkers(ctx, cv, view, s) {
     let droneNearby = false;
     for (const d of s.drones) {
       const p = worldToScreen(view, cv, d.x, d.y);
-      if (Math.hypot(p.x - c.x, p.y - c.y) < 26) { droneNearby = true; break; }
+      if (Math.hypot(p.x - c.x, p.y - c.y) < 26 * U) { droneNearby = true; break; }
     }
     ctx.beginPath(); ctx.arc(c.x, c.y, 10 * U, 0, Math.PI * 2);
     ctx.strokeStyle = COLORS.lost; ctx.lineWidth = 1.5 * U; ctx.setLineDash([3 * U, 4 * U]);
