@@ -830,7 +830,11 @@ function clampStepToBuildings(s, d, dt) {
 // Because it feeds straight into liveMarginDb, the coverage map LEARNS the
 // denied zone, the tether keeps drones from flying into it, and ETX routing
 // bends the chain around it — no special-case logic anywhere else.
-const JAM_SNR_OFFSET_DB = 10; // gap between raw interference power and the usable-floor scale
+// Default required signal-to-interference ratio (FSK-class waveforms: SiK,
+// RFD900x and similar). A preset overrides it with `jamSirDb`; LoRa CSS
+// demodulates below the interference, so its requirement is negative.
+const JAM_SNR_OFFSET_DB = 10;
+function jamSirDb(r) { return r && r.jamSirDb != null ? r.jamSirDb : JAM_SNR_OFFSET_DB; }
 
 // One band representation everywhere (review finding #20): a jammer's band
 // may arrive as a number (MHz), a numeric string, 'all', or a legacy name.
@@ -894,7 +898,7 @@ function interferenceFloorDbm(s, rxPos, rxAlt, rxRadio) {
     const pl = pl1 + 10 * n * Math.log10(Math.max(1, slant / s.envFactor));
     lin += Math.pow(10, (j.erpDbm - gainDb - pl) / 10);
   }
-  return lin > 0 ? 10 * Math.log10(lin) + JAM_SNR_OFFSET_DB : -Infinity;
+  return lin > 0 ? 10 * Math.log10(lin) + jamSirDb(rad) : -Infinity;
 }
 
 // How much interference degrades this link, in dB (>=0). Each end's floor is
@@ -945,7 +949,7 @@ function jammerDenialRadiusM(s, j) {
   if (Number.isNaN(jf) || (jf != null && Math.abs(jf - r.freqMHz) > 150)) return 0;
   const n = pathLossExponent(r);
   const eff = j.erpDbm - agilityGainDb(s, r);
-  const exp = (eff - pl1m(r.freqMHz) + JAM_SNR_OFFSET_DB - r.sensDbm) / (10 * n);
+  const exp = (eff - pl1m(r.freqMHz) + jamSirDb(r) - r.sensDbm) / (10 * n);
   return s.envFactor * Math.pow(10, exp);
 }
 

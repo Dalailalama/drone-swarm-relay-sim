@@ -73,6 +73,7 @@
     freqMHz: [30, 60000], txDbm: [-20, 60], sensDbm: [-140, -50],
     antGainDbi: [-10, 30], airRateKbps: [0.05, 2e6], rangeLosM: [10, 5e6],
     dutyCycle: [0.0001, 1], refPowerDbm: [-120, 40], nFit: [1.2, 6.5], hopGainDb: [-10, 30],
+    jamSirDb: [-30, 30],
   };
   function sanitizeRadioPreset(raw) {
     if (!raw || typeof raw !== 'object') return null;

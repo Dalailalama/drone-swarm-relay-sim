@@ -65,6 +65,10 @@ const RADIOS = [
     airRateKbps: 1,       // ~980 bps at SF10/125
     rangeLosM: 5000,      // typical near-ground open-field result
     dutyCycle: 0.1,       // 869.4-869.65 MHz sub-band: 10% duty limit by law
+    // Required SIR vs a noise-like/CW barrage jammer: SF10 demodulates 15 dB
+    // under the noise (SX1276/77/78/79 Rev.4, Table 13). A same-SF/BW LoRa
+    // interferer would need about +6 dB instead (CCR_LL).
+    jamSirDb: -15,
     note: 'Kilometres of range on milliwatts, but ~1 kbps and a legal duty-cycle cap — commands and heartbeats only, and not many of them.',
     source: 'https://www.semtech.com/products/wireless-rf/lora-connect/sx1276',
   },
