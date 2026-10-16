@@ -11,15 +11,17 @@ const { loadCore } = require('../test/helpers/sim.js');
 const { SCENARIO_PACK } = require('../js/scenarios.js');
 const R = require('../js/radios.js');
 const A = require('../js/airframes.js');
+const BS = require('../js/batchstats.js');
 const { SIM_DT_SEC } = require('../js/swarm.js');
 
 function calcStats(vals) {
   const valid = vals.filter(v => v !== null && v !== undefined && isFinite(v));
   const total = vals.length; // count/total keeps survivorship visible (arrivals)
   if (!valid.length) return { mean: 0, sd: 0, variance: 0, min: null, max: null, count: 0, total };
-  const mean = valid.reduce((sum, v) => sum + v, 0) / valid.length;
-  const variance = valid.reduce((acc, v) => acc + Math.pow(v - mean, 2), 0) / valid.length;
-  const sd = Math.sqrt(variance);
+  // Sample SD (n-1) from the batch layer, so the same runs show the same ±.
+  const mean = BS.mean(valid);
+  const sd = BS.stdev(valid);
+  const variance = sd * sd;
   const min = Math.min(...valid);
   const max = Math.max(...valid);
   return { mean, sd, variance, min, max, count: valid.length, total };
