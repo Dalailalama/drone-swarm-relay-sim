@@ -175,6 +175,11 @@ checks both servers against its examples.
 - `tak_bridge.py` — separate relay from the browser's Cursor-on-Target
   live feed (`js/tak.js`) to ATAK clients over UDP multicast; unrelated to
   the vehicle protocol.
+- `ws_origin.py` — shared Origin allowlist (stdlib only) that `bridge.py`,
+  `mock_vehicles.py` and `tak_bridge.py` use to reject WebSocket handshakes
+  from foreign web pages (cross-site WebSocket hijacking). Local origins,
+  `file://` and the GitHub Pages demo are allowed; add more with
+  `--allow-origin`.
 - `requirements.txt` — Python dependencies for `bridge.py` (and
   `mock_vehicles.py`, which only needs the `websockets` half of it).
 - `run_ardupilot_sitl.sh` — convenience launcher for N ArduCopter SITL

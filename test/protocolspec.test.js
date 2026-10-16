@@ -12,7 +12,7 @@ const { loadUI } = require('./helpers/dom.js');
 
 function docExample(type) {
   const text = fs.readFileSync(path.join(__dirname, '..', 'docs', 'PROTOCOL.md'), 'utf8');
-  for (const m of text.matchAll(/```json\n([\s\S]*?)```/g)) {
+  for (const m of text.matchAll(/```json\r?\n([\s\S]*?)```/g)) {
     const obj = JSON.parse(m[1]);
     if (obj.type === type) return obj;
   }
