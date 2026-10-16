@@ -40,23 +40,34 @@ if (typeof fmtDist !== 'function') {
 // Accepted header aliases (case-insensitive):
 //   distance: dist | distance | d | range          (metres)
 //   signal:   rssi | rssi_dbm | rssi value | signal | dbm
-//   optional position instead of distance: x, y[, z] — origin = first row
+//   (a unit suffix is fine: distance_m, 'Distance (m)', 'RSSI (dBm)'; cells may be quoted)
+//   optional position instead of distance: x|east, y|north[, z] — origin = first row
 //   optional time: t | time | timestamp
 const CAL_ALIASES = {
   dist: ['dist', 'distance', 'd', 'range'],
   rssi: ['rssi', 'rssi_dbm', 'rssidbm', 'rssi_value', 'rssivalue', 'signal', 'dbm', 'signal_strength'],
-  x: ['x', 'e', 'east'], y: ['y', 'n?'], // y alias handled loosely below
+  x: ['x', 'e', 'east'], y: ['y', 'n', 'north'],
   z: ['z', 'alt', 'altitude', 'up'],
 };
 
+// Headers may carry units: 'distance_m', 'Distance (m)', 'RSSI (dBm)'.
+// Match the bare name first, then with a trailing unit suffix stripped.
 function findCol(header, aliases) {
-  const h = header.map(s => s.trim().toLowerCase().replace(/[^a-z_]/g, ''));
-  for (const a of aliases) {
-    const i = h.indexOf(a);
-    if (i >= 0) return i;
+  const h = header.map(s => s.trim().replace(/^"|"$/g, '').toLowerCase()
+    .replace(/\(.*?\)|\[.*?\]/g, '').replace(/[^a-z_]/g, '').replace(/_+$/, ''));
+  const bare = h.map(s => s.replace(/_?(m|dbm|meters?|metres?)$/, ''));
+  for (const names of [h, bare]) {
+    for (const a of aliases) {
+      const i = names.indexOf(a);
+      if (i >= 0) return i;
+    }
   }
   return -1;
 }
+
+// A numeric cell, optionally quoted and optionally suffixed with its own
+// unit (m / dBm). Any other suffix ('1.5 km') is NaN, never a truncation.
+const CAL_CELL_RE = /^([-+]?(?:\d+\.?\d*|\.\d+)(?:e[-+]?\d+)?)\s*(m|dbm)?$/i;
 
 // Returns { samples: [{dM, rssiDbm}], dropped, notes: [] } — never throws on
 // messy data; it skips junk rows and says what it skipped.
@@ -68,18 +79,25 @@ function parseFlightLogCsv(text) {
   const header = lines[0].split(',').map(s => s.trim());
   const iD = findCol(header, CAL_ALIASES.dist);
   const iR = findCol(header, CAL_ALIASES.rssi);
-  const iX = findCol(header, ['x', 'e', 'east']);
-  const iY = findCol(header, ['y']);
+  const iX = findCol(header, CAL_ALIASES.x);
+  const iY = findCol(header, CAL_ALIASES.y);
   let iZ = findCol(header, ['z', 'alt', 'altitude']);
   const hasPos = iR >= 0 && iX >= 0 && iY >= 0;
   if (iD < 0 && !hasPos) { out.notes.push('need a distance column (dist/d/range) or x,y columns'); return out; }
   if (iR < 0) { out.notes.push('need an RSSI column (rssi/dbm/signal)'); return out; }
   if (hasPos && iZ < 0) iZ = -1;
 
+  const UNIT_NOTE = 'dropped cells with an unknown unit (e.g. "1.5 km") — give distances in metres and RSSI in dBm';
   let ox = null, oy = null, oz = null;
   for (let li = 1; li < lines.length; li++) {
-    const cells = lines[li].split(',').map(s => s.trim());
-    const num = i => (i >= 0 && i < cells.length ? parseFloat(cells[i]) : NaN);
+    const cells = lines[li].split(',').map(s => s.trim().replace(/^"(.*)"$/, '$1').trim());
+    const num = i => {
+      if (i < 0 || i >= cells.length) return NaN;
+      const m = CAL_CELL_RE.exec(cells[i]);
+      if (m) return parseFloat(m[1]);
+      if (/^[-+]?[\d.]/.test(cells[i]) && !out.notes.includes(UNIT_NOTE)) out.notes.push(UNIT_NOTE);
+      return NaN;
+    };
     let dM = num(iD);
     if (hasPos) {
       const x = num(iX), y = num(iY);

@@ -145,6 +145,24 @@ function fieldLog(g, count, dLo, dHi, n, A, sigma) {
   return out;
 }
 
+test('regression: CSV headers with units, north/east positions and quoted numerics parse', () => {
+  const body = ['10,-55', '25,-61', '50,-66', '120,-72', '300,-80', '700,-88'];
+  for (const header of ['distance_m,rssi_dbm', 'Distance (m),RSSI (dBm)', 'dist_m,rssi', 'range_m,rssi']) {
+    const p = C.parseFlightLogCsv([header].concat(body).join('\n'));
+    assert.strictEqual(p.samples.length, 6, header + ': ' + p.notes.join('; '));
+  }
+  const pos = C.parseFlightLogCsv(['east,north,rssi', '0,0,-40'].concat(
+    body.map(r => r.split(',')[0] + ',0,' + r.split(',')[1])).join('\n'));
+  assert.strictEqual(pos.samples.length, 6, 'east,north: ' + pos.notes.join('; '));
+  const quoted = C.parseFlightLogCsv(['"dist","rssi"'].concat(
+    body.slice(0, 5).map(r => r.split(',').map(c => '"' + c + '"').join(','))).join('\n'));
+  assert.strictEqual(quoted.samples.length, 5, 'quoted numerics: ' + quoted.notes.join('; '));
+  const km = C.parseFlightLogCsv(['dist,rssi', '1.5 km,-90', '200 m,-75', '300,-80'].join('\n'));
+  assert.ok(!km.samples.some(s => s.dM === 1.5), '"1.5 km" silently read as 1.5 m');
+  assert.ok(km.samples.some(s => s.dM === 200), '"200 m" is metres');
+  assert.ok(km.notes.some(n => /unit/.test(n)), km.notes.join('; '));
+});
+
 test('regression: 1000 samples at one single distance are degenerate, not a fit', () => {
   for (const dM of [150, 1234.5, 77.7]) {
     const g = gaussFrom(7);
