@@ -59,6 +59,14 @@ function makeCamera3D(s) {
 // business drawing what it can't see, and dividing by ~0 depth would blow up
 // the projection anyway.
 function project3D(cam, cvW, cvH, x, y, z) {
+  return makeProjector(cam, cvW, cvH)(x, y, z);
+}
+
+// The camera basis (eye, forward, right, up) depends only on the camera and
+// canvas, so it is built once per frame here; a scene rebuild projects tens
+// of thousands of vertices and used to redo the trig and normalisation for
+// every one. Same arithmetic as before, so results are bit-identical.
+function makeProjector(cam, cvW, cvH) {
   const cp = Math.cos(cam.pitch), sp = Math.sin(cam.pitch);
   const cyw = Math.cos(cam.yaw), syw = Math.sin(cam.yaw);
 
@@ -72,16 +80,17 @@ function project3D(cam, cvW, cvH, x, y, z) {
   const forward = v3norm(v3sub(lookAt, eye));
   const right = v3norm(v3cross(forward, { x: 0, y: 0, z: 1 }));
   const upv = v3cross(right, forward); // already unit: right, forward are orthonormal
-
-  const v = v3sub({ x, y, z }, eye);
-  const depth = v3dot(v, forward);
-  if (depth < 1) return null;
-
   const f = cvH * 1.1; // focal length in px — picked so a typical corridor fills the canvas
-  return {
-    x: cvW / 2 + (v3dot(v, right) * f) / depth,
-    y: cvH / 2 - (v3dot(v, upv) * f) / depth,
-    depth,
+
+  return (x, y, z) => {
+    const v = v3sub({ x, y, z }, eye);
+    const depth = v3dot(v, forward);
+    if (depth < 1) return null;
+    return {
+      x: cvW / 2 + (v3dot(v, right) * f) / depth,
+      y: cvH / 2 - (v3dot(v, upv) * f) / depth,
+      depth,
+    };
   };
 }
 
@@ -215,14 +224,14 @@ function texTri(ctx, img, x0, y0, x1, y1, x2, y2, u0, v0, u1, v1, u2, v2) {
 
 // Textured ground quad: same projection/depth rules as addQuad, but carries
 // its texture rect through the painter sort instead of a flat fill.
-function addTexQuad(items, cam, cv, p1, p2, p3, p4, img, u0, v0, u1, v1) {
+function addTexQuad(items, proj, p1, p2, p3, p4, img, u0, v0, u1, v1) {
   const ctr = { x: (p1.x + p2.x + p3.x + p4.x) / 4, y: (p1.y + p2.y + p3.y + p4.y) / 4, z: (p1.z + p2.z + p3.z + p4.z) / 4 };
-  const cd = project3D(cam, cv.width, cv.height, ctr.x, ctr.y, ctr.z);
+  const cd = proj(ctr.x, ctr.y, ctr.z);
   if (!cd) return;
-  const s1 = project3D(cam, cv.width, cv.height, p1.x, p1.y, p1.z);
-  const s2 = project3D(cam, cv.width, cv.height, p2.x, p2.y, p2.z);
-  const s3 = project3D(cam, cv.width, cv.height, p3.x, p3.y, p3.z);
-  const s4 = project3D(cam, cv.width, cv.height, p4.x, p4.y, p4.z);
+  const s1 = proj(p1.x, p1.y, p1.z);
+  const s2 = proj(p2.x, p2.y, p2.z);
+  const s3 = proj(p3.x, p3.y, p3.z);
+  const s4 = proj(p4.x, p4.y, p4.z);
   if (!s1 || !s2 || !s3 || !s4) return;
   items.push({ pts: [s1, s2, s3, s4], depth: cd.depth, tex: { img, u0, v0, u1, v1 } });
 }
@@ -230,18 +239,18 @@ function addTexQuad(items, cam, cv, p1, p2, p3, p4, img, u0, v0, u1, v1) {
 // Projects a quad's centroid (for depth-sort) and all 4 corners (for the
 // actual polygon). Drops the whole quad if any of those five projections
 // fails — a partially-behind-camera quad isn't worth drawing wrong.
-function addQuad(items, cam, cv, p1, p2, p3, p4, fill, stroke, lineWidth) {
+function addQuad(items, proj, p1, p2, p3, p4, fill, stroke, lineWidth) {
   const ctr = {
     x: (p1.x + p2.x + p3.x + p4.x) / 4,
     y: (p1.y + p2.y + p3.y + p4.y) / 4,
     z: (p1.z + p2.z + p3.z + p4.z) / 4,
   };
-  const cd = project3D(cam, cv.width, cv.height, ctr.x, ctr.y, ctr.z);
+  const cd = proj(ctr.x, ctr.y, ctr.z);
   if (!cd) return;
-  const s1 = project3D(cam, cv.width, cv.height, p1.x, p1.y, p1.z);
-  const s2 = project3D(cam, cv.width, cv.height, p2.x, p2.y, p2.z);
-  const s3 = project3D(cam, cv.width, cv.height, p3.x, p3.y, p3.z);
-  const s4 = project3D(cam, cv.width, cv.height, p4.x, p4.y, p4.z);
+  const s1 = proj(p1.x, p1.y, p1.z);
+  const s2 = proj(p2.x, p2.y, p2.z);
+  const s3 = proj(p3.x, p3.y, p3.z);
+  const s4 = proj(p4.x, p4.y, p4.z);
   if (!s1 || !s2 || !s3 || !s4) return;
   items.push({ depth: cd.depth, pts: [s1, s2, s3, s4], fill, stroke, lineWidth: lineWidth || 1 });
 }
@@ -260,6 +269,7 @@ const ROLE_COLOR_3D = {
 function renderView3D(ctx, cv, s, status, cam, selected) {
   const U = window.uiScale || 1;
   ctx.clearRect(0, 0, cv.width, cv.height); // transparent — host page supplies the bg
+  const proj = makeProjector(cam, cv.width, cv.height);
 
   // Terrain: a large SQUARE centered on the scene, so the ground fills the
   // view in every direction (a real landscape surrounds you) rather than a
@@ -324,14 +334,14 @@ function renderView3D(ctx, cv, s, status, cam, selected) {
       const p4 = { x: xL, y: yB, z: h01 };
 
       if (gTex) {
-        addTexQuad(items, cam, cv, p1, p2, p3, p4, gTex,
+        addTexQuad(items, proj, p1, p2, p3, p4, gTex,
           (xL - x0) * texPxPerM, (yT - y0) * texPxPerM, (xR - x0) * texPxPerM, (yB - y0) * texPxPerM);
         continue;
       }
       const normal = v3norm(v3cross(v3sub(p2, p1), v3sub(p4, p1)));
       const lambert = v3dot(normal, LIGHT_DIR);
       const avgH = (h00 + h10 + h01 + h11) / 4;
-      addQuad(items, cam, cv, p1, p2, p3, p4, terrainQuadColor(avgH, lambert), 'rgba(138,136,122,0.07)', 1);
+      addQuad(items, proj, p1, p2, p3, p4, terrainQuadColor(avgH, lambert), 'rgba(138,136,122,0.07)', 1);
     }
   }
 
@@ -378,11 +388,11 @@ function renderView3D(ctx, cv, s, status, cam, selected) {
     const wallFill = (lambert) => 'rgba(90,89,76,' + wallAlpha(lambert).toFixed(2) + ')';
     const topFill = 'rgba(120,118,103,' + wallAlpha(WALL_LAMBERT.top).toFixed(2) + ')';
 
-    addQuad(items, cam, cv, BFL, BFR, TFR, TFL, wallFill(WALL_LAMBERT.north), edgeStroke, 1);
-    addQuad(items, cam, cv, BFR, BBR, TBR, TFR, wallFill(WALL_LAMBERT.east), edgeStroke, 1);
-    addQuad(items, cam, cv, BBR, BBL, TBL, TBR, wallFill(WALL_LAMBERT.south), edgeStroke, 1);
-    addQuad(items, cam, cv, BBL, BFL, TFL, TBL, wallFill(WALL_LAMBERT.west), edgeStroke, 1);
-    addQuad(items, cam, cv, TFL, TFR, TBR, TBL, topFill, edgeStroke, 1);
+    addQuad(items, proj, BFL, BFR, TFR, TFL, wallFill(WALL_LAMBERT.north), edgeStroke, 1);
+    addQuad(items, proj, BFR, BBR, TBR, TFR, wallFill(WALL_LAMBERT.east), edgeStroke, 1);
+    addQuad(items, proj, BBR, BBL, TBL, TBR, wallFill(WALL_LAMBERT.south), edgeStroke, 1);
+    addQuad(items, proj, BBL, BFL, TFL, TBL, wallFill(WALL_LAMBERT.west), edgeStroke, 1);
+    addQuad(items, proj, TFL, TFR, TBR, TBL, topFill, edgeStroke, 1);
   }
 
   // Painter's algorithm: farthest first, nearest last.
@@ -422,8 +432,8 @@ function renderView3D(ctx, cv, s, status, cam, selected) {
     if (labelled.has(l.a.id + '>' + l.b.id) || labelled.has(l.b.id + '>' + l.a.id)) continue;
     const altA = terrainGroundAt(s.terrain, l.a.x, l.a.y) + (l.a.id === 'C2' ? 2 : s.altitudeM);
     const altB = terrainGroundAt(s.terrain, l.b.x, l.b.y) + s.altitudeM;
-    const pa = project3D(cam, cv.width, cv.height, l.a.x, l.a.y, altA);
-    const pb = project3D(cam, cv.width, cv.height, l.b.x, l.b.y, altB);
+    const pa = proj(l.a.x, l.a.y, altA);
+    const pb = proj(l.b.x, l.b.y, altB);
     if (!pa || !pb) continue;
     ctx.beginPath(); ctx.moveTo(pa.x, pa.y); ctx.lineTo(pb.x, pb.y);
     ctx.strokeStyle = l.state === 'ok' ? '#7fc95e' : l.state === 'degraded' ? '#e6b345' : '#e06050';
@@ -436,8 +446,8 @@ function renderView3D(ctx, cv, s, status, cam, selected) {
   for (const hop of status.hops) {
     const altA = terrainGroundAt(s.terrain, hop.a.x, hop.a.y) + (hop.a.id === 'C2' ? 2 : s.altitudeM);
     const altB = terrainGroundAt(s.terrain, hop.b.x, hop.b.y) + (hop.b.id === 'C2' ? 2 : s.altitudeM);
-    const pa = project3D(cam, cv.width, cv.height, hop.a.x, hop.a.y, altA);
-    const pb = project3D(cam, cv.width, cv.height, hop.b.x, hop.b.y, altB);
+    const pa = proj(hop.a.x, hop.a.y, altA);
+    const pb = proj(hop.b.x, hop.b.y, altB);
     if (!pa || !pb) continue;
     ctx.beginPath(); ctx.moveTo(pa.x, pa.y); ctx.lineTo(pb.x, pb.y);
     if (hop.state === 'ok') { ctx.strokeStyle = '#7fc95e'; ctx.setLineDash([]); }
@@ -453,7 +463,7 @@ function renderView3D(ctx, cv, s, status, cam, selected) {
   for (const d of s.drones) {
     if (d.mode === 'dead') {
       const groundAlt = terrainGroundAt(s.terrain, d.x, d.y);
-      const gp = project3D(cam, cv.width, cv.height, d.x, d.y, groundAlt);
+      const gp = proj(d.x, d.y, groundAlt);
       if (!gp) continue;
       ctx.strokeStyle = '#e06050'; ctx.lineWidth = 2 * U;
       ctx.beginPath();
@@ -466,8 +476,8 @@ function renderView3D(ctx, cv, s, status, cam, selected) {
 
     const groundAlt = terrainGroundAt(s.terrain, d.x, d.y);
     const altitude = groundAlt + s.altitudeM;
-    const gp = project3D(cam, cv.width, cv.height, d.x, d.y, groundAlt);
-    const dp = project3D(cam, cv.width, cv.height, d.x, d.y, altitude);
+    const gp = proj(d.x, d.y, groundAlt);
+    const dp = proj(d.x, d.y, altitude);
     if (!gp || !dp) continue;
 
     ctx.strokeStyle = 'rgba(138,136,122,0.4)'; ctx.lineWidth = 1 * U;
@@ -497,8 +507,8 @@ function renderView3D(ctx, cv, s, status, cam, selected) {
   // clearly against the terrain mesh from any camera angle.
   {
     const groundAlt = terrainGroundAt(s.terrain, s.base.x, s.base.y);
-    const gp = project3D(cam, cv.width, cv.height, s.base.x, s.base.y, groundAlt);
-    const tp = project3D(cam, cv.width, cv.height, s.base.x, s.base.y, groundAlt + 12);
+    const gp = proj(s.base.x, s.base.y, groundAlt);
+    const tp = proj(s.base.x, s.base.y, groundAlt + 12);
     if (gp && tp) {
       ctx.strokeStyle = '#a5a293'; ctx.lineWidth = 2 * U;
       ctx.beginPath(); ctx.moveTo(gp.x, gp.y); ctx.lineTo(tp.x, tp.y); ctx.stroke();
@@ -513,7 +523,7 @@ function renderView3D(ctx, cv, s, status, cam, selected) {
   // Target crosshair, ground-level.
   {
     const groundAlt = terrainGroundAt(s.terrain, s.target.x, s.target.y);
-    const tp = project3D(cam, cv.width, cv.height, s.target.x, s.target.y, groundAlt);
+    const tp = proj(s.target.x, s.target.y, groundAlt);
     if (tp) {
       ctx.strokeStyle = '#6f9fe6'; ctx.lineWidth = 2 * U;
       ctx.beginPath(); ctx.arc(tp.x, tp.y, 12 * U, 0, Math.PI * 2); ctx.stroke();
@@ -539,7 +549,7 @@ function renderView3D(ctx, cv, s, status, cam, selected) {
       for (let k = 0; k < N; k++) {
         const a = k / N * Math.PI * 2;
         const rx = j.x + Math.cos(a) * R, ry = j.y + Math.sin(a) * R;
-        const rp = project3D(cam, cv.width, cv.height, rx, ry, terrainGroundAt(s.terrain, rx, ry));
+        const rp = proj(rx, ry, terrainGroundAt(s.terrain, rx, ry));
         if (rp) ring.push(rp);
       }
       if (ring.length > 8) {
@@ -551,8 +561,8 @@ function renderView3D(ctx, cv, s, status, cam, selected) {
         ctx.stroke(); ctx.setLineDash([]);
       }
     }
-    const base = project3D(cam, cv.width, cv.height, j.x, j.y, g);
-    const top = project3D(cam, cv.width, cv.height, j.x, j.y, g + (j.altM || 15) + 10);
+    const base = proj(j.x, j.y, g);
+    const top = proj(j.x, j.y, g + (j.altM || 15) + 10);
     if (base && top) {
       ctx.strokeStyle = col; ctx.lineWidth = 2 * U;
       ctx.beginPath(); ctx.moveTo(base.x, base.y); ctx.lineTo(top.x, top.y); ctx.stroke();
@@ -566,5 +576,5 @@ function renderView3D(ctx, cv, s, status, cam, selected) {
 // UMD-lite export so the camera math is unit-testable under Node.
 // renderView3D needs a live canvas context, so it stays browser-only.
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { makeCamera3D, project3D, orbitCamera3D, zoomCamera3D };
+  module.exports = { makeCamera3D, project3D, makeProjector, orbitCamera3D, zoomCamera3D };
 }
