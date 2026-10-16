@@ -86,3 +86,21 @@ test('wind at or above airframe max: no relaunch churn, no phantom swaps', () =>
   assert.strictEqual(s.stats.swaps, 1);
   assert.notStrictEqual(d.mode, 'landed');
 });
+
+// CONTRIBUTING's determinism rule (no Math.random in sim code; same seed =>
+// bit-identical run) had no test that fails when it is broken.
+test('determinism: no Math.random in js/, and a mission never reaches it', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const dir = path.join(__dirname, '..', 'js');
+  for (const f of fs.readdirSync(dir).filter(f => f.endsWith('.js'))) {
+    const code = fs.readFileSync(path.join(dir, f), 'utf8')
+      .replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
+    assert.ok(!/Math\.random\s*\(/.test(code), f + ' calls Math.random: use the seeded RNG (s.net.rng)');
+  }
+  const ctx = loadCore();
+  ctx.Math = Object.assign(Object.create(Math), { random() { throw new Error('Math.random in sim code'); } });
+  const s = ctx.makeSwarm({ count: 6, airframe: Q450, radio: SIK, envFactor: 1, targetX: 1200, targetY: -300, seed: 7 });
+  while (s.time < 60) ctx.stepSwarm(s, 0.25);
+  assert.ok(s.time >= 60);
+});
