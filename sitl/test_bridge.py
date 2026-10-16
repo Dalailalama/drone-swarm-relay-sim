@@ -1621,6 +1621,37 @@ async def scenario_acceptance_runner_real_command():
     assert args.ws_port == 8799 and args.count == 3, args
 
 
+async def scenario_acceptance_runner_logs_dir_flag():
+    """CI uploads failure diagnostics from a temp dir: --logs-dir must reach the runner."""
+    import run_acceptance
+    import tempfile
+    from pathlib import Path
+
+    captured = {}
+
+    class _Runner:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        async def execute(self):
+            return None
+
+    def _run(coro):
+        coro.close()
+        return type("Report", (), {"overall_status": "passed"})()
+
+    with tempfile.TemporaryDirectory() as tmp:
+        with patch.object(run_acceptance, "AcceptanceRunner", _Runner), \
+                patch.object(run_acceptance.asyncio, "run", _run), \
+                patch.object(sys, "argv", ["run_acceptance.py", "--mode", "mock", "--logs-dir", tmp]):
+            try:
+                rc = run_acceptance.main()
+            except SystemExit as exc:
+                raise AssertionError(f"run_acceptance.py rejects --logs-dir (exit {exc.code})")
+    assert rc == 0, rc
+    assert captured.get("logs_dir") == Path(tmp), captured
+
+
 def _fake_clock_patches(run_acceptance, clock):
     async def _sleep(dt):
         clock[0] += dt
@@ -1775,6 +1806,7 @@ SCENARIOS = [
     ("#12: a climb stalled below takeoff altitude fails the takeoff step", scenario_stalled_climb_fails_takeoff),
     ("#12: recovery below takeoff altitude climbs by setpoint before READY", scenario_recovery_below_takeoff_alt_climbs_first),
     ("#7: acceptance runner's real-mode command is accepted by bridge.py's CLI", scenario_acceptance_runner_real_command),
+    ("CI: acceptance runner's --logs-dir reaches the runner", scenario_acceptance_runner_logs_dir_flag),
     ("#11: acceptance runner waits for a slow-starting server", scenario_acceptance_runner_slow_server_start),
     ("#11: acceptance runner reports a dead server at once, with its output", scenario_acceptance_runner_dead_server_reported),
     ("C03: landing rejection, descent progress noise rejection, late touchdown recovery", scenario_c03_landing_rejection_and_descent_timeout_recovery),

@@ -535,6 +535,8 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=8769, help="WebSocket port")
     parser.add_argument("--alt", type=float, default=15.0, help="Target altitude in metres")
     parser.add_argument("--report", type=Path, default=None, help="Path to write JSON acceptance report")
+    parser.add_argument("--logs-dir", type=Path, default=None,
+                        help="Directory for server and failure logs (default: sitl/logs)")
 
     args = parser.parse_args()
     runner = AcceptanceRunner(
@@ -543,6 +545,7 @@ def main() -> int:
         port=args.port,
         alt_m=args.alt,
         report_path=args.report,
+        logs_dir=args.logs_dir,
     )
 
     report = asyncio.run(runner.execute())
