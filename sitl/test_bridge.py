@@ -1865,7 +1865,36 @@ async def scenario_px4_reported_unsupported():
     await h.close()
 
 
+async def scenario_relaunch_failure_stays_parked():
+    """A relaunch whose arm is denied parks the vehicle (service 'failed'); the bridge never re-arms it itself."""
+    h = Harness()
+    clock = Clock()
+    with patch.object(bridge, "_now", clock):
+        conn = conn_for(14550)
+        v = bridge.Vehicle(id="DR-1", index=0, port=14550, conn=conn, guided_mode_id=GUIDED_MODE_ID)
+        bridge.STATE.vehicles[v.id] = v
+        conn.push(hb_msg(armed=False, custom_mode=GUIDED_MODE_ID))
+        conn.push(pos_msg(0.0, 0.0, 0.0))
+        bridge._drain_messages(v)
+        v.service_id, v.service_phase, v.takeoff_alt = "svc-1", "relaunch", 20.0
+        await bridge._enter_confirm_arm(v, clock.now)
+        conn.push(ack_msg(MAV_CMD_COMPONENT_ARM_DISARM, MAV_RESULT_DENIED))
+        bridge._drain_messages(v)
+        await bridge._advance_init(v)
+        assert v.init_state == "failed:arm", v.init_state
+        for step in range(1, 40):  # 20 s, well past RETRY_COOLDOWN_S, link healthy
+            clock.now = step * 0.5
+            conn.push(hb_msg(armed=False, custom_mode=GUIDED_MODE_ID))
+            conn.push(pos_msg(0.0, 0.0, 0.0))
+            bridge._drain_messages(v)
+            await bridge._advance_init(v)
+        assert conn.count("arm") == 1, conn.sent
+        assert v.service_phase == "failed" and not v.ready, (v.service_phase, v.init_state)
+    await h.close()
+
+
 SCENARIOS = [
+    ("A2: a failed relaunch stays parked and is never re-armed by the bridge", scenario_relaunch_failure_stays_parked),
     ("A2: a PX4 vehicle is reported unsupported, not failed:mode, and never retried", scenario_px4_reported_unsupported),
     ("A2: READY revoked when an autopilot failsafe leaves GUIDED or disarms", scenario_ready_revoked_on_autopilot_mode_change),
     ("#12: not READY at lift-off; READY at the takeoff altitude", scenario_ready_needs_takeoff_altitude),

@@ -669,6 +669,10 @@ async def _fail(vehicle: Vehicle, step: str, message: str, now: float) -> None:
     vehicle.init_state = FAILED_PREFIX + step
     vehicle.ready = False
     vehicle.failed_at = now
+    if vehicle.service_phase == "relaunch":
+        # A failed relaunch parks the vehicle (as the mock does): only a fresh
+        # browser-driven service handshake may arm it again, never a retry.
+        vehicle.service_phase = "failed"
     await _vehicle_status(vehicle, message)
     vehicle.first_pass_done.set()
 
