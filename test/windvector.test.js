@@ -73,3 +73,20 @@ test('regression #2: onboard RTH triggers immediately when the home leg becomes 
   ctx.stepSwarm(s, 0.05);
   assert.strictEqual(d.mode, 'rtb', 'drone kept flying with an unflyable home leg (mode=' + d.mode + ')');
 });
+
+test('unflyable-wind RTB is reported as wind, not as a low battery at 100% (audit EN-6)', () => {
+  const s = mkSwarm(16, 600);
+  const d = s.drones[0];
+  d.x = 100; d.y = 0; d.vx = 0; d.vy = 0;
+  d.mode = 'ok';
+  d.energyWh = ctx.usableWh(Q450);
+  ctx.stepSwarm(s, 0.05);
+  assert.strictEqual(d.mode, 'rtb');
+  assert.ok(!s.events.some(e => /battery low/.test(e.msg)), 'full-battery wind RTB logged as battery low');
+  assert.ok(s.events.some(e => e.msg.startsWith(d.id) && /unflyable/.test(e.msg) && /wind/.test(e.msg)), 'no wind/unflyable event');
+  const exp = ctx.explainDroneDecision(s, d);
+  assert.ok(!/Infinity|low battery/.test(exp.summary), exp.summary);
+  assert.ok(/unflyable/.test(exp.summary), exp.summary);
+  assert.strictEqual(exp.requiredWh, null);
+  assert.strictEqual(exp.requiredPct, null);
+});
