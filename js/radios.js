@@ -11,7 +11,7 @@ const RADIOS = [
     name: 'Holybro SiK V3 telemetry',
     freqMHz: 915,
     txDbm: 20,            // 100 mW
-    sensDbm: -117,        // at 64 kbps air rate
+    sensDbm: -105,        // at 64 kbps air rate (Holybro V3 spec)
     antGainDbi: 2,        // stock duck antenna, each end
     airRateKbps: 64,
     rangeLosM: 300,       // Holybro spec: ~300 m with stock antennas
@@ -23,10 +23,10 @@ const RADIOS = [
     name: 'RFD900x long range',
     freqMHz: 915,
     txDbm: 30,            // 1 W
-    sensDbm: -105,
-    antGainDbi: 2,        // dipoles
+    sensDbm: -93,         // at 224 kbps (x-Series datasheet V2.0; -102 dBm at 12 kbps)
+    antGainDbi: 3,        // stock 3 dBi dipoles
     airRateKbps: 224,     // configurable 12–224 kbps
-    rangeLosM: 40000,     // RFDesign datasheet: >40 km LOS with dipoles
+    rangeLosM: 40000,     // RFDesign: 40+ km LOS "depending on antennas, and settings"
     note: 'The serious option. 1 W, 40+ km line of sight. What long-range fixed-wing and BVLOS people actually fly.',
     source: 'https://rfdesign.com.au/products/rfd900x-modem/',
   },

@@ -7,8 +7,8 @@ calibration anchor for the path-loss model.
 
 | Preset | Freq | TX | RX sens | Air rate | Rated LOS | Source |
 |---|---|---|---|---|---|---|
-| Holybro SiK V3 telemetry | 915 MHz | 20 dBm | −117 dBm | 64 kbps | 300 m | [Holybro docs](https://docs.holybro.com/telemetry-radio/sik-telemetry-radio) |
-| RFD900x long range | 915 MHz | 30 dBm | −105 dBm | 224 kbps | 40 km | [RFDesign](https://rfdesign.com.au/products/rfd900x-modem/) |
+| Holybro SiK V3 telemetry | 915 MHz | 20 dBm | −105 dBm | 64 kbps | 300 m | [Holybro docs](https://docs.holybro.com/telemetry-radio/sik-telemetry-radio) |
+| RFD900x long range | 915 MHz | 30 dBm | −93 dBm | 224 kbps | 40 km | [RFDesign](https://rfdesign.com.au/products/rfd900x-modem/) |
 | ESP32 ESP-NOW | 2.4 GHz | 20 dBm | −98 dBm | 1 Mbps | 300 m | [Espressif](https://www.espressif.com/en/solutions/low-power-solutions/esp-now) |
 | ExpressLRS 2.4 GHz (100 mW) | 2.4 GHz | 20 dBm | −108 dBm | ~5 kbps telemetry | 10 km | [ExpressLRS docs](https://www.expresslrs.org/info/signal-health/) |
 | LoRa SX1276 (EU868, SF10) | 869 MHz | 20 dBm | −132 dBm | ~1 kbps | 5 km | [Semtech SX1276](https://www.semtech.com/products/wireless-rf/lora-connect/sx1276) |
@@ -16,12 +16,16 @@ calibration anchor for the path-loss model.
 
 Notes and judgment calls:
 
-- **SiK V3**: sensitivity −117 dBm is at the 64 kbps air rate. Rated range
+- **SiK V3**: sensitivity −105 dBm is Holybro's figure at the default 64 kbps
+  air rate (−121 dBm is only reached at 2 kbps). Rated range
   is with the stock duck antennas; the community routinely gets several km
   with better antennas — model that by editing `rangeLosM`.
 - **RFD900x**: air rate is configurable 12–224 kbps; sensitivity varies with
-  rate. The preset uses the high-rate figures with the >40 km claim, which
-  RFDesign states for dipole antennas.
+  rate (x-Series datasheet V2.0, p32: −102 dBm at 12 kbps, −101 dBm at the
+  64 kbps default, −93 dBm at 224 kbps). The preset uses the 224 kbps row
+  and the datasheet's stock 3 dBi dipoles. RFDesign quotes the range as
+  "40+km (depending on antennas, and settings)" — not tied to dipoles or to
+  an air rate, so 40 km at 224 kbps is the optimistic end of that claim.
 - **ESP-NOW**: Espressif doesn't publish an official range; 200–480 m open
   field is the consistently reproduced community figure at 1 Mbps. The
   preset uses 300 m.
