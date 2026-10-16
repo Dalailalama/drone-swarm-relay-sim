@@ -1,4 +1,8 @@
-"""bridge.py - browser WebSocket <-> ArduPilot/PX4 SITL MAVLink bridge.
+"""bridge.py - browser WebSocket <-> ArduCopter (ArduPilot) SITL MAVLink bridge.
+
+ArduCopter only: the init sequence needs GUIDED, which PX4 does not have
+(PX4 would need OFFBOARD with a setpoint stream), so a PX4 heartbeat is
+reported as failed:unsupported-autopilot and never armed.
 
 This is the "real" half of the pair (see mock_vehicles.py for the
 no-firmware stand-in that speaks the identical WebSocket protocol).
@@ -136,7 +140,7 @@ from websockets.asyncio.server import serve
 from websockets.asyncio.server import broadcast
 from websockets.exceptions import ConnectionClosed
 
-# pymavlink is required for all MAVLink communication with ArduPilot/PX4
+# pymavlink is required for all MAVLink communication with ArduCopter
 # SITL (or real autopilots). It is NOT a dependency of mock_vehicles.py.
 # If this import fails: `pip install pymavlink` (see requirements.txt).
 from pymavlink import mavutil
@@ -177,6 +181,7 @@ INIT_ABORT_HOLD = "abort-hold"
 INIT_MODE_LOST_PREFIX = "mode-lost:"  # + custom_mode: READY revoked, vehicle left GUIDED on its own
 INIT_DISARMED = "disarmed"  # READY revoked, vehicle disarmed on its own (e.g. failsafe landing)
 READY_REVOKE_HEARTBEATS = 2  # consecutive non-GUIDED/disarmed heartbeats that revoke READY
+MAV_AUTOPILOT_PX4 = 12  # HEARTBEAT.autopilot of PX4 firmware (unsupported, see module docstring)
 FAILED_PREFIX = "failed:"  # + step name, e.g. "failed:arm", "failed:no-heartbeat"
 
 # --- MAVLink constants that need explaining -------------------------------
@@ -246,6 +251,7 @@ class Vehicle:
 
     # --- link/telemetry state, updated by this vehicle's drain -------------
     last_heartbeat: Optional[float] = None  # monotonic seconds, or None if never seen
+    autopilot: Optional[int] = None  # latest HEARTBEAT.autopilot (MAV_AUTOPILOT_*)
     base_mode: int = 0  # latest HEARTBEAT.base_mode (carries MAV_MODE_FLAG_SAFETY_ARMED)
     custom_mode: Optional[int] = None  # latest HEARTBEAT.custom_mode (ArduPilot flight mode id)
     heartbeat_seq: int = 0  # HEARTBEATs drained so far; READY re-checks each new one
@@ -542,6 +548,8 @@ def _drain_messages(vehicle: Vehicle) -> None:
         if mtype == "HEARTBEAT":
             vehicle.last_heartbeat = _now()
             vehicle.base_mode = int(getattr(msg, "base_mode", 0) or 0)
+            autopilot = getattr(msg, "autopilot", None)
+            vehicle.autopilot = None if autopilot is None else int(autopilot)
             custom = getattr(msg, "custom_mode", None)
             vehicle.custom_mode = None if custom is None else int(custom)
             vehicle.heartbeat_seq += 1
@@ -585,6 +593,14 @@ def _enter_step(vehicle: Vehicle, state: str, now: float) -> None:
 
 async def _enter_confirm_mode(vehicle: Vehicle, now: float) -> None:
     """Resolve the GUIDED mode id and ask for it."""
+    if vehicle.autopilot == MAV_AUTOPILOT_PX4:
+        await _fail(
+            vehicle,
+            "unsupported-autopilot",
+            f"vehicle {vehicle.id}: PX4 autopilot is not supported (ArduCopter only: no GUIDED mode); not arming",
+            now,
+        )
+        return
     if vehicle.guided_mode_id is None:
         try:
             # mode_mapping() needs the heartbeat (it keys off the vehicle
@@ -690,6 +706,8 @@ async def _recover_if_possible(vehicle: Vehicle, now: float) -> None:
         return  # nothing to talk to yet; keep polling for a heartbeat
     if vehicle.service_phase in ("failed", "aborted") or vehicle.init_state == FAILED_PREFIX + "abort":
         return
+    if vehicle.init_state == FAILED_PREFIX + "unsupported-autopilot":
+        return  # retrying cannot help: the firmware has no GUIDED mode
     # A vehicle that only just started talking is retried immediately (that
     # heartbeat IS the thing we were waiting for); anything else backs off,
     # so a vehicle failing its pre-arm checks isn't hammered every 20 ms.
@@ -1423,7 +1441,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Bridge between a browser drone-swarm sim (WebSocket/JSON) and "
-            "real ArduPilot/PX4 SITL vehicles (MAVLink/UDP). Requires "
+            "real ArduCopter SITL vehicles (MAVLink/UDP). Requires "
             "pymavlink; see requirements.txt."
         )
     )

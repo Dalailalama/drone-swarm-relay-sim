@@ -1842,7 +1842,31 @@ async def scenario_ready_revoked_on_autopilot_mode_change():
     await h.close()
 
 
+async def scenario_px4_reported_unsupported():
+    """A PX4 heartbeat fails as unsupported-autopilot (ArduCopter only), never retried."""
+    h = Harness()
+    clock = Clock()
+    with patch.object(bridge, "_now", clock):
+        conn = conn_for(14550)
+        conn.mode_map = {"MANUAL": 65536, "OFFBOARD": 393216, "RTL": 84148224}  # px4_map: no GUIDED
+        v = bridge.Vehicle(id="DR-1", index=0, port=14550, conn=conn)
+        bridge.STATE.vehicles[v.id] = v
+        conn.push(FakeMsg("HEARTBEAT", base_mode=0, custom_mode=0, autopilot=12))  # MAV_AUTOPILOT_PX4
+        bridge._drain_messages(v)
+        await bridge._advance_init(v)
+        assert v.init_state == "failed:unsupported-autopilot", v.init_state
+        assert not v.ready
+        clock.now = 60.0
+        conn.push(FakeMsg("HEARTBEAT", base_mode=0, custom_mode=0, autopilot=12))
+        bridge._drain_messages(v)
+        await bridge._advance_init(v)
+        assert v.init_state == "failed:unsupported-autopilot", v.init_state
+        assert conn.count("set_mode") == 0 and conn.count("arm") == 0, conn.sent
+    await h.close()
+
+
 SCENARIOS = [
+    ("A2: a PX4 vehicle is reported unsupported, not failed:mode, and never retried", scenario_px4_reported_unsupported),
     ("A2: READY revoked when an autopilot failsafe leaves GUIDED or disarms", scenario_ready_revoked_on_autopilot_mode_change),
     ("#12: not READY at lift-off; READY at the takeoff altitude", scenario_ready_needs_takeoff_altitude),
     ("#12: a long steady climb is not failed by the step timeout", scenario_long_climb_not_timed_out),
