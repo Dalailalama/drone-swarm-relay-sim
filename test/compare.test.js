@@ -72,3 +72,23 @@ test('compare lays the city along the real base->target corridor and honours cit
   assert.strictEqual(t.buildings.length, page((sc.cityDensity ?? 40) / 100).buildings.length);
   assert.strictEqual(buildCompareTerrain(ctx, { ...sc, cityDensity: 0 }, 101).buildings.length, page(0).buildings.length);
 });
+
+test('compare energy keeps what was burned before a battery swap reset the pack to full', () => {
+  const ctx = loadCore(['scenarios.js']);
+  const sc = resolveScenario('ddil-disrupted').scenario;
+  // Wrap the real step: at t=5 s every pack is swapped back to full, the way a
+  // completed swap does in swarm.js. Burn before the swap must still count.
+  let full = null, burnedBeforeSwap = 0, swapped = false;
+  const wrapped = Object.create(ctx);
+  wrapped.stepSwarm = (s, dt) => {
+    if (!full) full = new Map(s.drones.map(d => [d.id, d.energyWh]));
+    ctx.stepSwarm(s, dt);
+    if (!swapped && s.time >= 5) {
+      swapped = true;
+      for (const d of s.drones) { burnedBeforeSwap += full.get(d.id) - d.energyWh; d.energyWh = full.get(d.id); }
+    }
+  };
+  const r = runScenarioSeed(wrapped, { id: 'e', title: 'e', scenario: sc }, 101, 6);
+  assert.ok(swapped);
+  assert.ok(r.meanWhConsumed >= 0.99 * burnedBeforeSwap / sc.count, `${r.meanWhConsumed} vs ${burnedBeforeSwap / sc.count}`);
+});

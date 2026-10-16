@@ -122,13 +122,19 @@ function runScenarioSeed(ctx, scenarioObj, seed, durationSec) {
     videoKbps: sc.videoKbps ?? 250,
   });
 
-  // Calculate starting energy Wh
-  const startWhMap = new Map(s.drones.map(d => [d.id, d.energyWh]));
+  // Energy is integrated per step: a completed battery swap resets energyWh to
+  // full, so start-minus-final would forget everything burned before it.
+  let totalWhConsumed = 0;
   let firstArrivalTime = null;
   const targetDistThreshold = 200; // metres from target
 
   while (s.time < durationSec) {
+    const beforeWh = new Map(s.drones.map(d => [d.id, d.energyWh]));
     ctx.stepSwarm(s, SIM_DT_SEC);
+    for (const d of s.drones) {
+      const before = beforeWh.get(d.id);
+      if (before != null) totalWhConsumed += Math.max(0, before - d.energyWh);
+    }
 
     if (firstArrivalTime === null) {
       for (const d of s.drones) {
@@ -143,12 +149,6 @@ function runScenarioSeed(ctx, scenarioObj, seed, durationSec) {
     }
   }
 
-  // Energy consumed across all drones
-  let totalWhConsumed = 0;
-  for (const d of s.drones) {
-    const init = startWhMap.get(d.id) || d.energyWh;
-    totalWhConsumed += Math.max(0, init - d.energyWh);
-  }
   const meanWhConsumed = totalWhConsumed / Math.max(1, s.drones.length);
 
   const connSec = s.stats.fleetConnSec || s.stats.connSec || 0;
