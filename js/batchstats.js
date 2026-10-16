@@ -58,10 +58,12 @@ function summarizeGroups(rows, keyFn) {
   return out;
 }
 
-function fmtStat(st, digits, suffix) {
+// scale lets a 0..1 fraction print as a percentage like the other columns.
+function fmtStat(st, digits, suffix, scale) {
   if (!st) return '—';
-  return st.mean.toFixed(digits) + suffix + ' ±' + st.sd.toFixed(digits) +
-    ' (p05 ' + st.p05.toFixed(digits) + ', p95 ' + st.p95.toFixed(digits) + ')';
+  const k = scale || 1;
+  return (k * st.mean).toFixed(digits) + suffix + ' ±' + (k * st.sd).toFixed(digits) +
+    ' (p05 ' + (k * st.p05).toFixed(digits) + ', p95 ' + (k * st.p95).toFixed(digits) + ')';
 }
 
 // Markdown confidence report over summarized groups.
@@ -78,7 +80,7 @@ function reportMd(label, summary, metaLines) {
   for (const g of summary) {
     L.push('| ' + g.cell + ' | ' + g.runs + ' | ' + fmtStat(g.uptime, 1, '%') +
       ' | ' + fmtStat(g.dropped, 1, '%') + ' | ' + fmtStat(g.vidLoss, 1, '%') +
-      ' | ' + fmtStat(g.freshFrac, 1, '') + ' |');
+      ' | ' + fmtStat(g.freshFrac, 1, '%', 100) + ' |');
   }
   L.push('');
   L.push('_uptime = share of the mission with an end-to-end route from C2 to the objective area._');
