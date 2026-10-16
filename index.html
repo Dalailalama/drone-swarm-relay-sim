@@ -21,7 +21,7 @@
 
 <main>
   <div id="mapWrap">
-    <canvas id="map"></canvas>
+    <canvas id="map" aria-label="Mission map"></canvas>
     <div id="mapAttrib" style="display:none;">map &copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions" target="_blank" rel="noopener">CARTO</a></div>
     <div id="legend">
       <span class="lg-mission">mission</span>
@@ -49,9 +49,9 @@
 
     <section>
       <h2>Radio hardware</h2>
-      <select id="radioSel"></select>
+      <select id="radioSel" aria-label="Radio"></select>
       <div style="height:8px"></div>
-      <select id="envSel"></select>
+      <select id="envSel" aria-label="Environment"></select>
       <div style="height:10px"></div>
       <div id="specCard"></div>
     </section>
@@ -65,7 +65,7 @@
       </div>
       <div id="scaleNote" class="af-info" style="display:none;">Large fleets (100+) are supported and benchmarked — see bench/BASELINE.md. Expect the shared channel, not the physics, to be the binding constraint.</div>
       <div style="height:10px"></div>
-      <select id="airframeSel"></select>
+      <select id="airframeSel" aria-label="Airframe"></select>
       <div id="airframeInfo" class="af-info"></div>
       <div class="ctl-row">
         <label for="heteroChk">Mixed fleet</label>
@@ -79,9 +79,9 @@
           <output id="wingOut">4</output>
         </div>
         <div style="height:8px"></div>
-        <select id="relayAirframeSel"></select>
+        <select id="relayAirframeSel" aria-label="Relay airframe"></select>
         <div style="height:8px"></div>
-        <select id="relayRadioSel"></select>
+        <select id="relayRadioSel" aria-label="Relay radio"></select>
         <div id="heteroInfo" class="af-info"></div>
       </div>
       <div class="ctl-row">
@@ -237,7 +237,7 @@
     <section>
       <h2>Mission library</h2>
       <div class="ctl-row">
-        <select id="missionSel" style="flex:1;"></select>
+        <select id="missionSel" aria-label="Mission" style="flex:1;"></select>
       </div>
       <div id="missionBlurb" class="af-info"></div>
       <div class="btn-row">
@@ -248,7 +248,7 @@
     <section>
       <h2>Scenario</h2>
       <div class="ctl-row">
-        <select id="packSel" style="flex:1;"></select>
+        <select id="packSel" aria-label="Scenario" style="flex:1;"></select>
       </div>
       <div id="packBlurb" class="af-info"></div>
       <div class="btn-row">
@@ -269,7 +269,7 @@
       <h2>Calibration (sim &harr; real)</h2>
       <div id="calIntro" class="af-info">Walk two real radios apart logging RSSI vs distance (any CSV: <b>dist</b>,<b>rssi</b> or <b>x</b>,<b>y</b>[,<b>z</b>],<b>rssi</b>). The fit re-derives this simulator's path-loss exponent from YOUR field data and issues a calibrated radio preset + validation report.</div>
       <div class="ctl-row">
-        <select id="calRadioSel" style="flex:1;"></select>
+        <select id="calRadioSel" aria-label="Radio to calibrate" style="flex:1;"></select>
       </div>
       <div class="btn-row">
         <input type="file" id="calFileInput" accept=".csv,text/csv,text/plain" style="display:none;">

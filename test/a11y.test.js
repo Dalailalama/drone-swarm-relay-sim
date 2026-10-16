@@ -2,6 +2,8 @@
 //  Landscape phones: the narrow-screen block stacks the map (min-height
 //      300px) above the panel, so at ~812x375 the whole control panel was a
 //      37px scroller under the map.
+//  Unlabelled selects: eight <select>s and the map canvas had no label, so
+//      assistive tech announced them by their current value.
 const { test } = require('node:test');
 const assert = require('node:assert');
 const fs = require('node:fs');
@@ -9,6 +11,7 @@ const path = require('node:path');
 
 const ROOT = path.join(__dirname, '..');
 const CSS = fs.readFileSync(path.join(ROOT, 'css', 'style.css'), 'utf8');
+const HTML = fs.readFileSync(path.join(ROOT, 'index.html'), 'utf8');
 
 // Body of the first @media block whose condition matches `re` ('' if none).
 function mediaBlock(re) {
@@ -27,4 +30,17 @@ test('short landscape phones go back to side-by-side instead of a 37px panel str
   assert.match(body, /#mapWrap\s*\{[^}]*min-height:\s*0/, 'the map must drop its 300px min-height');
   assert.ok(CSS.lastIndexOf('@media (max-width: 820px) {') < CSS.search(/orientation:\s*landscape/),
     'the landscape block must come after the stacked block so it wins');
+});
+
+test('every select, visible input and the map canvas has an accessible name', () => {
+  const tags = [...HTML.matchAll(/<(select|input|canvas)\b([^>]*)>/g)];
+  const unnamed = [];
+  for (const [, tag, attrs] of tags) {
+    const id = (attrs.match(/\bid="([^"]+)"/) || [])[1];
+    if (/type="file"/.test(attrs) && /display:\s*none/.test(attrs)) continue; // driven by a labelled button
+    const named = /\baria-label(ledby)?="[^"]+"/.test(attrs) || /\btitle="[^"]+"/.test(attrs)
+      || (id && HTML.includes('for="' + id + '"'));
+    if (!named) unnamed.push(tag + '#' + id);
+  }
+  assert.deepStrictEqual(unnamed, [], 'controls whose name falls back to their current value');
 });
