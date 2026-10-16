@@ -16,12 +16,20 @@ jobs:
         with:
           fetch-depth: 2
 
+      # PR: the checked-out merge commit's first parent is the base tip
+      # (origin/<base> is never fetched). Push: diff the whole push against
+      # the previous tip, and let findings fail the job.
       - name: Check for trailing whitespace and merge artifacts
+        env:
+          BEFORE: ${{ github.event.before }}
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then
-            git diff --check origin/${{ github.base_ref }}...HEAD
+            git diff --check HEAD^1 HEAD
+          elif [ -n "$BEFORE" ] && [ "$BEFORE" != "0000000000000000000000000000000000000000" ]; then
+            git fetch --no-tags --depth=1 origin "$BEFORE"
+            git diff --check "$BEFORE" HEAD
           else
-            git diff --check HEAD~1...HEAD || true
+            git diff --check "$(git hash-object -t tree /dev/null)" HEAD
           fi
 
   test-javascript:
