@@ -448,3 +448,42 @@ test('W05: delayed processing of recorded interruption truncates airtime and fre
   ctx.stepNet(s, 3.95);
   assert.ok(Math.abs(s.net.utilization - 0.004) < 1e-4, 'utilization must reflect only 0.020s airtime (got ' + s.net.utilization + ')');
 });
+
+// NET-01: C2 carries one matched radio unit per radio type, and a duty
+// limit binds each transmitter separately — a LoRa unit's legal rest must
+// not silence C2's unrelated 2.4 GHz unit.
+test('NET-01: C2 duty/tx clocks are per radio unit, not shared across bands', () => {
+  const LORA = R.RADIOS.find(r => r.id === 'lora868');
+  const ESPNOW = R.RADIOS.find(r => r.id === 'espnow');
+  const s = ctx.makeSwarm({
+    count: 2, airframe: Q450, radio: LORA, envFactor: 1,
+    targetX: 600, targetY: 0, altitudeM: 50, seed: 42,
+  });
+  s.time = 0;
+  const [a, b] = s.drones;
+  a.x = 50; a.y = 0; a.radio = LORA;
+  b.x = 0; b.y = 50; b.radio = ESPNOW;
+  const starts = {};
+  const orig = ctx.commitPacket;
+  ctx.commitPacket = function (s2, p, eStart) {
+    if (!(p.dst in starts)) starts[p.dst] = eStart;
+    return orig(s2, p, eStart);
+  };
+  try {
+    assert.ok(ctx.sendPacket(s, 'cmd', 'C2', a.id, { role: 'mission' }));
+    assert.ok(ctx.sendPacket(s, 'cmd', 'C2', b.id, { role: 'mission' }));
+    run(s, 0, 1, 0.05);
+    assert.ok(starts[a.id] < 0.01, 'LoRa cmd starts at once');
+    assert.ok(starts[b.id] < 0.01, 'ESP-NOW cmd waited on the LoRa unit (' + starts[b.id] + ' s)');
+    // The LoRa unit's own duty rest still holds for its next transmission.
+    const loraRest = Math.max(s.net.nodeDutyUntil.C2 || 0, s.net.nodeDutyUntil['C2@' + LORA.id] || 0);
+    assert.ok(loraRest > 1, 'LoRa duty rest recorded');
+    delete starts[a.id];
+    s.time = 1;
+    assert.ok(ctx.sendPacket(s, 'cmd', 'C2', a.id, { role: 'mission' }));
+    run(s, 1, loraRest + 1, 0.05);
+    assert.ok(starts[a.id] >= loraRest - 1e-9, 'second LoRa cmd ignored its duty rest');
+  } finally {
+    ctx.commitPacket = orig;
+  }
+});
