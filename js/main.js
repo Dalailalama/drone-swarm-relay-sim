@@ -226,7 +226,7 @@
       distOut.textContent = fmtDist(span);
     } else {
       const dist = +distRange.value / 100 * defaultTargetDist();
-      distOut.textContent = fmtDist(dist);
+      distOut.textContent = fmtDist(Math.hypot(dist, dist * 0.25)); // the C2→target range, not its x
       tX = dist;
       tY = -dist * 0.25;
     }
@@ -574,8 +574,16 @@
   relayRadioSel.addEventListener('change', () => { updateHeteroRow(); if (heteroChk.checked) resetSwarm(); });
   distRange.addEventListener('input', () => {
     const dist = +distRange.value / 100 * defaultTargetDist();
-    distOut.textContent = fmtDist(dist);
-    if (swarm) { swarm.target.x = dist; swarm.target.y = -dist * 0.25; }
+    const len = Math.hypot(dist, dist * 0.25); // the length resetSwarm's default (dist, -dist/4) has
+    if (!swarm) { distOut.textContent = fmtDist(len); return; }
+    // Measure from C2 along its current bearing to the target — C2 may have
+    // moved (convoy mission, a dragged C2), so the world origin means nothing.
+    let ux = swarm.target.x - swarm.base.x, uy = swarm.target.y - swarm.base.y;
+    let n = Math.hypot(ux, uy);
+    if (!(n > 1e-6)) { ux = 1; uy = -0.25; n = Math.hypot(ux, uy); }
+    swarm.target.x = swarm.base.x + ux / n * len;
+    swarm.target.y = swarm.base.y + uy / n * len;
+    distOut.textContent = fmtDist(Math.hypot(swarm.target.x - swarm.base.x, swarm.target.y - swarm.base.y));
   });
   altRange.addEventListener('input', () => {
     altOut.textContent = altRange.value + ' m';
@@ -1666,7 +1674,7 @@
   applyLpi();
   applyVideo();
   resetSwarm();
-  distOut.textContent = fmtDist(+distRange.value / 100 * defaultTargetDist());
+  if (swarm) distOut.textContent = fmtDist(Math.hypot(swarm.target.x - swarm.base.x, swarm.target.y - swarm.base.y));
   document.querySelector('[data-speed="5"]').classList.add('active');
   requestAnimationFrame(frame);
 })();
