@@ -1059,12 +1059,16 @@ function groundSpeedAlong(af, wind, fromP, toP) {
 function orderFeasible(s, d, order) {
   const af = afOf(s, d);
   const goal = orderGoal(s, order);
-  const gOut = groundSpeedAlong(af, s.wind, d, goal);
-  const gHome = groundSpeedAlong(af, s.wind, goal, s.base);
+  // Drone-side: plan from beliefs (nav position, last-known base), never truth.
+  // Wind is still the true vector — no onboard wind estimate is modeled.
+  const here = { x: d.belX, y: d.belY };
+  const homeK = d.baseKnown || s.base;
+  const gOut = groundSpeedAlong(af, s.wind, here, goal);
+  const gHome = groundSpeedAlong(af, s.wind, goal, homeK);
   if (gOut < 0.5 || gHome < 0.5) return false; // a leg that can't be flown fails every backup plan
   const pw = flightPowerW(af, af.maxSpeedMs);
-  const whToGoal = pw * (dist2d(d, goal) / gOut) / 3600;
-  const whGoalHome = pw * (dist2d(goal, s.base) / gHome) / 3600 * BATTERY.homeMargin;
+  const whToGoal = pw * (dist2d(here, goal) / gOut) / 3600;
+  const whGoalHome = pw * (dist2d(goal, homeK) / gHome) / 3600 * BATTERY.homeMargin;
   return d.energyWh > whToGoal + whGoalHome + usableWh(af) * BATTERY.reserveFrac;
 }
 
@@ -1704,8 +1708,9 @@ function updateBattery(s, d, dt, vAirMs) {
     // cost — alarm and turn back NOW rather than burn battery pretending a
     // floored "1 m/s" return exists.
     const homeK = d.baseKnown || s.base; // the drone plans against what it KNOWS (finding #18)
-    const gHome = groundSpeedAlong(af, s.wind, d, homeK);
-    const secsHome = gHome > 0.05 ? dist2d(d, homeK) / gHome : Infinity;
+    const here = { x: d.belX, y: d.belY }; // and from where it BELIEVES it is (audit EN-8)
+    const gHome = groundSpeedAlong(af, s.wind, here, homeK);
+    const secsHome = gHome > 0.05 ? dist2d(here, homeK) / gHome : Infinity;
     const whHome = flightPowerW(af, af.maxSpeedMs) * secsHome / 3600 * BATTERY.homeMargin;
     if (d.energyWh <= whHome + usableWh(af) * BATTERY.reserveFrac) {
       d.mode = 'rtb';
