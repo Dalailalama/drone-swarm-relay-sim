@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// Batch Monte Carlo engine — "run 500 seeded missions overnight, wake up to
-// a confidence report."
+// Batch Monte Carlo engine — up to LIMITS.maxTotalRuns (200) seeded runs per
+// batch (chain batches for more), summarized as a seed-distribution report.
 //
 //   node tools/batch.js --config batch/example.json --out out/
 //
