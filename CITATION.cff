@@ -1,0 +1,21 @@
+cff-version: 1.2.0
+message: "If you use this simulator in research or a report, please cite it as below."
+title: "drone-swarm-relay-sim: a drone-swarm relay-mesh simulator with real radio presets"
+type: software
+authors:
+  - given-names: Dhruv
+    alias: dalailalama
+license: MIT
+repository-code: "https://github.com/dalailalama/drone-swarm-relay-sim"
+url: "https://dalailalama.github.io/drone-swarm-relay-sim/"
+abstract: >-
+  Zero-dependency browser simulator of a drone swarm that holds a relay mesh
+  between a ground station and a far objective, with real radio presets, a
+  calibrated path-loss model, jamming and GPS denial, and a Python bridge that
+  flies the same plan on ArduPilot SITL.
+keywords:
+  - drone swarm
+  - relay mesh
+  - radio propagation
+  - simulation
+  - ArduPilot SITL
