@@ -1253,7 +1253,34 @@ async def scenario_c04_airborne_and_grounded_abort():
         await bridge.handle_message(ws, json.dumps({
             "type": "service", "id": "DR-1", "requestId": "svc-ab1", "action": "abort",
         }), None, 14550)
+        # The GUIDED heartbeat predates the abort (NAV_LAND may already have
+        # switched to LAND): no hold until a newer heartbeat confirms GUIDED.
+        assert v.init_state == bridge.INIT_CONFIRM_ABORT, f"stale heartbeat must not confirm abort, got {v.init_state}"
+        modes_before = conn.count("set_mode")
+        for t in (0.8, 1.1, 1.4):  # the request was lost: the vehicle keeps reporting LAND
+            clock.now = t
+            conn.push(hb_msg(armed=True, custom_mode=9))
+            conn.push(pos_msg(-8.0, 12.0, -19.0))
+            bridge._drain_messages(v)
+            await bridge._advance_init(v)
+            assert v.init_state == bridge.INIT_CONFIRM_ABORT, v.init_state
+        assert conn.count("set_mode") > modes_before, "GUIDED must be re-requested while unconfirmed"
+        clock.now = 1.6
+        conn.push(hb_msg(armed=True, custom_mode=GUIDED_MODE_ID))
+        bridge._drain_messages(v)
+        await bridge._advance_init(v)
         assert v.init_state == bridge.INIT_ABORT_HOLD, f"expected abort-hold, got {v.init_state}"
+        # A later heartbeat out of GUIDED loses the hold: back to confirming.
+        clock.now = 1.8
+        conn.push(hb_msg(armed=True, custom_mode=9))
+        bridge._drain_messages(v)
+        await bridge._advance_init(v)
+        assert v.init_state == bridge.INIT_CONFIRM_ABORT, v.init_state
+        clock.now = 2.0
+        conn.push(hb_msg(armed=True, custom_mode=GUIDED_MODE_ID))
+        bridge._drain_messages(v)
+        await bridge._advance_init(v)
+        assert v.init_state == bridge.INIT_ABORT_HOLD, v.init_state
         assert v.service_phase == "aborted"
         assert not v.ready
 
@@ -1296,6 +1323,10 @@ async def scenario_c04_airborne_and_grounded_abort():
         await bridge.handle_message(ws, json.dumps({
             "type": "service", "id": "DR-1", "requestId": "svc-ab-low", "action": "abort",
         }), None, 14550)
+        clock.now += 0.1
+        conn.push(hb_msg(armed=True, custom_mode=GUIDED_MODE_ID))
+        bridge._drain_messages(v)
+        await bridge._advance_init(v)
         assert v.init_state == bridge.INIT_ABORT_HOLD, f"armed vehicle at -5m must abort to hold, got {v.init_state}"
         assert v.service_phase == "aborted"
         assert conn.count("setpoint") >= 1
@@ -1312,6 +1343,10 @@ async def scenario_c04_airborne_and_grounded_abort():
         await bridge.handle_message(ws, json.dumps({
             "type": "service", "id": "DR-1", "requestId": "svc-ab-hover", "action": "abort",
         }), None, 14550)
+        clock.now += 0.1
+        conn.push(hb_msg(armed=True, custom_mode=GUIDED_MODE_ID))
+        bridge._drain_messages(v)
+        await bridge._advance_init(v)
         assert v.init_state == bridge.INIT_ABORT_HOLD, "low hover armed vehicle must abort to hold"
 
         # 1d. Abort with stale position (W07): never command stale target; wait for fresh sample

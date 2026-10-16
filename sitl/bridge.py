@@ -278,6 +278,7 @@ class Vehicle:
     hold_x: Optional[float] = None
     hold_y: Optional[float] = None
     hold_alt: Optional[float] = None
+    abort_requested_at: float = 0.0  # GUIDED for an abort is confirmed only by a heartbeat newer than this
     service_action_history: dict = field(default_factory=dict)
     origin: dict = field(default_factory=lambda: {"frame": "common-local-origin", "x": 0.0, "y": 0.0, "groundM": 0.0})
 
@@ -732,7 +733,9 @@ async def _advance_init(vehicle: Vehicle) -> None:
 
     if state == INIT_CONFIRM_ABORT:
         elapsed = now - vehicle.step_started_at
-        if vehicle.connected and vehicle.mode_confirmed and vehicle.position_fresh:
+        guided_since_request = (vehicle.connected and vehicle.mode_confirmed
+                                and vehicle.last_heartbeat > vehicle.abort_requested_at)
+        if guided_since_request and vehicle.position_fresh:
             vehicle.hold_x = vehicle.x
             vehicle.hold_y = vehicle.y
             vehicle.hold_alt = vehicle.alt
@@ -753,13 +756,24 @@ async def _advance_init(vehicle: Vehicle) -> None:
             )
             vehicle.service_phase = "failed"
             return
-        elif (not vehicle.connected or not vehicle.mode_confirmed) and now - vehicle.step_sent_at >= STEP_RESEND_DT:
+        elif not guided_since_request and now - vehicle.step_sent_at >= STEP_RESEND_DT:
             _send_set_mode(vehicle)
             vehicle.step_sent_at = now
         return
 
     if state == INIT_ABORT_HOLD:
-        # Airborne hold after abort: hold current position in GUIDED
+        # Airborne hold after abort: hold current position in GUIDED. A newer
+        # heartbeat out of GUIDED (the hold was lost) goes back to confirming,
+        # which re-requests GUIDED and fails the abort if it never returns.
+        if vehicle.connected and not vehicle.mode_confirmed and vehicle.last_heartbeat > vehicle.step_started_at:
+            _enter_step(vehicle, INIT_CONFIRM_ABORT, now)
+            vehicle.abort_requested_at = now
+            _send_set_mode(vehicle)
+            await _vehicle_status(
+                vehicle,
+                f"vehicle {vehicle.id}: abort hold lost (heartbeat reports mode {vehicle.custom_mode}), re-requesting GUIDED",
+            )
+            return
         if vehicle.conn is not None and vehicle.connected and vehicle.mode_confirmed and vehicle.position_fresh:
             _send_hold_target(vehicle)
         return
@@ -1287,15 +1301,12 @@ async def handle_service(websocket, msg: dict) -> None:
                 v.hold_x = None
                 v.hold_y = None
                 v.hold_alt = None
+                # Always confirm through a heartbeat newer than this request:
+                # the latest one may predate a NAV_LAND that already switched
+                # the vehicle to LAND, so it is no evidence GUIDED is back.
+                _enter_step(v, INIT_CONFIRM_ABORT, now)
+                v.abort_requested_at = now
                 _send_set_mode(v)
-                if v.connected and v.mode_confirmed and v.position_fresh:
-                    v.hold_x = v.x
-                    v.hold_y = v.y
-                    v.hold_alt = v.alt
-                    _enter_step(v, INIT_ABORT_HOLD, now)
-                    _send_hold_target(v)
-                else:
-                    _enter_step(v, INIT_CONFIRM_ABORT, now)
             else:
                 v.service_phase = "aborted"
                 v.init_state = "aborted"
