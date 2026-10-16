@@ -178,15 +178,16 @@ function drawJammers(ctx, cv, view, s, selected, timeSec) {
     ctx.fillStyle = j.on === false ? '#8a887a' : '#e06050'; ctx.fill();
     ctx.font = (11 * U) + 'px "IBM Plex Mono", monospace'; ctx.textAlign = 'center';
     ctx.fillStyle = j.on === false ? '#8a887a' : '#e06050';
-    ctx.fillText((j.on === false ? 'off · ' : '') + j.erpDbm + ' dBm' +
+    ctx.fillText((j.on === false ? 'off · ' : '') + j.id + ' · ' + j.erpDbm + ' dBm' +
       (s.adversaryMode ? ' · AI' : ''), c.x, c.y + 22 * U);
   }
 }
 
 // GPS-denied zones: violet hatched circles. RF inside may be fine — what's
 // denied here is POSITION, so the swarm flies through on dead reckoning and
-// its reported positions go unreliable.
-function drawGpsZones(ctx, cv, view, s, timeSec) {
+// its reported positions go unreliable. The selected zone gets the same
+// dashed halo as a selected source.
+function drawGpsZones(ctx, cv, view, s, selected, timeSec) {
   if (!s.gpsZones || !s.gpsZones.length) return;
   const U = window.uiScale || 1;
   for (const z of s.gpsZones) {
@@ -197,6 +198,11 @@ function drawGpsZones(ctx, cv, view, s, timeSec) {
       ctx.fillStyle = 'rgba(164,143,224,0.08)'; ctx.fill();
       ctx.strokeStyle = 'rgba(164,143,224,0.55)'; ctx.lineWidth = 1 * U;
       ctx.setLineDash([8 * U, 4 * U]); ctx.stroke(); ctx.setLineDash([]);
+    }
+    if (z === selected) {
+      ctx.beginPath(); ctx.arc(c.x, c.y, 14 * U, 0, Math.PI * 2);
+      ctx.strokeStyle = '#e8e6da'; ctx.lineWidth = 1.5 * U; ctx.setLineDash([3 * U, 3 * U]);
+      ctx.stroke(); ctx.setLineDash([]);
     }
     // satellite-crossed-out glyph
     ctx.beginPath(); ctx.arc(c.x, c.y, 5 * U, 0, Math.PI * 2);
@@ -211,7 +217,7 @@ function drawGpsZones(ctx, cv, view, s, timeSec) {
     }
     ctx.font = (11 * U) + 'px "IBM Plex Mono", monospace'; ctx.textAlign = 'center';
     ctx.fillStyle = z.on === false ? '#8a887a' : COLORS.gpsZone;
-    ctx.fillText((z.on === false ? 'off · ' : '') + 'GPS DENIED', c.x, c.y + 20 * U);
+    ctx.fillText((z.on === false ? 'off · ' : '') + z.id + ' · GPS DENIED', c.x, c.y + 20 * U);
   }
 }
 
@@ -444,14 +450,16 @@ function drawScaleBar(ctx, cv, view) {
   ctx.fillText(fmtDist(step), x0 + px / 2, y0 - 8 * U);
 }
 
-function render(ctx, cv, view, s, status, selected, usable) {
+// `sel` = { jammer, zone }: the selected map object (UI state, not sim
+// truth), kept apart from `selected`, the selected drone.
+function render(ctx, cv, view, s, status, selected, usable, sel) {
   ctx.clearRect(0, 0, cv.width, cv.height);
   // Georeferenced mission → the real map is the ground; otherwise the grid.
   if (!drawTiles(ctx, cv, view, s.terrain.geoAnchor)) drawGrid(ctx, cv, view);
   drawTerrain(ctx, cv, view, s);
   drawCoverage(ctx, cv, view, s);
-  drawJammers(ctx, cv, view, s, selected, s.time);
-  drawGpsZones(ctx, cv, view, s, s.time);
+  drawJammers(ctx, cv, view, s, sel && sel.jammer, s.time);
+  drawGpsZones(ctx, cv, view, s, sel && sel.zone, s.time);
 
   // Coverage rings around every transmitting chain node
   for (const node of status.nodes) {
