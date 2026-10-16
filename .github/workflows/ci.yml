@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [ main ]
 
+# Every job only reads the repository.
+permissions:
+  contents: read
+
 jobs:
   whitespace-and-lint:
     name: Whitespace & Style Checks
@@ -83,4 +87,14 @@ jobs:
         run: python -B sitl/test_failure_scenarios.py
 
       - name: Run end-to-end acceptance against the executable mock
-        run: python -B sitl/run_acceptance.py --mode mock --report /tmp/acceptance_mock.json
+        run: python -B sitl/run_acceptance.py --mode mock --report "$RUNNER_TEMP/acceptance_mock.json" --logs-dir "$RUNNER_TEMP/acceptance-logs"
+
+      - name: Upload acceptance diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v5
+        with:
+          name: acceptance-diagnostics-py${{ matrix.python-version }}
+          path: |
+            ${{ runner.temp }}/acceptance_mock.json
+            ${{ runner.temp }}/acceptance-logs/
+          if-no-files-found: ignore

@@ -54,3 +54,24 @@ test('npm test runs exactly the *.test.js files, and CI uses it', () => {
   assert.match(pkg.engines.node, />=\s*22/);
   assert.match(job('test-javascript'), /run: npm test/);
 });
+
+// ci-no-failure-artifacts: a CI-only acceptance failure left nothing to
+// inspect (its logs stayed on the runner), and the token had repo defaults.
+test('CI keeps acceptance diagnostics on failure and runs with a read-only token', () => {
+  assert.match(CI, /\npermissions:\n  contents: read\n/, 'top-level least-privilege permissions');
+  const py = job('test-python');
+  assert.match(py, /run_acceptance\.py[^\n]*--logs-dir/, 'acceptance logs go to a known directory');
+  const up = py.match(/- name: Upload acceptance diagnostics\n([\s\S]*?)(?=\n      - name:|$)/);
+  assert.ok(up, 'an upload step for the acceptance diagnostics');
+  assert.match(up[1], /if: failure\(\)/);
+  assert.match(up[1], /uses: actions\/upload-artifact@v\d+/);
+  assert.match(up[1], /acceptance-logs/);
+});
+
+// gitignore-out-dir: tools/batch.js writes its reports to ./out by default
+// (repo root, per the README's command); local venvs for the sitl/ Python
+// dependencies were not ignored either.
+test('.gitignore covers batch reports and local Python venvs', () => {
+  const lines = fs.readFileSync(path.join(ROOT, '.gitignore'), 'utf8').split(/\r?\n/).map(l => l.trim());
+  for (const p of ['out/', '.venv/', 'venv/']) assert.ok(lines.includes(p), '.gitignore should list ' + p);
+});
