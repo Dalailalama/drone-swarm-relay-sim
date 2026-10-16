@@ -15,7 +15,8 @@ and MAVLink LOCAL_POSITION_NED <-> JSON telemetry, per vehicle.
 
 Coordinate frame (shared contract with the browser sim and mock_vehicles.py):
     sim world:  x = metres East, y = metres South (screen-down positive),
-                alt = metres above ground.
+                alt = metres above the origin ground elevation (origin-relative,
+                equal to height above ground only over flat terrain).
     MAVLink:    local NED = (North, East, Down), metres.
 
     sim -> NED:  ned_north = -sim_y ; ned_east = sim_x ; ned_down = -alt
@@ -64,8 +65,10 @@ Flight origin (F05)
 -------------------
 Every vehicle coordinates travels in the COMMON LOCAL ORIGIN frame the
 browser fixes at connect/init time and sends in the "init" message:
-telemetry x/y/alt are origin-relative (NED position minus origin XY, -z
-minus origin ground height), and outgoing goals are origin-relative too.
+telemetry x/y/alt are origin-relative (the autopilot's LOCAL_POSITION_NED
+converted to the sim frame as-is; the bridge only echoes the origin back
+per vehicle and the browser adds it), and outgoing goals are
+origin-relative too.
 The origin is captured ONCE at connect/init -- a movable base or dragged
 target never rewrites it -- so the whole pipeline round-trips in one frame
 and a landing commanded at a different ground elevation still descends to
@@ -99,14 +102,14 @@ keeps flying and the next "init" from anyone takes over.
 
 Per-vehicle MAVLink connection convention
 ------------------------------------------
-`sim_vehicle.py -I<i> ... --out=udp:127.0.0.1:<PORT>` (see
-run_ardupilot_sitl.sh) forwards vehicle i's MAVLink stream to
-udp:127.0.0.1:<PORT>. We assume PORT = --mav-base-port + 10*i (default base
+`sim_vehicle.py -I<i> --no-mavproxy -A "--serial0=udpclient:127.0.0.1:<PORT>"`
+(see run_ardupilot_sitl.sh) points vehicle i's SERIAL0 MAVLink link at
+udp:127.0.0.1:<PORT>, with no MAVProxy in between. We assume PORT = --mav-base-port + 10*i (default base
 14550), which matches the ports printed by run_ardupilot_sitl.sh and is the
 conventional spacing ArduPilot's own tooling uses for multi-vehicle SITL
 (instance 0 -> 14550, instance 1 -> 14560, ...). This bridge listens with
 `udpin:localhost:PORT` for each vehicle -- i.e. *we* are the UDP server and
-SITL's --out is the UDP client connecting to us, so no port needs to be open
+SITL's udpclient serial port is the UDP client connecting to us, so no port needs to be open
 on the SITL side and NAT/firewall setup stays simple.
 
 Dependencies: `websockets` and `pymavlink` (see requirements.txt).
@@ -414,15 +417,13 @@ def ned_to_sim(north: float, east: float, down: float) -> tuple[float, float, fl
 # --------------------------------------------------------------------------
 
 def _send_set_mode(vehicle: Vehicle) -> None:
-    """Ask for GUIDED via the legacy SET_MODE message.
+    """Ask for GUIDED via pymavlink's mavfile.set_mode().
 
-    ArduCopter (unlike PX4) is most reliably switched into a named flight
-    mode via the legacy MAVLink SET_MODE message, using the numeric "custom
-    mode" index from the vehicle's *own* mode_mapping() table -- not the
-    newer MAV_CMD_DO_SET_MODE command_long, whose custom-mode semantics vary
-    more across ArduCopter firmware versions. pymavlink's
-    mavutil.mavfile.set_mode() wraps exactly this legacy-message approach,
-    which is what mission planners / ArduPilot's own example scripts use.
+    The numeric "custom mode" comes from the vehicle's *own* mode_mapping()
+    table. For ArduPilot, pymavlink's set_mode() (set_mode_apm) sends it as a
+    COMMAND_LONG MAV_CMD_DO_SET_MODE with MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
+    not the legacy SET_MODE message. Success is judged only from the
+    HEARTBEAT's custom_mode, never from the send.
     """
     if vehicle.conn is None:
         return
@@ -899,7 +900,7 @@ async def vehicle_task(vehicle: Vehicle) -> None:
     and recovers on its own if it comes back (finding #13a).
     """
     try:
-        # udpin: *we* bind and listen; SITL's --out=udp:host:PORT connects to
+        # udpin: *we* bind and listen; SITL's serial0 udpclient:host:PORT connects to
         # us as the client. This means the bridge can start before SITL does,
         # and no inbound port needs to be opened on the SITL/autopilot side.
         vehicle.conn = mavutil.mavlink_connection(f"udpin:localhost:{vehicle.port}")

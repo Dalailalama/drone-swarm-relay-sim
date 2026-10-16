@@ -15,8 +15,9 @@
 #     installed, per the ArduPilot SITL setup docs.
 #
 # What it does: launches N ArduCopter SITL instances (instance numbers
-# 0..N-1), each forwarding its MAVLink stream via --out=udp:127.0.0.1:PORT
-# to a distinct UDP port that bridge.py listens on (udpin) for that vehicle.
+# 0..N-1) without MAVProxy, each with its SERIAL0 MAVLink link set to
+# udpclient:127.0.0.1:PORT, a distinct UDP port that bridge.py listens on
+# (udpin) for that vehicle.
 # Port for instance i = 14550 + 10*i, matching bridge.py's default
 # --mav-base-port=14550 assumption (see the comment in bridge.py's module
 # docstring for why this spacing was chosen).
