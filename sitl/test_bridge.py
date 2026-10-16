@@ -1769,7 +1769,46 @@ async def scenario_recovery_below_takeoff_alt_climbs_first():
     await h.close()
 
 
+async def scenario_ready_revoked_on_autopilot_mode_change():
+    """READY is revoked when the vehicle's own heartbeats leave GUIDED or disarm (failsafe)."""
+    h = Harness()
+    clock = Clock()
+    with patch.object(bridge, "_now", clock):
+        v = current_vehicle()
+        conn = v.conn
+        # One odd heartbeat is not enough evidence...
+        clock.now = 1.0
+        conn.push(hb_msg(armed=True, custom_mode=6))  # RTL
+        bridge._drain_messages(v)
+        await bridge._advance_init(v)
+        assert v.ready and v.init_state == bridge.INIT_READY, v.init_state
+        # ...two consecutive ones are.
+        clock.now = 2.0
+        conn.push(hb_msg(armed=True, custom_mode=6))
+        bridge._drain_messages(v)
+        await bridge._advance_init(v)
+        telem = v.to_telemetry()
+        assert telem["ready"] is False, telem
+        assert telem["state"] == "mode-lost:6", telem
+        sets_before = conn.count("set_mode")
+        # The autopilot (or pilot) took over: the bridge never re-requests GUIDED.
+        clock.now = 30.0
+        await bridge._advance_init(v)
+        assert conn.count("set_mode") == sets_before and conn.count("arm") == 0, conn.sent
+        # Landed and disarmed by its own failsafe: reported as such.
+        for t in (31.0, 32.0):
+            clock.now = t
+            conn.push(hb_msg(armed=False, custom_mode=9))
+            conn.push(ext_state_msg(1))
+            bridge._drain_messages(v)
+            await bridge._advance_init(v)
+        assert v.to_telemetry()["state"] == "disarmed", v.init_state
+        assert not v.ready
+    await h.close()
+
+
 SCENARIOS = [
+    ("A2: READY revoked when an autopilot failsafe leaves GUIDED or disarms", scenario_ready_revoked_on_autopilot_mode_change),
     ("#12: not READY at lift-off; READY at the takeoff altitude", scenario_ready_needs_takeoff_altitude),
     ("#12: a long steady climb is not failed by the step timeout", scenario_long_climb_not_timed_out),
     ("#12: a climb stalled below takeoff altitude fails the takeoff step", scenario_stalled_climb_fails_takeoff),

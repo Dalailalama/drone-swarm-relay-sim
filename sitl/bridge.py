@@ -174,6 +174,9 @@ INIT_CONFIRM_TAKEOFF = "confirm-takeoff"
 INIT_READY = "ready"
 INIT_CONFIRM_ABORT = "confirm-abort"
 INIT_ABORT_HOLD = "abort-hold"
+INIT_MODE_LOST_PREFIX = "mode-lost:"  # + custom_mode: READY revoked, vehicle left GUIDED on its own
+INIT_DISARMED = "disarmed"  # READY revoked, vehicle disarmed on its own (e.g. failsafe landing)
+READY_REVOKE_HEARTBEATS = 2  # consecutive non-GUIDED/disarmed heartbeats that revoke READY
 FAILED_PREFIX = "failed:"  # + step name, e.g. "failed:arm", "failed:no-heartbeat"
 
 # --- MAVLink constants that need explaining -------------------------------
@@ -245,6 +248,9 @@ class Vehicle:
     last_heartbeat: Optional[float] = None  # monotonic seconds, or None if never seen
     base_mode: int = 0  # latest HEARTBEAT.base_mode (carries MAV_MODE_FLAG_SAFETY_ARMED)
     custom_mode: Optional[int] = None  # latest HEARTBEAT.custom_mode (ArduPilot flight mode id)
+    heartbeat_seq: int = 0  # HEARTBEATs drained so far; READY re-checks each new one
+    ready_checked_seq: int = 0  # heartbeat_seq the READY re-check last looked at
+    ready_bad_streak: int = 0  # consecutive post-READY heartbeats not GUIDED+armed
     guided_mode_id: Optional[int] = None  # from conn.mode_mapping()["GUIDED"], resolved after heartbeat
     acks: dict = field(default_factory=dict)  # MAV_CMD id -> latest COMMAND_ACK result
     # Latest known position, already converted into the *sim* coordinate frame.
@@ -537,6 +543,7 @@ def _drain_messages(vehicle: Vehicle) -> None:
             vehicle.base_mode = int(getattr(msg, "base_mode", 0) or 0)
             custom = getattr(msg, "custom_mode", None)
             vehicle.custom_mode = None if custom is None else int(custom)
+            vehicle.heartbeat_seq += 1
         elif mtype == "LOCAL_POSITION_NED":
             x, y, alt = ned_to_sim(msg.x, msg.y, msg.z)
             vehicle.x, vehicle.y, vehicle.alt = x, y, alt
@@ -696,12 +703,31 @@ async def _advance_init(vehicle: Vehicle) -> None:
     now = _now()
     state = vehicle.init_state
 
-    if state == INIT_READY:
-        # Confirmed airborne; the task stays alive purely to drain telemetry.
-        # A later heartbeat loss is reported through `connected` (the browser
-        # has its own freeze/dead ladder for that) and deliberately does NOT
-        # re-run the sequence: a vehicle already in the air must not be
-        # re-armed or re-commanded to take off.
+    if state == INIT_READY or state == INIT_DISARMED or state.startswith(INIT_MODE_LOST_PREFIX):
+        # Confirmed airborne; the task stays alive to drain telemetry and to
+        # re-check READY against each new heartbeat. A heartbeat loss is
+        # reported through `connected` (the browser has its own freeze/dead
+        # ladder for that). An autopilot failsafe (RTL/LAND) or a disarm seen
+        # on READY_REVOKE_HEARTBEATS consecutive heartbeats revokes READY, so
+        # C2 stops counting on it. Neither ever re-runs the sequence: a
+        # vehicle in the air must not be re-armed or re-commanded to take
+        # off, and GUIDED is not re-requested -- the autopilot or pilot took over.
+        if vehicle.heartbeat_seq != vehicle.ready_checked_seq:
+            vehicle.ready_checked_seq = vehicle.heartbeat_seq
+            if vehicle.mode_confirmed and vehicle.armed:
+                vehicle.ready_bad_streak = 0
+            else:
+                vehicle.ready_bad_streak += 1
+            if vehicle.ready_bad_streak >= READY_REVOKE_HEARTBEATS:
+                lost = INIT_DISARMED if not vehicle.armed else f"{INIT_MODE_LOST_PREFIX}{vehicle.custom_mode}"
+                if lost != state:
+                    vehicle.init_state = lost
+                    vehicle.ready = False
+                    await _vehicle_status(
+                        vehicle,
+                        f"vehicle {vehicle.id}: READY revoked - heartbeat reports mode {vehicle.custom_mode}, "
+                        f"armed={vehicle.armed} (autopilot failsafe or pilot takeover); not re-commanding",
+                    )
         return
 
     if state == INIT_CONFIRM_ABORT:
