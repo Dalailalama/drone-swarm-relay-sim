@@ -609,7 +609,12 @@ function hangsBelow(prev, node, root, limit) {
 }
 
 function c2Tree(s) {
-  if (s._c2Tree && s.time - s._c2Tree.at < C2_TREE_TTL_SEC) return s._c2Tree;
+  // A death or launch changes the node set: rebuild at once instead of
+  // routing through a dead relay for the rest of the TTL (NET-06). `last`
+  // is still kept below, so damping and hold-down are unaffected.
+  let alive0 = 1;
+  for (const d of s.drones) if (alive(d)) alive0++;
+  if (s._c2Tree && s.time - s._c2Tree.at < C2_TREE_TTL_SEC && s._c2Tree.alive === alive0) return s._c2Tree;
   const last = s._c2Tree;
   const ids = nodeIds(s);
   // Dijkstra keyed on `rank` = TRUE ETX to the parent + this node's own
@@ -685,7 +690,7 @@ function c2Tree(s) {
   for (const [id, p] of prev) {
     since.set(id, last && last.prev.get(id) === p ? last.since.get(id) : s.time);
   }
-  s._c2Tree = { at: s.time, prev, dist, since };
+  s._c2Tree = { at: s.time, prev, dist, since, alive: alive0 };
   return s._c2Tree;
 }
 

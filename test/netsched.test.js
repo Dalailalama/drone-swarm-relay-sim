@@ -541,3 +541,17 @@ test('NET-05: C2 unicast orders follow the shared C2 tree without a per-packet D
     assert.strictEqual(p.path.join('>'), ctx.pathToC2(s, d.id).slice().reverse().join('>'));
   }
 });
+
+// NET-06: the C2 tree cache must not outlive a relay's death — routes (and
+// the uptime metric built on them) went through a dead relay for up to 0.5 s.
+test('NET-06: a relay death invalidates the cached C2 tree on the same tick', () => {
+  const s = mk(2);
+  const range = ctx.usableRangeM(SIK, 1);
+  const [relay, far] = s.drones;
+  relay.x = 0.8 * range; relay.y = 0;
+  far.x = 1.6 * range; far.y = 0;
+  assert.strictEqual(ctx.pathToC2(s, far.id).join('>'), far.id + '>' + relay.id + '>C2', 'relayed route');
+  s.time = 0.1;
+  ctx.killDrone(s, relay);
+  assert.strictEqual(ctx.pathToC2(s, far.id), null, 'route through a dead relay');
+});
