@@ -9,7 +9,7 @@ const T = require('../js/tak.js');
 const R = require('../js/radios.js');
 const A = require('../js/airframes.js');
 const { loadCore } = require('./helpers/sim.js');
-const ctx = loadCore(['tak.js']);
+const ctx = loadCore(['osm.js', 'tak.js']);
 
 test('local metres <-> lat/lon round-trips inside a metre at 2 km scale', () => {
   const anchor = T.makeTakAnchor(38.8977, -77.0365, 0, 0);

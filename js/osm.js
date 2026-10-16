@@ -16,8 +16,19 @@ const OSM_ENDPOINTS = [
   'https://overpass.kumi.systems/api/interpreter',
 ];
 const OSM_NOMINATIM = 'https://nominatim.openstreetmap.org/search';
-const OSM_M_PER_DEG_LAT = 110540;
-const OSM_M_PER_DEG_LON = 111320; // × cos(lat)
+// The ONE local projection shared by OSM import, the tile basemap and TAK
+// (they all load after this file): equirectangular about the anchor, scaled
+// by the WGS-84 meridian (M) and prime-vertical (N) radii at the anchor's
+// latitude. Under 1 m of error within ~3 km of the anchor.
+const GEO_WGS84_A = 6378137, GEO_WGS84_E2 = 6.69437999014e-3;
+function geoMetresPerDeg(latDeg) {
+  const phi = latDeg * Math.PI / 180, s = Math.sin(phi);
+  const w = 1 - GEO_WGS84_E2 * s * s;
+  return {
+    lat: GEO_WGS84_A * (1 - GEO_WGS84_E2) / Math.pow(w, 1.5) * Math.PI / 180,
+    lon: GEO_WGS84_A / Math.sqrt(w) * Math.cos(phi) * Math.PI / 180,
+  };
+}
 const OSM_LEVEL_HEIGHT_M = 3.2;   // storey height when only a floor count is mapped
 const OSM_DEFAULT_HEIGHT_M = 9;   // untagged building: low-rise guess (~3 floors)
 const OSM_MAX_BUILDINGS = 6000;   // keep the biggest N; renderer & physics stay smooth
@@ -37,11 +48,11 @@ function osmParseHeight(v) {
 // (lat0, lon0) — north is up on screen like a real map.
 function osmWayToBuilding(el, lat0, lon0) {
   if (!el || el.type !== 'way' || !el.geometry || el.geometry.length < 3) return null;
-  const kLon = OSM_M_PER_DEG_LON * Math.cos(lat0 * Math.PI / 180);
+  const k = geoMetresPerDeg(lat0);
   let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
   for (const g of el.geometry) {
-    const x = (g.lon - lon0) * kLon;
-    const y = (lat0 - g.lat) * OSM_M_PER_DEG_LAT;
+    const x = (g.lon - lon0) * k.lon;
+    const y = (lat0 - g.lat) * k.lat;
     if (x < minX) minX = x; if (x > maxX) maxX = x;
     if (y < minY) minY = y; if (y > maxY) maxY = y;
   }
@@ -124,7 +135,7 @@ async function osmFetchArea(lat, lon, radiusM) {
 // UMD-lite export so parsing is unit-testable under Node.
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
-    osmParseHeight, osmWayToBuilding, osmParseBuildings, osmClearZones, osmParseLatLon,
+    geoMetresPerDeg, osmParseHeight, osmWayToBuilding, osmParseBuildings, osmClearZones, osmParseLatLon,
     OSM_LEVEL_HEIGHT_M, OSM_DEFAULT_HEIGHT_M, OSM_MAX_BUILDINGS,
   };
 }

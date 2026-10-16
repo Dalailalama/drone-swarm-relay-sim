@@ -7,7 +7,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
 const { loadCore } = require('./helpers/sim.js');
-const ctx = loadCore(['tak.js']);
+const ctx = loadCore(['osm.js', 'tak.js']);
 const R = require('../js/radios.js');
 const A = require('../js/airframes.js');
 const T = require('../js/tak.js');
