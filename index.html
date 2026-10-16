@@ -16,7 +16,7 @@
   <h1>Drone swarm relay sim</h1>
   <span class="sub">C2 mesh link planner &middot; real radio hardware specs</span>
   <button id="viewBtn" style="width:auto; padding:4px 14px; margin-left:12px;">3D view</button>
-  <span id="statusPill" class="pill ok">—</span>
+  <span id="statusPill" class="pill ok" role="status" aria-live="polite">—</span>
 </header>
 
 <main>
@@ -362,7 +362,7 @@
 
     <section>
       <h2>Event log</h2>
-      <div id="eventLog"></div>
+      <div id="eventLog" role="log" aria-live="polite"></div>
     </section>
   </aside>
 </main>

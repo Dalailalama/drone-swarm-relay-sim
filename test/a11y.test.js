@@ -73,3 +73,10 @@ test('keyboard users can select a drone from the fleet list and kill it, and zoo
   const unused = fire('map', 'keydown', { key: 'q' });
   assert.ok(!unused.defaultPrevented, 'keys the map does not use are left alone');
 });
+
+test('link-state changes and the event log are live regions', () => {
+  assert.match(HTML, /<span id="statusPill"[^>]*\brole="status"/, '#statusPill must be role=status');
+  assert.match(HTML, /<span id="statusPill"[^>]*\baria-live="polite"/);
+  assert.match(HTML, /<div id="eventLog"[^>]*\brole="log"/, '#eventLog must be role=log');
+  assert.match(HTML, /<div id="eventLog"[^>]*\baria-live="polite"/);
+});
