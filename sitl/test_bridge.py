@@ -735,6 +735,9 @@ async def scenario_goals_ownership() -> None:
     sp = c1.details("setpoint")[0]
     assert sp["north"] == -4.0 and sp["east"] == 10.0 and sp["down"] == -25.0, sp
     assert sp["frame"] == MAV_FRAME_LOCAL_NED and sp["mask"] == bridge.POSITION_TARGET_TYPEMASK, sp
+    # ArduPilot's documented position-only mask: ignore vx..afz (8..256) and
+    # yaw/yaw_rate (1024, 2048), keep x/y/z, and leave FORCE_SET (512) clear.
+    assert sp["mask"] == 0b110111111000 == 3576 and not sp["mask"] & 512, sp
 
     bridge.client_disconnected(ws1)
     ws3 = h.client("browser-3")

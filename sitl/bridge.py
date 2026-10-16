@@ -188,10 +188,10 @@ FAILED_PREFIX = "failed:"  # + step name, e.g. "failed:arm", "failed:no-heartbea
 # message's fields to *ignore*. We only ever want to command position
 # (x, y, z), so we set the bits for velocity (vx,vy,vz), acceleration
 # (afx,afy,afz), yaw and yaw_rate to "ignore", leaving position bits clear
-# (i.e. "use them"). The value 0b0000111111111000 (= 4088 decimal) is the
-# conventional "position-only" mask used throughout the ArduPilot/dronekit
-# ecosystem's own example scripts for exactly this purpose.
-POSITION_TARGET_TYPEMASK = 0b0000111111111000
+# (i.e. "use them"). Bit 512 is FORCE_SET ("acceleration is a force"), not
+# an ignore bit, so it stays clear: 0b0000110111111000 (= 3576 decimal) is
+# ArduPilot's documented "Use Position" mask for GUIDED mode.
+POSITION_TARGET_TYPEMASK = 0b0000110111111000
 
 # MAV_CMD_SET_MESSAGE_INTERVAL (id 511) lets us ask the autopilot to stream
 # LOCAL_POSITION_NED faster than its default rate, so our 10 Hz telemetry
