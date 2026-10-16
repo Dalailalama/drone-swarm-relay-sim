@@ -78,7 +78,7 @@ function reportMd(label, summary, metaLines) {
   L.push('| Cell | Runs | Link uptime | Packet drop | Video chunk loss | C2 contact |');
   L.push('|---|---|---|---|---|---|');
   for (const g of summary) {
-    L.push('| ' + g.cell + ' | ' + g.runs + ' | ' + fmtStat(g.uptime, 1, '%') +
+    L.push('| ' + String(g.cell).replace(/\|/g, '\\|') + ' | ' + g.runs + ' | ' + fmtStat(g.uptime, 1, '%') +
       ' | ' + fmtStat(g.dropped, 1, '%') + ' | ' + fmtStat(g.vidLoss, 1, '%') +
       ' | ' + fmtStat(g.freshFrac, 1, '%', 100) + ' |');
   }
@@ -90,7 +90,10 @@ function reportMd(label, summary, metaLines) {
 function escapeCsvField(val) {
   if (val == null) return '';
   if (typeof val === 'number') return String(Math.round(val * 1000) / 1000);
-  const s = String(val);
+  let s = String(val);
+  // Spreadsheets evaluate a text cell starting with = + - @ tab or CR even
+  // inside RFC 4180 quotes (CWE-1236); a leading ' makes it plain text.
+  if (/^[=+\-@\t\r]/.test(s)) s = "'" + s;
   if (s.includes(',') || s.includes('"') || s.includes('\n') || s.includes('\r')) {
     return '"' + s.replace(/"/g, '""') + '"';
   }
