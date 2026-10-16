@@ -755,8 +755,11 @@ function sendPacket(s, kind, src, dst, payload, bytesOverride) {
     + (s.net.chanPendingSec[chan] || 0);
   const frameAirtime = (bytes * 8) / (airRate * 1000);
 
-  // Video latency bound: drop video frame if channel backlog exceeds 1.0s or frame won't fit
-  if (kind === 'vid' && (queueDelay > 1.0 || queueDelay + frameAirtime > 2.0)) {
+  // Video latency bound: drop video frame if channel backlog exceeds 1.0s or frame won't fit.
+  // Every hop of the route airs on the same shared channel clock, so the
+  // chunk needs hops x its airtime before the last fragment lands (NET-02).
+  const hops = path.length - 1;
+  if (kind === 'vid' && (queueDelay > 1.0 || queueDelay + frameAirtime * hops > 2.0)) {
     s.net.dropped++;
     s.net.vid.droppedFrames++;
     capLog(s, { ev: 'drop', reason: 'queue-latency', kind, src, dst });
