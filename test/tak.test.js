@@ -33,8 +33,8 @@ test('CoT atoms carry required attributes and escape callsigns', () => {
     callsign: 'DR-1 <relay>', nowSec: 1730000000, staleSec: 20,
   });
   assert.ok(xml.startsWith('<event version="2.0"'));
-  for (const needle of ['uid="SIM-DR-1"', 'type="a-f-A-M-H-U"', 'lat="38.9000000"',
-    'hae="60.5"', 'callsign="DR-1 &lt;relay&gt;"', 'stale="', 'how="m-g"']) {
+  for (const needle of ['uid="SIM-DR-1"', 'type="a-f-A-M-H-Q"', 'lat="38.9000000"',
+    'hae="60.5"', 'callsign="DR-1 &lt;relay&gt;"', 'stale="', 'how="m-s"']) {
     assert.ok(xml.includes(needle), 'missing: ' + needle);
   }
 });

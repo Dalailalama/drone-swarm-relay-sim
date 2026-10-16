@@ -23,8 +23,10 @@ const takGeoScale = typeof geoMetresPerDeg === 'function'
 
 // haeM: height above ellipsoid of the LOCAL FRAME's zero-ground reference —
 // the vertical datum for every exported altitude (finding #26). null means
-// the operator hasn't supplied one, and exports then OMIT hae rather than
-// stamping a number in the wrong datum.
+// the operator hasn't supplied one, and exports then send TAK's UNKNOWN
+// value (hae/le 9999999) rather than stamping a number in the wrong datum.
+// hae is a required <point> attribute (atak-civ takcot point.xsd), so it
+// cannot simply be left out.
 function makeTakAnchor(latDeg, lonDeg, xLocal, yLocal, haeM) {
   return { lat: latDeg, lon: lonDeg, x: xLocal || 0, y: yLocal || 0, haeM: haeM != null ? haeM : null };
 }
@@ -47,13 +49,15 @@ function latLonToLocal(anchor, lat, lon) {
   };
 }
 
-// Conventional CoT types (ATAK renders any well-formed atom; these are the
-// usual choices for small UAS work).
+// CoT types per the MITRE CoTtypes.xml (a-.-A-M-H-Q = Air/Mil/Rotor/
+// Drone,RPV,UAV; b-m-p-w = waypoint) and ATAK's drawn circle (u-d-c-c).
 const TAK_TYPES = {
-  drone: 'a-f-A-M-H-U',     // airborne rotary-wing UAS
-  gcs: 'a-f-G-U-C',         // friendly ground unit, command post
-  hazard: 'a-n-G-A-c',      // area hazard (denial / GNSS-dead circle)
+  drone: 'a-f-A-M-H-Q',     // friendly rotary-wing UAV
+  gcs: 'a-f-G-U-C',         // friendly ground unit (the C2 ground station)
+  objective: 'b-m-p-w',     // mission objective: a waypoint, not a unit
+  hazard: 'u-d-c-c',        // drawn circle (denial / GNSS-dead zone)
 };
+const TAK_UNKNOWN = '9999999.0'; // CotConstants.UNKNOWN_VALUE (hae/ce/le)
 
 function cotTimestamp(secSinceEpoch) {
   // CoT wants ISO 8601 UTC (Z).
@@ -65,16 +69,20 @@ function cotEvent(o) {
   const t = cotTimestamp(o.nowSec || Date.now() / 1000);
   const stale = cotTimestamp((o.nowSec || Date.now() / 1000) + (o.staleSec || 30));
   const ce = o.ceM != null ? o.ceM : 15;
-  const le = o.leM != null ? o.leM : 15;
-  const haeAttr = o.haeM != null ? ' hae="' + o.haeM.toFixed(1) + '"' : '';
+  // No vertical datum: hae AND its vertical error are unknown.
+  const hae = o.haeM != null ? o.haeM.toFixed(1) : TAK_UNKNOWN;
+  const le = o.haeM == null ? TAK_UNKNOWN : (o.leM != null ? o.leM : 15);
+  // how="m-s": machine-generated, simulated (MITRE CoT how codes) — never
+  // m-g (GPS fix), since the bridge can put these on a real TAK net.
   let xml = '<event version="2.0" uid="' + esc(o.uid) + '" type="' + o.cotType +
-    '" time="' + t + '" start="' + t + '" stale="' + stale + '" how="m-g">' +
+    '" time="' + t + '" start="' + t + '" stale="' + stale + '" how="m-s">' +
     '<point lat="' + o.lat.toFixed(7) + '" lon="' + o.lon.toFixed(7) + '"' +
-    haeAttr + ' ce="' + ce + '" le="' + le + '"/>' +
+    ' hae="' + hae + '" ce="' + ce + '" le="' + le + '"/>' +
     '<detail><contact callsign="' + esc(o.callsign || o.uid) + '"/>';
   if (o.radiusM != null) {
-    xml += '<shape><ellipse cx="' + o.radiusM.toFixed(0) + '" cy="' + o.radiusM.toFixed(0) +
-      '" major="' + o.radiusM.toFixed(0) + '" minor="' + o.radiusM.toFixed(0) + '" angle="0"/></shape>';
+    // atak-civ shape.xsd ellipse: major/minor/angle only.
+    xml += '<shape><ellipse major="' + o.radiusM.toFixed(0) + '" minor="' + o.radiusM.toFixed(0) +
+      '" angle="0"/></shape>';
   }
   if (o.remarks) xml += '<remarks>' + esc(o.remarks) + '</remarks>';
   xml += '</detail></event>';
@@ -108,8 +116,8 @@ function buildCotFromSwarm(s, anchor, nowSec) {
   const roleOf = d => d.order && d.order.role ? d.order.role : 'mission';
   // Vertical datum (finding #26): every exported altitude is the anchor's
   // HAE plus the local ABSOLUTE altitude (terrain under the object + its
-  // height above ground). With no anchor HAE, hae is omitted — TAK treats
-  // a missing hae as unknown, which is the truth.
+  // height above ground). With no anchor HAE, hae is TAK's unknown value
+  // 9999999, which is the truth.
   const groundAt = (x, y) => (typeof terrainGroundAt === 'function' && s.terrain)
     ? terrainGroundAt(s.terrain, x, y) : 0;
   const haeOf = absAltM => (anchor.haeM != null ? anchor.haeM + absAltM : null);
@@ -124,7 +132,7 @@ function buildCotFromSwarm(s, anchor, nowSec) {
       d.id + ' ' + roleOf(d),
       { remarks: 'bat ' + d.batteryPct.toFixed(0) + '% mode ' + d.mode, staleSec: 20, ceM: 10 });
   }
-  put('SIM-TGT', TAK_TYPES.gcs, s.target.x, s.target.y,
+  put('SIM-TGT', TAK_TYPES.objective, s.target.x, s.target.y,
     haeOf(groundAt(s.target.x, s.target.y)), 'OBJECTIVE',
     { remarks: 'mission objective' });
   for (const j of (s.jammers || [])) {
@@ -152,9 +160,10 @@ function parseCoTFile(text) {
   const evRe = /<event\b[^>]*>/g;
   // Quotes match their OPENING delimiter via backreference (finding #27):
   // the old ["']...["'] class let either quote end either style, truncating
-  // callsign="O'Brien" to "O". The opposite quote inside is data.
+  // callsign="O'Brien" to "O". The opposite quote inside is data. The name
+  // must start after whitespace, or parent_callsign= would match callsign=.
   const attrRaw = (str, name) => {
-    const m = str.match(new RegExp(name + '=(["\'])([\\s\\S]*?)\\1'));
+    const m = str.match(new RegExp('(?:^|\\s)' + name + '=(["\'])([\\s\\S]*?)\\1'));
     return m ? m[2] : null;
   };
   const attr = (tag, name) => {
@@ -175,12 +184,14 @@ function parseCoTFile(text) {
     const lon = parseFloat(attrRaw(pm[0], 'lon'));
     const hae = parseFloat(attrRaw(pm[0], 'hae'));
     if (!isFinite(lat) || !isFinite(lon)) continue;
-    const cs = attrRaw(scope, 'callsign');
+    // The mark's own name is on <contact>, not <link parent_callsign=...>.
+    const cm = scope.match(/<contact\b[^>]*>/);
+    const cs = cm ? attrRaw(cm[0], 'callsign') : null;
     marks.push({
       uid: uid || 'cot-' + marks.length,
       cotType: type,
       lat, lon,
-      hae: isFinite(hae) ? hae : null,
+      hae: isFinite(hae) && hae < 9999999 ? hae : null, // 9999999: TAK unknown
       callsign: cs != null ? unesc(cs) : uid || 'marker'
     });
   }

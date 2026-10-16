@@ -42,12 +42,14 @@ test('regression #26: hae = origin HAE + terrain + AGL, not the altitude slider'
     'expected hae ~620 (500 origin + 0 ground + 120 AGL), got ' + hae);
 });
 
-test('regression #26: an UNKNOWN origin altitude omits hae instead of inventing it', () => {
+// Audit tak-hae-omitted-schema-invalid: omitting hae was schema-invalid
+// (point.xsd requires it); unknown is TAK's 9999999 sentinel instead.
+test('regression #26: an UNKNOWN origin altitude sends TAK unknown hae instead of inventing it', () => {
   const s = mk(null);
   const anchor = T.makeTakAnchor(38.8977, -77.0365, 0, 0); // no HAE known
   const atoms = ctx.buildCotFromSwarm(s, anchor);
   for (const a of atoms) {
-    assert.ok(!/hae="/.test(a), 'atom invented an hae with no vertical datum: ' + a.slice(0, 120));
+    assert.ok(/hae="9999999\.0"/.test(a), 'atom invented an hae with no vertical datum: ' + a.slice(0, 120));
   }
 });
 
