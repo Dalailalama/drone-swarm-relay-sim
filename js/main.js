@@ -1615,7 +1615,7 @@
       if (!status) status = chainStatus(swarm);
 
       if (view3D) renderView3D(ctx, cv, swarm, status, cam3D, selected);
-      else render(ctx, cv, view, swarm, status, selected, usable());
+      else render(ctx, cv, view, swarm, status, selected, usable(), { jammer: selectedJammer, zone: selectedZone });
 
       panelAccum += realDt;
       if (panelAccum > 0.2) { updatePanels(status); panelAccum = 0; }
