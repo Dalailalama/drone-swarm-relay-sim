@@ -131,6 +131,9 @@ class FakeMav:
         self.conn.sent.append(("setpoint", {"north": north, "east": east, "down": down,
                                             "frame": frame, "mask": type_mask}))
 
+    def heartbeat_send(self, mav_type, autopilot, base_mode, custom_mode, system_status, *rest):
+        self.conn.sent.append(("gcs_heartbeat", (mav_type, autopilot, system_status)))
+
 
 class FakeConn:
     """Stand-in for mavutil.mavlink_connection()'s return value."""
@@ -1846,6 +1849,25 @@ async def scenario_malformed_messages_keep_connection() -> None:
         await h.close()
 
 
+async def scenario_gcs_heartbeat_sent() -> None:
+    """The bridge is the vehicle's GCS: once it has heard the vehicle it sends a
+    GCS HEARTBEAT (~1 Hz), so ArduPilot's GCS-loss failsafe can engage when
+    the bridge dies. Without one, gcs_last_seen_ms stays 0 and it never does."""
+    h = Harness()
+    ws = h.client("browser-1")
+    h.autopilot(14550, target_alt=30.0)
+    init_task = h.init(ws, count=1, alt=30.0)
+    try:
+        assert await wait_until(lambda: conn_for(14550).count("gcs_heartbeat") >= 1, timeout=3.0), \
+            f"no GCS HEARTBEAT sent to the vehicle: {conn_for(14550).kinds()}"
+        mav_type, autopilot, state = conn_for(14550).details("gcs_heartbeat")[0]
+        assert (mav_type, autopilot, state) == (6, 8, 4), "MAV_TYPE_GCS / MAV_AUTOPILOT_INVALID / MAV_STATE_ACTIVE"
+    finally:
+        init_task.cancel()
+        await asyncio.gather(init_task, return_exceptions=True)
+        await h.close()
+
+
 SCENARIOS = [
     ("#12: not READY at lift-off; READY at the takeoff altitude", scenario_ready_needs_takeoff_altitude),
     ("#12: a long steady climb is not failed by the step timeout", scenario_long_climb_not_timed_out),
@@ -1876,6 +1898,7 @@ SCENARIOS = [
     ("CSWSH: a foreign web Origin is refused at the handshake", scenario_foreign_origin_rejected),
     ("init: a huge vehicle count is clamped", scenario_init_count_bounded),
     ("malformed messages are skipped without dropping the connection", scenario_malformed_messages_keep_connection),
+    ("the bridge sends a GCS HEARTBEAT once it hears the vehicle", scenario_gcs_heartbeat_sent),
 ]
 
 

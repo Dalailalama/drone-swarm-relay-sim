@@ -199,6 +199,16 @@ POSITION_TARGET_TYPEMASK = 0b0000111111111000
 # altitude to confirm a climb against.  param1 = message id to configure,
 # param2 = desired interval in microseconds (0 = default rate, -1 = disable).
 MAV_CMD_SET_MESSAGE_INTERVAL = 511
+
+# The bridge is each vehicle's GCS, so it sends a GCS HEARTBEAT at 1 Hz once
+# it has heard the vehicle (before that, udpin has no address to send to).
+# ArduPilot only arms its GCS-loss failsafe (FS_GCS_ENABLE) after it has seen
+# a GCS heartbeat from SYSID_MYGCS (255, pymavlink's default source system);
+# without one a dead bridge leaves the vehicle holding its last target forever.
+GCS_HEARTBEAT_DT = 1.0
+MAV_TYPE_GCS = 6
+MAV_AUTOPILOT_INVALID = 8
+MAV_STATE_ACTIVE = 4
 LOCAL_POSITION_NED_INTERVAL_US = int(1_000_000 / TELEMETRY_HZ)
 
 MAVLINK_MSG_ID_EXTENDED_SYS_STATE = 245
@@ -909,10 +919,15 @@ async def vehicle_task(vehicle: Vehicle) -> None:
     vehicle.step_sent_at = vehicle.step_started_at
     await _vehicle_status(vehicle, f"vehicle {vehicle.id}: listening for heartbeat on udp:{vehicle.port} ...")
 
+    gcs_heartbeat_at = None
     while True:
         try:
             _drain_messages(vehicle)
             await _advance_init(vehicle)
+            if vehicle.last_heartbeat is not None and (
+                    gcs_heartbeat_at is None or _now() - gcs_heartbeat_at >= GCS_HEARTBEAT_DT):
+                vehicle.conn.mav.heartbeat_send(MAV_TYPE_GCS, MAV_AUTOPILOT_INVALID, 0, 0, MAV_STATE_ACTIVE)
+                gcs_heartbeat_at = _now()
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # pragma: no cover - defensive: one bad poll must not kill the vehicle
