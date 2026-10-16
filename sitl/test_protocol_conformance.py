@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -22,11 +23,32 @@ bridge = tb.bridge
 GUIDED_MODE_ID = tb.GUIDED_MODE_ID
 
 failures: list[str] = []
+# Every service_ack either server sent during the scenarios below; checked
+# against the PROTOCOL.md examples at the end.
+seen_acks: list[tuple[str, dict]] = []
 
 
 def assert_conform(cond: bool, msg: str) -> None:
     if not cond:
         failures.append(msg)
+
+
+def doc_examples() -> dict[str, list[dict]]:
+    """The fenced ```json wire examples in docs/PROTOCOL.md, keyed by "type"
+    (a block without a "type", i.e. the origin object, is keyed "origin")."""
+    text = (ROOT / "docs" / "PROTOCOL.md").read_text(encoding="utf-8")
+    out: dict[str, list[dict]] = {}
+    for block in re.findall(r"```json\n(.*?)```", text, re.S):
+        obj = json.loads(block)
+        out.setdefault(obj.get("type", "origin"), []).append(obj)
+    return out
+
+
+def note_acks(who: str, raw_messages: list[str]) -> None:
+    for raw in raw_messages:
+        m = json.loads(raw)
+        if m.get("type") == "service_ack":
+            seen_acks.append((who, m))
 
 
 async def test_bridge_conformance() -> None:
@@ -48,10 +70,36 @@ async def test_bridge_conformance() -> None:
         assert_conform(ready_msg.get("type") == "ready", "Bridge: reply type != ready")
         assert_conform("vehicles" in ready_msg and "ids" in ready_msg,
                        "Bridge: missing keys in ready message")
+        doc = doc_examples()
+        assert_conform(set(ready_msg) == set(doc["ready"][0]),
+                       f"Bridge: ready keys {sorted(ready_msg)} != PROTOCOL.md {sorted(doc['ready'][0])}")
 
         v = tb.current_vehicle()
         conn = v.conn
         ws.messages.clear()
+
+        # Telemetry envelope and per-vehicle keys, from the real broadcast loop.
+        bridge._drain_messages(v)
+        doc_telem = doc["telemetry"][0]
+        assert_conform(set(v.to_ready_entry()) == set(doc["ready"][0]["vehicles"][0]),
+                       "Bridge: ready vehicle entry keys differ from PROTOCOL.md")
+        h.telemetry()
+        sent = []
+        for _ in range(50):
+            await asyncio.sleep(0.01)
+            sent = [m for m in map(json.loads, ws.messages + tb.BROADCASTS) if m.get("type") == "telemetry"]
+            if sent:
+                break
+        h.tasks.pop().cancel()
+        ws.messages.clear()
+        assert_conform(bool(sent), "Bridge: no telemetry broadcast")
+        if sent:
+            telem = sent[0]
+            assert_conform(set(telem) == set(doc_telem),
+                           f"Bridge: telemetry envelope {sorted(telem)} != PROTOCOL.md {sorted(doc_telem)}")
+            assert_conform(set(telem["vehicles"][0]) == set(doc_telem["vehicles"][0]),
+                           "Bridge: telemetry vehicle keys differ from PROTOCOL.md: "
+                           f"{sorted(set(telem['vehicles'][0]) ^ set(doc_telem['vehicles'][0]))}")
 
         # 2. Service ACK and duplicate deduplication
         await bridge.handle_message(ws, json.dumps({
@@ -70,6 +118,13 @@ async def test_bridge_conformance() -> None:
         ack2 = json.loads(ws.messages[-1])
         assert_conform(ack2["accepted"] is True and ack2["duplicate"] is True,
                        "Bridge: duplicate ack mismatch")
+        # A rejection: "authorize" while still landing (no touchdown yet).
+        await bridge.handle_message(ws, json.dumps({
+            "type": "service", "id": "DR-1", "requestId": "req-conf-2", "action": "authorize"
+        }), None, 14550)
+        assert_conform(json.loads(ws.messages[-1])["accepted"] is False,
+                       "Bridge: authorize before touchdown was accepted")
+        note_acks("Bridge", ws.messages)
 
         # 3. Abort with expired heartbeat qualification
         v.init_state = "landing"
@@ -111,6 +166,7 @@ async def test_bridge_conformance() -> None:
         }), None, 14550)
         assert_conform(v.launch_alt == 15.0 and v.takeoff_alt == 55.0,
                        f"Bridge: relaunch datum expected 55.0m, got {v.takeoff_alt}")
+        note_acks("Bridge", ws.messages)
 
     await h.close()
 
@@ -142,9 +198,37 @@ async def test_mock_conformance() -> None:
         v.alt = 30.0
 
         # 1. State schema
+        doc = doc_examples()
+        doc_telem = doc["telemetry"][0]
+        envelope = json.loads(world.telemetry_message())
+        assert_conform(set(envelope) == set(doc_telem),
+                       f"Mock: telemetry envelope {sorted(envelope)} != PROTOCOL.md {sorted(doc_telem)}")
         telem = v.to_telemetry()
-        expected_keys = {"id", "x", "y", "alt", "ready", "state", "connected", "positionAge", "positionSeq", "servicePhase"}
-        assert_conform(expected_keys.issubset(set(telem.keys())), "Mock: telemetry schema missing keys")
+        assert_conform(set(telem) == set(doc_telem["vehicles"][0]),
+                       "Mock: telemetry vehicle keys differ from PROTOCOL.md: "
+                       f"{sorted(set(telem) ^ set(doc_telem['vehicles'][0]))}")
+        assert_conform(set(v.to_ready_entry()) == set(doc["ready"][0]["vehicles"][0]),
+                       "Mock: ready vehicle entry keys differ from PROTOCOL.md")
+        # The documented init example is accepted and answered with the documented ready.
+        init_ws = MockWebSocket()
+        world.controller = None
+        await mv.handle_message(init_ws, json.dumps(doc["init"][0]))
+        ready = [m for m in map(json.loads, init_ws.sent) if m.get("type") == "ready"]
+        assert_conform(len(ready) == 1 and set(ready[0]) == set(doc["ready"][0]),
+                       "Mock: ready reply to the PROTOCOL.md init example differs from the documented keys")
+        assert_conform(world.vehicles["DR-1"].origin == doc["init"][0].get("origin"),
+                       "Mock: origin from the PROTOCOL.md init example not adopted")
+        world.reset(1, 30.0)
+        world.controller = ws
+        v = world.vehicles["DR-1"]
+        v.ready = True
+        v.init_state = mv.INIT_READY
+        v.armed = True
+        v.custom_mode = v.guided_mode_id
+        v.last_heartbeat = clock[0]
+        v.last_position = clock[0]
+        v.position_seq = 1
+        v.alt = 30.0
 
         # 2. Duplicate handling & ACK
         await mv.handle_message(ws, json.dumps({
@@ -163,6 +247,12 @@ async def test_mock_conformance() -> None:
         ack2 = json.loads(ws.sent[-1])
         assert_conform(ack2["accepted"] is True and ack2["duplicate"] is True,
                        "Mock: duplicate ack mismatch")
+        await mv.handle_message(ws, json.dumps({
+            "type": "service", "id": "DR-1", "requestId": "req-m-2", "action": "authorize"
+        }))
+        assert_conform(json.loads(ws.sent[-1])["accepted"] is False,
+                       "Mock: authorize before touchdown was accepted")
+        note_acks("Mock", ws.sent)
 
         # 3. Abort with expired heartbeat qualification
         v.service_phase = "landing"
@@ -209,6 +299,24 @@ async def test_mock_conformance() -> None:
         }))
         assert_conform(v.launch_alt == 15.0 and v.takeoff_alt == 55.0,
                        f"Mock: relaunch datum expected 55.0m, got {v.takeoff_alt}")
+        note_acks("Mock", ws.sent)
+
+
+def test_service_ack_keys_match_doc() -> None:
+    """Every ack either server sent above carries the keys of the accepted
+    PROTOCOL.md example and none outside the union of the examples."""
+    acks = doc_examples()["service_ack"]
+    assert_conform(len(acks) >= 2, "PROTOCOL.md: needs accepted and rejected service_ack examples")
+    required = set(acks[0])
+    allowed = set().union(*acks)
+    assert_conform({who for who, _ in seen_acks} == {"Bridge", "Mock"}, "acks not captured from both servers")
+    for who, ack in seen_acks:
+        keys = set(ack)
+        assert_conform(required <= keys <= allowed,
+                       f"{who}: service_ack keys {sorted(keys)} outside PROTOCOL.md "
+                       f"(required {sorted(required)}, allowed {sorted(allowed)})")
+        if not ack["accepted"]:
+            assert_conform("retryable" in ack, f"{who}: rejected service_ack lacks retryable")
 
 
 async def test_ready_means_takeoff_altitude() -> None:
@@ -252,6 +360,7 @@ def main() -> int:
     asyncio.run(test_bridge_conformance())
     asyncio.run(test_mock_conformance())
     asyncio.run(test_ready_means_takeoff_altitude())
+    test_service_ack_keys_match_doc()
 
     if failures:
         print(f"FAILED ({len(failures)} conformance errors):")

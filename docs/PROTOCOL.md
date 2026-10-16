@@ -1,6 +1,6 @@
 # Browser–Bridge Protocol Specification
 
-Version: 1.1 (September 2026)
+Version: 1.2 (October 2026)
 Scope: Communication contract between the web-based swarm simulator (`js/external.js`) and external vehicle servers (`sitl/bridge.py` and `sitl/mock_vehicles.py`).
 
 ---
@@ -17,7 +17,7 @@ The simulator supports flying simulated or real physical drones via an external 
 +-------------------+                             +-----------------------+
 ```
 
-Both server implementations MUST adhere strictly to this specification to ensure interoperability and prevent behavioral drift.
+Both server implementations MUST adhere strictly to this specification to ensure interoperability and prevent behavioral drift. Where the two servers intentionally differ, the difference is called out below.
 
 ---
 
@@ -26,7 +26,7 @@ Both server implementations MUST adhere strictly to this specification to ensure
 ### 2.1 Simulation Local Frame (`sim`)
 - **X**: East, metres (positive right on standard canvas).
 - **Y**: South, metres (positive down on standard canvas).
-- **Alt**: Height above local ground level, metres (positive up).
+- **Alt**: Metres above the origin ground elevation `origin.groundM` (positive up). This equals height above ground only over flat terrain.
 
 ### 2.2 Autopilot Local Frame (`LOCAL_NED`)
 - **North**: Metres North (`-sim.y`).
@@ -34,7 +34,7 @@ Both server implementations MUST adhere strictly to this specification to ensure
 - **Down**: Metres Down (`-sim.alt` relative to origin elevation).
 
 ### 2.3 Common Local Origin
-At connection/initialization time, the browser captures and establishes an immutable common local origin:
+At connection/initialization time, the browser captures an immutable common local origin and sends it in `init`:
 ```json
 {
   "frame": "common-local-origin",
@@ -43,30 +43,32 @@ At connection/initialization time, the browser captures and establishes an immut
   "groundM": 250.0
 }
 ```
-All goal commands sent by the browser are origin-relative. All telemetry coordinates returned by the server are origin-relative.
+All goal commands sent by the browser are origin-relative. All telemetry coordinates returned by the server are origin-relative: servers report the autopilot's local NED position converted to the sim frame and only echo the origin back; the browser adds `origin.x`/`origin.y`/`origin.groundM` to place the vehicle in the world.
 
 ---
 
 ## 3. Wire Protocol Messages
 
-All messages are JSON objects with a mandatory `"type"` string field.
+All messages are JSON objects with a mandatory `"type"` string field. The fenced `json` examples in this section are checked key-for-key against both servers by `sitl/test_protocol_conformance.py`; change them together with the code.
 
 ### 3.1 Client to Server Messages
 
 #### `init`
-Requests initialization and allocation of vehicles.
+Requests initialization and allocation of vehicles, and fixes the common local origin (§2.3) for the session.
 ```json
 {
   "type": "init",
   "count": 5,
-  "alt": 30.0
+  "alt": 30.0,
+  "origin": { "frame": "common-local-origin", "x": 1000.0, "y": 500.0, "groundM": 250.0 }
 }
 ```
 - `count` (integer $\ge 0$): Number of vehicles to initialize (`DR-1` through `DR-N`).
-- `alt` (float $> 1.0$): Default cruise/takeoff altitude in metres AGL.
+- `alt` (float): Takeoff altitude in metres above each vehicle's launch point.
+- `origin` (object): The browser always sends it. When it is absent both servers use the zero origin; the bridge ignores an `init` whose `origin` is malformed (wrong `frame`, or non-finite `x`/`y`/`groundM`).
 
 #### `goals`
-Commands waypoint setpoints for active vehicles. Sent periodically (e.g. 5–10 Hz).
+Commands waypoint setpoints for active vehicles. The browser sends them at about 2 Hz (at most once per 0.5 s of sim time).
 ```json
 {
   "type": "goals",
@@ -86,22 +88,21 @@ Commands lifecycle and service transitions (landing, battery swap, relaunch, abo
   "id": "DR-1",
   "requestId": "svc-92a4f10",
   "action": "land",
-  "groundAlt": 0.0,
-  "alt": 30.0
+  "groundAlt": 0.0
 }
 ```
 - `id` (string): Vehicle identifier.
-- `requestId` (string): Unique UUID or token identifying this service transaction.
+- `requestId` (string): Unique token identifying this service transaction.
 - `action` (string): One of `"land"`, `"authorize"`, `"complete"`, `"relaunch"`, `"abort"`, `"resume"`.
-- `groundAlt` (optional float): Local touchdown elevation relative to launch origin (used in `"land"`).
-- `alt` (optional float): Desired climb above touchdown elevation in metres (used in `"relaunch"`).
+- `groundAlt` (optional float, `"land"`): Terrain elevation under the vehicle relative to `origin.groundM`. The mock descends to it; the bridge ignores it and lets the autopilot's LAND mode find the ground (§5.2).
+- `alt` (optional float, `"relaunch"`): Climb in metres above the touchdown point (`takeoff_alt = launch_alt + alt`).
 
 ---
 
 ### 3.2 Server to Client Messages
 
 #### `ready`
-Sent in response to `"init"`, once all initial vehicles are registered and report individual states.
+Sent in response to `"init"`. The bridge waits (bounded) for each vehicle's first-pass outcome before replying; the mock replies at once with every vehicle in `wait-heartbeat`. Later per-vehicle progress arrives in telemetry.
 ```json
 {
   "type": "ready",
@@ -109,43 +110,47 @@ Sent in response to `"init"`, once all initial vehicles are registered and repor
   "vehicles": [
     { "id": "DR-1", "ready": true, "state": "ready" },
     { "id": "DR-2", "ready": false, "state": "confirm-arm" }
-  ],
-  "origin": { "frame": "common-local-origin", "x": 0.0, "y": 0.0, "groundM": 0.0 }
+  ]
 }
 ```
 
 #### `telemetry`
-Broadcast periodically (typically 10 Hz) with live state of all active vehicles.
+Broadcast periodically (10 Hz) with the live state of all vehicles. `t` is server-monotonic seconds since start.
 ```json
 {
   "type": "telemetry",
-  "time": 12.35,
+  "t": 12.35,
   "vehicles": [
     {
       "id": "DR-1",
       "x": 12.0,
       "y": -8.0,
       "alt": 30.0,
-      "vx": 0.0,
-      "vy": 0.0,
+      "connected": true,
       "ready": true,
       "state": "ready",
-      "connected": true,
       "armed": true,
-      "airborne": true,
-      "landed": false,
-      "positionSeq": 42,
-      "positionAge": 0.05,
       "heartbeatAge": 0.1,
+      "positionAge": 0.05,
+      "positionSeq": 42,
+      "landed": false,
+      "landedAge": 0.1,
+      "landedSeq": 7,
       "serviceId": null,
-      "servicePhase": null
+      "servicePhase": null,
+      "origin": { "frame": "common-local-origin", "x": 0.0, "y": 0.0, "groundM": 0.0 }
     }
   ]
 }
 ```
+- `x`, `y`, `alt`: local position in the sim frame (§2.1), origin-relative; `origin` is the `init` origin echoed back.
+- `heartbeatAge`, `positionAge`, `landedAge` (seconds, or `null` before the first sample) and `positionSeq`, `landedSeq` (integers, 0 = never sampled) describe sample freshness. `landed` is `null` until the server has a landed-state sample.
+- What the browser (`js/external.js`) requires before acting:
+  - **goals** go to a vehicle only while `connected === true`, `positionSeq > 0` with a fresh `positionAge` (< 3 s), `ready === true`, `state === "ready"` and `armed === true`;
+  - **touchdown** (and so the `"authorize"` that follows a `"land"`) additionally needs `armed === false`, a fresh `heartbeatAge`, `landed === true`, `landedSeq > 0` and a fresh `landedAge`. A server that omits `landedSeq`/`landedAge` never completes a battery swap.
 
 #### `service_ack`
-Machine-readable acknowledgment dispatched immediately upon receiving any `"service"` message.
+Machine-readable acknowledgment sent for every `"service"` message from the controlling client. An accepted request:
 ```json
 {
   "type": "service_ack",
@@ -153,16 +158,27 @@ Machine-readable acknowledgment dispatched immediately upon receiving any `"serv
   "id": "DR-1",
   "action": "land",
   "accepted": true,
+  "duplicate": false
+}
+```
+A rejection adds `retryable`, and `code`/`error` when the server has them:
+```json
+{
+  "type": "service_ack",
+  "requestId": "svc-92a4f10",
+  "id": "DR-1",
+  "action": "authorize",
+  "accepted": false,
   "duplicate": false,
-  "code": null,
-  "error": null,
-  "retryable": false
+  "code": "INVALID_PHASE",
+  "error": "cannot authorize in phase landing",
+  "retryable": true
 }
 ```
 - `accepted` (boolean): Whether the request was validated and adopted.
-- `duplicate` (boolean): `true` if this `(requestId, action)` was previously processed and accepted.
-- `code` (string, optional): Machine-readable error code on failure (e.g. `INVALID_PHASE`, `HOLD_NOT_READY`, `VEHICLE_NOT_READY`, `BAD_ALTITUDE`).
-- `retryable` (boolean): `true` if the failure is temporary and can succeed on vehicle state change.
+- `duplicate` (boolean): `true` if this `(requestId, action)` was previously processed and accepted; the original outcome is replayed. The mock's replay always carries `code`, `error` and `retryable` (`null`/`false` when unset); the bridge's omits them.
+- `code` (string, optional): Machine-readable error code on failure (e.g. `INVALID_PHASE`, `INVALID_REQUEST_ID`, `SERVICE_BUSY`, `HOLD_NOT_READY`, `VEHICLE_NOT_READY`, `BAD_ALTITUDE`).
+- `retryable` (boolean, on rejections): `true` if the failure is temporary and can succeed on vehicle state change. Only accepted outcomes are cached for duplicate replay.
 - `error` (string, optional): Human-readable diagnostic description.
 
 #### `status`
@@ -207,13 +223,17 @@ stateDiagram-v2
 ```mermaid
 stateDiagram-v2
     ready --> landing: Action 'land' (accepts groundAlt)
-    landing --> landed: Confirmed touchdown (alt within 0.05m of groundAlt, disarmed, landed state)
+    landing --> landed: Confirmed touchdown (see below)
     landed --> swapping: Action 'authorize' (swap commences)
     swapping --> swapped: Action 'complete' (fresh battery installed)
     swapped --> relaunch: Action 'relaunch' (alt climb specified)
     relaunch --> confirm_mode: Relaunch init
     confirm_mode --> ready: Complete climb to target altitude
 ```
+
+Touchdown is decided differently by the two servers:
+- **bridge**: the autopilot reports `EXTENDED_SYS_STATE.landed_state == MAV_LANDED_STATE_ON_GROUND` and a disarmed heartbeat. `groundAlt` is not used.
+- **mock**: `|alt - groundAlt| <= 0.05` m, which also disarms the simulated vehicle.
 
 ### 5.3 In-Flight Abort Handshake
 ```mermaid
@@ -232,10 +252,11 @@ stateDiagram-v2
 
 ## 6. Conformance & Drift Prevention Requirements
 
-Both `sitl/bridge.py` and `sitl/mock_vehicles.py` must pass the unified conformance suite `sitl/test_protocol_conformance.py` asserting:
-1. Exact JSON schema for `ready`, `telemetry`, and `service_ack`.
+`sitl/test_protocol_conformance.py` runs the same checks against `sitl/bridge.py` and `sitl/mock_vehicles.py`:
+1. The key sets of `ready` (envelope and per-vehicle entry) and `telemetry` (envelope and per-vehicle object) equal the §3.2 examples exactly. Every `service_ack` either server sends in the suite (accepted, duplicate, rejected) carries the accepted example's keys and no key outside the two examples. The mock is also driven with the §3.1 `init` example.
 2. Idempotent duplicate request suppression for accepted actions.
-3. Non-caching of retryable rejections.
+3. Stale heartbeat gating: an abort with an expired heartbeat enters `confirm-abort` and commands no hold until fresh heartbeat evidence arrives (`abort-hold`).
 4. Elevation datum conversion for relaunch (`takeoff_alt = launch_alt + requested_alt`).
-5. Touchdown detection relative to local `groundAlt`.
-6. Stale heartbeat gating: abort confirmation and hold setpoints require fresh heartbeat evidence (`connected=true`).
+5. READY only at `takeoff_alt - 1.0 m`.
+
+Not covered by this suite: non-caching of retryable rejections and touchdown detection (exercised per server in `sitl/test_bridge.py` and `sitl/test_mock_vehicles.py`), and the server differences called out in §3 and §5.2.
