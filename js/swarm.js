@@ -880,7 +880,7 @@ function interferenceFloorDbm(s, rxPos, rxAlt, rxRadio) {
   if (!jams || !jams.length) return -Infinity;
   const rad = rxRadio || s.radio;
   const n = pathLossExponent(rad);
-  const pl1 = pl1m(rad.freqMHz);
+  const pl1 = refLossDb(rad); // calibrated presets: the measured channel, not free space
   const gainDb = agilityGainDb(s, rad);
   let lin = 0;
   for (const j of jams) {
@@ -945,7 +945,7 @@ function jammerDenialRadiusM(s, j) {
   if (Number.isNaN(jf) || (jf != null && Math.abs(jf - r.freqMHz) > 150)) return 0;
   const n = pathLossExponent(r);
   const eff = j.erpDbm - agilityGainDb(s, r);
-  const exp = (eff - pl1m(r.freqMHz) + JAM_SNR_OFFSET_DB - r.sensDbm) / (10 * n);
+  const exp = (eff - refLossDb(r) + JAM_SNR_OFFSET_DB - r.sensDbm) / (10 * n);
   return s.envFactor * Math.pow(10, exp);
 }
 

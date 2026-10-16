@@ -10,8 +10,18 @@
 //
 // Method: log-distance path loss says RSSI(d) = A − 10·n·log10(d). That is
 // LINEAR in x = log10(d), so ordinary least squares gives both A (reference
-// power at 1 m, absorbing real TX power and antenna gains) and n directly,
-// with RMSE and R² to say how honest the fit is.
+// power at 1 m) and n directly, with RMSE and R² to say how honest the fit is.
+//
+// Convention: the calibrated preset keeps the datasheet txDbm and antGainDbi
+// as the hardware's own figures; the residual of A against them is treated
+// as CHANNEL loss, shared by every emitter on that channel — jammers included
+// (radios.js refLossDb). If the offset is really reduced TX power or cable
+// loss on your own radio, edit txDbm in the saved preset instead.
+//
+// Censoring: radios only log RSSI for packets they RECEIVE, so near the edge
+// of range the weak tail is missing, n is biased low and the re-derived range
+// comes out optimistic (~15% in a synthetic n=3 test flown to 1.3x range).
+// Fit on distances where reception is still reliable.
 
 // Node standalone (tests): pull in or re-create the few helpers this module
 // borrows from js/radios.js and js/render.js in the browser.
