@@ -114,3 +114,26 @@ test('Item 9 & 7: UI renders decision card and maintains keyed DOM rows for flee
   assert.strictEqual(prevRow, nextRow, 'Keyed row DOM element must be preserved across updates');
   assert.strictEqual(nextRow._fpct.textContent, '85%');
 });
+
+// Audit finding ui-render/landed-drone-shown-as-down: the card was gated on
+// alive(), which is false for a drone landed for a battery swap, so a landed
+// drone was reported in red as "is down (destroyed or battery exhausted)".
+test('a drone landed for a swap is shown as landed, not as down', () => {
+  const ui = loadUI();
+  const s = ui.ctx.sim.swarm;
+  ui.ctx.__raf.pump(200);
+  ui.ctx.__raf.pump(200);
+  const d = s.drones[1];
+  ui.el('fleetBody').fire('click', { target: ui.el('fleetBody').querySelector('[data-id="' + d.id + '"]') });
+  d.mode = 'landed';
+  d.swapAt = s.time + 1e6;
+  ui.ctx.__raf.pump(200);
+  ui.ctx.__raf.pump(200);
+  const card = ui.el('droneDecisionCard').innerHTML;
+  assert.ok(card.includes('Landed on base pad'), card);
+  assert.ok(!card.includes('is down'), card);
+  d.mode = 'dead';
+  ui.ctx.__raf.pump(200);
+  ui.ctx.__raf.pump(200);
+  assert.ok(ui.el('droneDecisionCard').innerHTML.includes('is down'));
+});

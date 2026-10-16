@@ -1517,7 +1517,9 @@
     }
 
     if (droneDecisionCard) {
-      if (selected && alive(selected) && typeof explainDroneDecision === 'function') {
+      // Gate on 'dead', not alive(): a drone landed for a battery swap is not
+      // alive() but is not down either — its card says so.
+      if (selected && selected.mode !== 'dead' && typeof explainDroneDecision === 'function') {
         const exp = explainDroneDecision(swarm, selected);
         const marginStr = exp.marginDb != null ? exp.marginDb.toFixed(1) + ' dB' : '—';
         const silenceStr = exp.c2AgeSec != null ? exp.c2AgeSec.toFixed(1) + 's' : '0.0s';
@@ -1534,7 +1536,7 @@
             '<div><b>Battery:</b> ' + selected.batteryPct.toFixed(1) + '%</div>' +
             '<div><b>Energy:</b> ' + selected.energyWh.toFixed(1) + ' Wh</div>' +
           '</div>';
-      } else if (selected && !alive(selected)) {
+      } else if (selected && selected.mode === 'dead') {
         droneDecisionCard.innerHTML = '<div style="color:var(--lost)"><b>' + escHtml(selected.id) + '</b> is down (destroyed or battery exhausted).</div>';
       } else {
         droneDecisionCard.textContent = 'Select a drone on the map or fleet list to inspect its decision logic and live measurements.';
