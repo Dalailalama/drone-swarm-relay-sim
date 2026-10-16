@@ -232,11 +232,18 @@ function validationReportMd(fit, basePreset, samples, parsed) {
   L.push('- **RMSE:** ' + fit.rmse.toFixed(1) + ' dB · **R²:** ' + fit.r2.toFixed(3));
   L.push('- **Datasheet model implied:** n = ' + pathLossExponent(basePreset).toFixed(2));
   const drift = fit.n - pathLossExponent(basePreset);
-  L.push('- **Environment verdict:** ' + (drift > 0.4 ? 'your environment attenuates FASTER than the datasheet assumption (clutter/foliage/antenna height).' :
-    drift < -0.4 ? 'your environment attenuates SLOWER than the datasheet assumption (open ground / elevation).'
+  L.push('- **Exponent drift:** ' + (drift >= 0 ? '+' : '') + drift.toFixed(2) +
+    ' (slope only — the intercept matters as much, so the verdict below uses the predicted range)');
+  // Verdict on what planning sees: slope AND intercept together, via the
+  // re-derived range against the datasheet's rated range.
+  const cal = calibratePreset(fit, basePreset);
+  const rangeRatio = cal.rangeLosM / basePreset.rangeLosM;
+  L.push('- **Environment verdict:** ' + (rangeRatio < 0.8 ? 'your environment attenuates FASTER than the datasheet assumption (clutter/foliage/antenna height) — the link reaches ' +
+    Math.round(rangeRatio * 100) + '% of the rated range.' :
+    rangeRatio > 1.25 ? 'your environment attenuates SLOWER than the datasheet assumption (open ground / elevation) — the link reaches ' +
+      Math.round(rangeRatio * 100) + '% of the rated range.'
       : 'close to the datasheet assumption — the stock preset is already honest here.'));
   L.push('');
-  const cal = calibratePreset(fit, basePreset);
   L.push('## Calibrated preset');
   L.push('- **Rated LOS range (re-derived):** ' + fmtDist(cal.rangeLosM) +
     ' (was ' + fmtDist(basePreset.rangeLosM) + ')');

@@ -184,6 +184,27 @@ test('regression: device-scale RSSI (SiK RADIO_STATUS 0..254) is refused as not-
   assert.ok(C.fitPathLoss(C.parseFlightLogCsv(csv).samples).ok);
 });
 
+test('regression: the environment verdict follows the re-derived range, not n alone', () => {
+  // Shallow slope but a 30 dB lower intercept: n < datasheet, range is SHORTER.
+  const weak = fieldLog(gaussFrom(11), 120, 10, 2000, 2.99, -60.1, 1);
+  const f1 = C.fitPathLoss(weak);
+  assert.ok(f1.ok, f1.reason);
+  assert.ok(f1.n < R.pathLossExponent(SIK) - 0.4, 'setup: slope is shallower than the datasheet model');
+  assert.ok(C.calibratePreset(f1, SIK).rangeLosM < SIK.rangeLosM);
+  const md1 = C.validationReportMd(f1, SIK, weak, null);
+  assert.ok(!md1.includes('SLOWER'), 'verdict says SLOWER while the range shrank');
+  assert.ok(md1.includes('FASTER'), md1);
+  // Mirror: steeper slope but a hot intercept — the range grows.
+  const hot = fieldLog(gaussFrom(12), 120, 10, 2000, 5.0, 40, 1);
+  const f2 = C.fitPathLoss(hot);
+  assert.ok(f2.ok, f2.reason);
+  assert.ok(f2.n > R.pathLossExponent(SIK) + 0.4, 'setup: slope is steeper than the datasheet model');
+  assert.ok(C.calibratePreset(f2, SIK).rangeLosM > SIK.rangeLosM);
+  const md2 = C.validationReportMd(f2, SIK, hot, null);
+  assert.ok(!md2.includes('FASTER'), 'verdict says FASTER while the range grew');
+  assert.ok(md2.includes('SLOWER'), md2);
+});
+
 test('wide-span fits pass and their 95% CI on n covers the truth', () => {
   let covered = 0;
   for (let t = 0; t < 50; t++) {
