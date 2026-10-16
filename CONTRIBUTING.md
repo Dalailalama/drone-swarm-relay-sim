@@ -35,7 +35,7 @@ Rules:
 ## Everything else
 
 - **Physics changes** need a unit test in `test/` pinning the new behavior.
-  Run the suite with `node --test` (Node 20+).
+  Run the suite with `node --test` (Node 22+).
 - **Simulation logic** (planner, failsafes, network): keep the separation of
   knowledge honest. C2 code may only read `s.c2.*` (its beliefs); drone code
   may only read its own fields; only physics reads truth. If your feature

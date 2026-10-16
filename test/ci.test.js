@@ -27,3 +27,18 @@ test('whitespace job: PRs diff against the merge commit’s base parent, pushes 
   assert.ok(!/\|\|\s*true/.test(ws), 'the push path must be allowed to fail');
   assert.match(ws, /github\.event\.before/, 'the push path should cover the whole push, not just HEAD~1');
 });
+
+// node-matrix-eol: Node 20 went end-of-life 2026-04-30 and the project is
+// developed and benchmarked on Node 24, which the matrix never ran; the
+// pinned action majors declared the retired node20 runtime.
+test('Node matrix covers the supported LTS lines and actions are on node24 majors', () => {
+  const m = job('test-javascript').match(/node-version:\s*\[([^\]]*)\]/);
+  assert.ok(m, 'test-javascript has a node-version matrix');
+  const versions = m[1].split(',').map(v => v.trim());
+  assert.ok(!versions.includes('20.x'), 'Node 20 is end-of-life');
+  for (const v of ['22.x', '24.x']) assert.ok(versions.includes(v), 'matrix should test ' + v);
+  assert.ok(!/actions\/checkout@v[1-4]\b/.test(CI), 'checkout@v4 and older declare node20');
+  assert.ok(!/actions\/setup-node@v[1-4]\b/.test(CI), 'setup-node@v4 and older declare node20');
+  assert.ok(!/actions\/setup-python@v[1-5]\b/.test(CI), 'setup-python@v5 and older declare node20');
+  assert.ok(fs.existsSync(path.join(ROOT, '.github/dependabot.yml')), 'dependabot keeps action majors current');
+});
