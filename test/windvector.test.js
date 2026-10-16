@@ -90,3 +90,22 @@ test('unflyable-wind RTB is reported as wind, not as a low battery at 100% (audi
   assert.strictEqual(exp.requiredWh, null);
   assert.strictEqual(exp.requiredPct, null);
 });
+
+test('drone-side feasibility plans from beliefs, not truth: known base and nav position (audit EN-8)', () => {
+  const s = mkSwarm(0, 600);
+  const d = s.drones[0];
+  d.x = d.belX = 0; d.y = d.belY = 0;
+  d.baseKnown = { x: s.base.x, y: s.base.y };
+  const order = { role: 'mission', target: { x: 1500, y: 0 } };
+  // Just enough energy for out-and-back from the believed position.
+  const af = Q450, pw = A.flightPowerW(af, af.maxSpeedMs);
+  const need = pw * (1500 / af.maxSpeedMs) / 3600 * (1 + 1.3) + ctx.usableWh(af) * 0.07; // homeMargin, reserveFrac
+  d.energyWh = need * 1.05;
+  const before = ctx.orderFeasible(s, d, order);
+  assert.strictEqual(before, true);
+  s.base = { x: -2000, y: 0 }; // truth moves; the drone was not told
+  assert.strictEqual(ctx.orderFeasible(s, d, order), before, 'orderFeasible read the true base');
+  s.base = { x: d.baseKnown.x, y: d.baseKnown.y };
+  d.belX = -1000; // the drone believes it is 1 km further out
+  assert.strictEqual(ctx.orderFeasible(s, d, order), false, 'orderFeasible ignored the nav belief');
+});
