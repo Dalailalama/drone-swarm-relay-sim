@@ -86,3 +86,25 @@ test('the page loads nothing from a third-party origin at startup (no Google Fon
   assert.deepStrictEqual(external, [], 'every visit leaked the operator IP to the font host');
   assert.ok(!/@import\s+url\(\s*['"]?https?:/.test(CSS), 'no remote @import in style.css');
 });
+
+// WCAG 2.x relative-luminance contrast ratio between two #rrggbb colours.
+function contrast(a, b) {
+  const lum = hex => {
+    const c = [1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16) / 255)
+      .map(v => (v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4)));
+    return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+  };
+  const [hi, lo] = [lum(a), lum(b)].sort((x, y) => y - x);
+  return (hi + 0.05) / (lo + 0.05);
+}
+
+test('text tokens meet WCAG AA 4.5:1 on every panel surface they are drawn on', () => {
+  const tok = {};
+  for (const m of CSS.match(/:root\s*\{[^}]*\}/)[0].matchAll(/--([\w-]+):\s*(#[0-9a-fA-F]{6})/g)) tok[m[1]] = m[2];
+  const pairs = [];
+  for (const fg of ['dim', 'dim-2', 'text', 'text-2', 'ok', 'warn', 'lost']) pairs.push([fg, 'panel-2']);
+  pairs.push(['dim', 'panel'], ['dim', 'bg']);
+  const low = pairs.map(([f, b]) => [f + ' on ' + b, contrast(tok[f], tok[b])]).filter(([, r]) => r < 4.5)
+    .map(([n, r]) => n + ' ' + r.toFixed(2));
+  assert.deepStrictEqual(low, []);
+});
