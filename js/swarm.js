@@ -854,7 +854,8 @@ function jammerFreqMHz(j) {
 // - Frequency agility: a hopping radio only ever sits in the jammer's band a
 //   small fraction of the time — modelled as processing/escape gain that
 //   subtracts from the interference the RECEIVER experiences. Per-radio
-//   `hopGainDb` (datasheet-class MANET/FHSS radios carry 12–16 dB).
+//   `hopGainDb` (assumed 12–16 dB for the FHSS / interference-avoiding MANET
+//   presets — a modelling estimate; no vendor publishes a figure, see RADIOS.md).
 // - LPI/LPD mode: low-probability-of-intercept waveforms trade link budget
 //   for survivability — a fixed margin cost, but a jammer that can barely
 //   see you can't aim at you either, so the denial floor drops further.

@@ -44,3 +44,14 @@ test('RADIOS.md documents every preset, with its source', () => {
     assert.ok(line && line.includes(r.hopGainDb + ' dB (estimate)'), r.id + ' hopGainDb not documented');
   }
 });
+
+test('hop gain is not presented as a datasheet figure in the code', () => {
+  for (const f of ['js/swarm.js', 'js/radios.js']) {
+    const src = fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
+    assert.ok(!/datasheet-class/.test(src), f + ' calls hopGainDb datasheet-class; it is a modelling estimate');
+  }
+  // Silvus documents single-frequency TDD with interference cancellation /
+  // avoidance, not frequency hopping.
+  assert.ok(!/frequency-hopping|FHSS/i.test(
+    fs.readFileSync(path.join(__dirname, '..', 'js/radios.js'), 'utf8').split("id: 'silvus-sc4400'")[1].split('},')[0]));
+});
