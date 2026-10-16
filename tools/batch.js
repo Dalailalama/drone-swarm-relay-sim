@@ -198,6 +198,9 @@ function validateConfig(cfg) {
   for (const s of seeds) {
     if (!finiteNum(s) || !Number.isInteger(s)) return 'seeds must be integers';
   }
+  // Same seed => bit-identical run: a repeated seed is a copy, not a sample,
+  // and would shrink every reported spread toward zero.
+  if (new Set(seeds).size !== seeds.length) return 'seeds must be distinct';
 
   const totalRuns = cells.length * seeds.length;
   if (totalRuns > LIMITS.maxTotalRuns) {
