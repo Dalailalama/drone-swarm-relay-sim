@@ -82,4 +82,9 @@ test('every radio preset cites a datasheet source', () => {
   for (const radio of R.RADIOS) {
     assert.ok(radio.source && radio.source.startsWith('https://'), radio.id + ' needs a source URL');
   }
+  // These three moved; the old links 404/403. Pinned so a dead one can't return.
+  const src = id => R.RADIOS.find(r => r.id === id).source;
+  assert.strictEqual(src('sik-v3'), 'https://docs.holybro.com/radio/sik-telemetry-radio-v3');
+  assert.strictEqual(src('rfd900x'), 'https://rfdesign.com.au/wp-content/uploads/x-Series-Datasheet-V2.0.pdf');
+  assert.strictEqual(src('rajant-es1'), 'https://secure.rajant.com/publicFiles/1479');
 });
