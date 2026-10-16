@@ -446,6 +446,9 @@
     forcedSeed = sc.seed != null ? sc.seed : null; // exact same map if the file has a seed
     resetSwarm({ base: sc.base, target: sc.target });
     forcedSeed = null;
+    // The toggles were set above but their status texts were not: rewrite
+    // them (these only re-write values makeSwarm already used; nothing logs).
+    applyCorridor(); applyAgility(); applyLpi(); applyVideo();
     const applyMissionOverrides = () => {
       if (sc.base) { swarm.base.x = sc.base.x; swarm.base.y = sc.base.y; }
       if (sc.target) { swarm.target.x = sc.target.x; swarm.target.y = sc.target.y; }
@@ -599,10 +602,11 @@
       (margin < 3 ? ' — fragile: shadowing swings will break these links' : '');
   }
   spacingRange.addEventListener('input', applySpacing);
-  corridorChk.addEventListener('change', () => {
+  function applyCorridor() {
     if (swarm) swarm.corridorRouting = corridorChk.checked;
     corridorOut.textContent = corridorChk.checked ? 'transits follow the chain' : 'straight-line transits';
-  });
+  }
+  corridorChk.addEventListener('change', applyCorridor);
   // --- EW waveforms: spectrum agility + LPI/LPD --------------------------------
   function applyAgility() {
     if (!swarm) return;
