@@ -12,3 +12,10 @@ test('SiK V3 sensitivity is the Holybro figure at its 64 kbps air rate', () => {
   assert.strictEqual(sik.airRateKbps, 64);
   assert.strictEqual(sik.sensDbm, -105, 'Holybro V3 spec: -105 dBm @64kbps');
 });
+
+test('RFD900x air rate and sensitivity are one row of the x-Series V2.0 table', () => {
+  const rfd = byId('rfd900x');
+  assert.strictEqual(rfd.airRateKbps, 224);
+  assert.strictEqual(rfd.sensDbm, -93, 'x-Series datasheet V2.0 p32: 224 kbit/s -93 dBm');
+  assert.strictEqual(rfd.antGainDbi, 3, 'the datasheet stock dipole is 3 dBi');
+});
