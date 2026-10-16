@@ -229,7 +229,10 @@
         }
         refreshReadiness(s);
       } else if (m.type === 'service_ack') {
-        const svc = ExternalMode.services[m.id];
+        // Same id gate as ready/telemetry: an ack for '__proto__' must not
+        // resolve to Object.prototype and have its phase written there.
+        const svc = validVehicleId(m.id) && Object.prototype.hasOwnProperty.call(ExternalMode.services, m.id)
+          ? ExternalMode.services[m.id] : null;
         if (svc && svc.id === m.requestId && svc.pendingAction === m.action) {
           if (m.accepted) {
             svc.phase = (m.action === 'land') ? 'landing'
