@@ -62,6 +62,9 @@ PHYSICS_DT = 1.0 / PHYSICS_HZ
 TELEMETRY_HZ = 10.0
 TELEMETRY_DT = 1.0 / TELEMETRY_HZ
 
+# Upper bound on an init's vehicle count (it arrives over the network); same
+# limit as bridge.py.
+MAX_VEHICLES = 256
 MAX_XY_SPEED = 14.0  # m/s, roughly a small multirotor's max horizontal speed
 XY_ACCEL = 4.0  # m/s^2, how fast velocity is allowed to change per tick
 ALT_RATE = 3.0  # m/s, vertical ease-toward-goal rate (climb/descend)
@@ -514,6 +517,7 @@ class World:
 
     def reset(self, count: int, alt: float, origin: dict | None = None) -> list[str]:
         """Handle an "init": (re)create N vehicles at the origin."""
+        count = max(0, min(int(count), MAX_VEHICLES))
         self.vehicles = {}
         ids = []
         for i in range(1, count + 1):
@@ -643,6 +647,9 @@ async def handle_message(websocket, raw: str) -> None:
             return
         WORLD.controller = websocket
         count = int(msg.get("count", 0))
+        if count > MAX_VEHICLES:
+            await send_status(websocket, f"mock: requested {count} vehicles exceeds limit {MAX_VEHICLES}; clamping")
+            count = MAX_VEHICLES
         alt = float(msg.get("alt", 50))
         # Same order as bridge.py: advisory status first, "ready" after it, so
         # clients tested against the mock must tolerate status traffic (#10).

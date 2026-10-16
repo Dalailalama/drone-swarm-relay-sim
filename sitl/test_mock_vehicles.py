@@ -551,6 +551,15 @@ async def test_foreign_origin_rejected_at_handshake():
             pass
 
 
+async def test_init_count_is_bounded():
+    """An init's vehicle count comes off the network: a huge one is clamped
+    instead of building millions of vehicles inside the event loop."""
+    w = World()
+    ids = w.reset(5000, 30.0)
+    assert 0 < len(ids) <= 256 and len(w.vehicles) == len(ids), len(ids)
+    assert w.reset(-3, 30.0) == [] and not w.vehicles
+
+
 SCENARIOS = [
     ("Mock: startup, physics tick, and telemetry schema", test_startup_physics_telemetry),
     ("Mock: origin coordinates not double-offset in apply_goals", test_origin_coordinates_not_double_offset),
@@ -561,6 +570,7 @@ SCENARIOS = [
     ("Mock: service ACKs, retryable rejection recovery, and duplicate suppression", test_service_acks_and_idempotency),
     ("Mock: two consecutive complete service cycles", test_two_consecutive_complete_service_cycles),
     ("Mock: foreign web Origin rejected at the handshake", test_foreign_origin_rejected_at_handshake),
+    ("Mock: init vehicle count is bounded", test_init_count_is_bounded),
 ]
 
 

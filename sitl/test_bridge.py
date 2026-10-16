@@ -1806,6 +1806,22 @@ async def scenario_foreign_origin_rejected() -> None:
         assert check(Conn(), Req(origin)) is None, origin
 
 
+async def scenario_init_count_bounded() -> None:
+    """An init's count comes off the network: a huge one is clamped (with a
+    status) instead of building a vehicle and UDP task per requested unit."""
+    h = Harness()
+    ws = h.client("browser-1")
+    task = h.init(ws, count=5000, alt=40.0)
+    try:
+        assert await wait_until(lambda: len(bridge.STATE.vehicles) > 0), "init built no vehicles"
+        assert len(bridge.STATE.vehicles) <= 256, len(bridge.STATE.vehicles)
+        assert ws.said("exceeds limit"), ws.statuses()
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        await h.close()
+
+
 SCENARIOS = [
     ("#12: not READY at lift-off; READY at the takeoff altitude", scenario_ready_needs_takeoff_altitude),
     ("#12: a long steady climb is not failed by the step timeout", scenario_long_climb_not_timed_out),
@@ -1834,6 +1850,7 @@ SCENARIOS = [
     ("ownership: a second client's init is refused while the controller is connected", scenario_second_client_blocked),
     ("ownership: goals from a non-controller are not forwarded", scenario_goals_ownership),
     ("CSWSH: a foreign web Origin is refused at the handshake", scenario_foreign_origin_rejected),
+    ("init: a huge vehicle count is clamped", scenario_init_count_bounded),
 ]
 
 

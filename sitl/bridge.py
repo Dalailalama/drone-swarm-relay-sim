@@ -146,6 +146,10 @@ from ws_origin import add_origin_argument, make_origin_check
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("bridge")
 
+# Upper bound on an init's vehicle count. The count arrives over the network,
+# and each vehicle costs a UDP socket and an asyncio task, so it is clamped
+# (headroom over the UI's 120-drone slider; base port + 10*255 stays < 65536).
+MAX_VEHICLES = 256
 TELEMETRY_HZ = 10.0
 TELEMETRY_DT = 1.0 / TELEMETRY_HZ
 POSITION_STALE_S = 3.0
@@ -1024,7 +1028,10 @@ async def handle_init(websocket, msg: dict, cli_count: Optional[int], base_port:
         if not await _may_control(websocket, acquire=True) or not _owns_control(websocket):
             return
 
-        count = cli_count if cli_count is not None else int(msg.get("count", 0))
+        requested = cli_count if cli_count is not None else int(msg.get("count", 0))
+        count = max(0, min(requested, MAX_VEHICLES))
+        if requested > MAX_VEHICLES:
+            await send_status(websocket, f"bridge: requested {requested} vehicles exceeds limit {MAX_VEHICLES}; clamping")
         alt = float(msg.get("alt", 50))
         supplied_origin = msg.get("origin", {"frame": "common-local-origin", "x": 0.0, "y": 0.0, "groundM": 0.0})
         if not isinstance(supplied_origin, dict) or supplied_origin.get("frame") != "common-local-origin":
