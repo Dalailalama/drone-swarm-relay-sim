@@ -72,3 +72,38 @@ test('an intact fragmented chunk still delivers exactly once', () => {
   assert.strictEqual(s.net.vid.framesDelivered, 1);
   assert.strictEqual(s.net.vid.droppedFrames, 0);
 });
+
+// NET-02: every hop of a route shares one channel clock, so a chunk needs
+// hops x its airtime before the last fragment lands. A 7200-byte chunk is
+// 0.9 s per SiK hop: fine on one hop, 3.6 s on four (beyond the 3 s TTL) —
+// admission must refuse it up front instead of burning the channel.
+function mkLine() {
+  const s = ctx.makeSwarm({
+    count: 4, airframe: Q450, radio: SIK, envFactor: 1,
+    targetX: 800, targetY: 0, altitudeM: 50, seed: 42, captureOn: true,
+  });
+  s.drones.forEach((d, i) => { d.x = 200 * (i + 1); d.y = 0; d.mode = 'ok'; });
+  s.time = 0;
+  return s;
+}
+
+test('NET-02: video admission budgets every hop of the route, not just one', () => {
+  const s = mkLine();
+  const src = s.drones[3].id;
+  assert.strictEqual(ctx.pathToC2(s, src).length - 1, 4, 'four-hop relay line');
+  const ok = ctx.sendPacket(s, 'vid', src, 'C2', null, 7200);
+  run(s, 0, 6, 0.05);
+  const reasons = s.net.cap.filter(e => e.ev === 'drop').map(e => e.reason);
+  assert.strictEqual(ok, false, 'a chunk that cannot land within its TTL must be refused');
+  assert.ok(reasons.includes('queue-latency'), 'refusal logged as queue-latency');
+  assert.ok(!reasons.includes('ttl-expired'), 'no fragment should air and then expire');
+});
+
+test('NET-02: the same chunk over a single hop is still admitted and delivered', () => {
+  const s = mkLine();
+  const src = s.drones[0].id;
+  assert.strictEqual(ctx.pathToC2(s, src).length - 1, 1, 'direct link');
+  assert.ok(ctx.sendPacket(s, 'vid', src, 'C2', null, 7200), 'one-hop chunk admitted');
+  run(s, 0, 4, 0.05);
+  assert.strictEqual(s.net.vid.framesDelivered, 1);
+});

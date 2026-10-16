@@ -92,6 +92,13 @@ function txRadioOf(s, from, to) {
   return (fromNode && fromNode.radio) ? fromNode.radio : s.radio;
 }
 
+// C2 carries a separate matched unit per radio type (swarm.js droneRadio),
+// and a duty limit binds each transmitter separately, so C2's per-node
+// tx/duty clocks are keyed per unit (NET-01). Homogeneous runs keep 'C2'.
+function txKey(s, from, rad) {
+  return (from === 'C2' && rad && s.radio && rad.id !== s.radio.id) ? 'C2@' + rad.id : from;
+}
+
 function channelKeyOf(radio) {
   if (!radio) return 'default';
   if (radio.band) return String(radio.band);
@@ -192,7 +199,7 @@ function scheduleBcast(s, srcId, payload, bytes, rad) {
   const airRate = (rad && rad.airRateKbps) || 64;
   const airtime = (bytes * 8) / (airRate * 1000);
   pendAir(s, chan, airtime);
-  const entry = { srcId, payload, bytes, radio: rad, chan, airtime, tQueued: s.time, committed: false, tFire: null, dupHeard: 0 };
+  const entry = { srcId, txKey: txKey(s, srcId, rad), payload, bytes, radio: rad, chan, airtime, tQueued: s.time, committed: false, tFire: null, dupHeard: 0 };
   list.push(entry);
   if (srcId !== 'C2') s.net.bcastPendingBy.set(srcId, entry);
 }
@@ -220,15 +227,15 @@ function sendBroadcast(s, srcId, payload, bytes, radioOverride) {
 function eligibleStartBcast(s, b) {
   return Math.max(b.tQueued,
     s.net.chanBusyUntil[b.chan] || 0,
-    s.net.nodeTxUntil[b.srcId] || 0,
-    s.net.nodeDutyUntil[b.srcId] || 0);
+    s.net.nodeTxUntil[b.txKey] || 0,
+    s.net.nodeDutyUntil[b.txKey] || 0);
 }
 
 function eligibleStartPkt(s, p) {
   return Math.max(p.tReady || 0,
     s.net.chanBusyUntil[p.res.chan] || 0,
-    s.net.nodeTxUntil[p.res.from] || 0,
-    s.net.nodeDutyUntil[p.res.from] || 0);
+    s.net.nodeTxUntil[p.res.txKey] || 0,
+    s.net.nodeDutyUntil[p.res.txKey] || 0);
 }
 
 function commitBcast(s, b, eStart) {
@@ -242,11 +249,11 @@ function commitBcast(s, b, eStart) {
   // Advance the clocks by the ACTUAL airtime, bill it once (finding #16),
   // record real emission for DF sensing.
   s.net.chanBusyUntil[b.chan] = eStart + b.airtime;
-  s.net.nodeTxUntil[b.srcId] = eStart + b.airtime;
+  s.net.nodeTxUntil[b.txKey] = eStart + b.airtime;
   const rad0 = b.radio || s.radio;
   if (rad0.dutyCycle && rad0.dutyCycle < 1) {
     const rest = b.airtime * (1 - rad0.dutyCycle) / rad0.dutyCycle;
-    s.net.nodeDutyUntil[b.srcId] = Math.max(eStart + b.airtime, s.net.nodeDutyUntil[b.srcId] || 0) + rest;
+    s.net.nodeDutyUntil[b.txKey] = Math.max(eStart + b.airtime, s.net.nodeDutyUntil[b.txKey] || 0) + rest;
   }
   billAir(s, b.chan, eStart, eStart + b.airtime);
   s.net.txAt[b.srcId] = eStart;
@@ -335,9 +342,9 @@ function discardPacket(s, p, reason) {
       const cutEnd = Math.max(a.start, tCut);
       a.air.end = cutEnd;
       if (s.net.chanBusyUntil[p.res.chan] === a.end) s.net.chanBusyUntil[p.res.chan] = cutEnd;
-      if (s.net.nodeTxUntil[p.res.from] === a.end) s.net.nodeTxUntil[p.res.from] = cutEnd;
+      if (s.net.nodeTxUntil[p.res.txKey] === a.end) s.net.nodeTxUntil[p.res.txKey] = cutEnd;
       const dc = p.res.rad && p.res.rad.dutyCycle;
-      if (dc && dc < 1) s.net.nodeDutyUntil[p.res.from] = cutEnd + (cutEnd - a.start) * (1 - dc) / dc;
+      if (dc && dc < 1) s.net.nodeDutyUntil[p.res.txKey] = cutEnd + (cutEnd - a.start) * (1 - dc) / dc;
     }
   }
   dropPacketBookkeeping(s, p, reason, p.path[p.hop], p.path[p.hop + 1], p.marginDb);
@@ -357,9 +364,9 @@ function commitPacket(s, p, eStart) {
   const margin = liveMarginDb(s, from, to);
   const success = margin > 0 && s.net.rng() < pktSuccessProb(margin);
   s.net.chanBusyUntil[p.res.chan] = end;
-  s.net.nodeTxUntil[from] = end;
+  s.net.nodeTxUntil[p.res.txKey] = end;
   const dc = p.res.rad && p.res.rad.dutyCycle;
-  if (dc && dc < 1) s.net.nodeDutyUntil[from] = end + p.res.singleTx * (1 - dc) / dc;
+  if (dc && dc < 1) s.net.nodeDutyUntil[p.res.txKey] = end + p.res.singleTx * (1 - dc) / dc;
   p.attempt = { start: eStart, end, success, air: billAir(s, p.res.chan, eStart, end), interruptedAt: null, interruptedReason: null };
   p.marginDb = +margin.toFixed(1);
   s.net.txAt[from] = eStart;
@@ -715,7 +722,7 @@ function preparePacketHop(s, p) {
   const airRate = (rad && rad.airRateKbps) || 64;
   const singleTxSec = (p.bytes * 8) / (airRate * 1000);
   pendAir(s, chan, singleTxSec);
-  p.res = { chan, from, singleTx: singleTxSec, rad };
+  p.res = { chan, from, txKey: txKey(s, from, rad), singleTx: singleTxSec, rad };
   p.fired = false;
   p.attempt = null;
   p.retries = 0;
@@ -748,8 +755,11 @@ function sendPacket(s, kind, src, dst, payload, bytesOverride) {
     + (s.net.chanPendingSec[chan] || 0);
   const frameAirtime = (bytes * 8) / (airRate * 1000);
 
-  // Video latency bound: drop video frame if channel backlog exceeds 1.0s or frame won't fit
-  if (kind === 'vid' && (queueDelay > 1.0 || queueDelay + frameAirtime > 2.0)) {
+  // Video latency bound: drop video frame if channel backlog exceeds 1.0s or frame won't fit.
+  // Every hop of the route airs on the same shared channel clock, so the
+  // chunk needs hops x its airtime before the last fragment lands (NET-02).
+  const hops = path.length - 1;
+  if (kind === 'vid' && (queueDelay > 1.0 || queueDelay + frameAirtime * hops > 2.0)) {
     s.net.dropped++;
     s.net.vid.droppedFrames++;
     capLog(s, { ev: 'drop', reason: 'queue-latency', kind, src, dst });
