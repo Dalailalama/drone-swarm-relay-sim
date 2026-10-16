@@ -260,6 +260,8 @@ const ROLE_COLOR_3D = {
   relay: '#e6b345',
   hold: '#d970a8',
   relink: '#5ecfcf',
+  rescue: '#6f9fe6',
+  landed: '#8a887a',
   rtl: '#a48fe0',
   rtb: '#a48fe0',
 };
