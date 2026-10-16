@@ -11,17 +11,26 @@ const { loadCore } = require('../test/helpers/sim.js');
 const { SCENARIO_PACK } = require('../js/scenarios.js');
 const R = require('../js/radios.js');
 const A = require('../js/airframes.js');
+const BS = require('../js/batchstats.js');
 const { SIM_DT_SEC } = require('../js/swarm.js');
 
 function calcStats(vals) {
   const valid = vals.filter(v => v !== null && v !== undefined && isFinite(v));
-  if (!valid.length) return { mean: 0, sd: 0, variance: 0, min: null, max: null, count: 0 };
-  const mean = valid.reduce((sum, v) => sum + v, 0) / valid.length;
-  const variance = valid.reduce((acc, v) => acc + Math.pow(v - mean, 2), 0) / valid.length;
-  const sd = Math.sqrt(variance);
+  const total = vals.length; // count/total keeps survivorship visible (arrivals)
+  if (!valid.length) return { mean: 0, sd: 0, variance: 0, min: null, max: null, count: 0, total };
+  // Sample SD (n-1) from the batch layer, so the same runs show the same ±.
+  const mean = BS.mean(valid);
+  const sd = BS.stdev(valid);
+  const variance = sd * sd;
   const min = Math.min(...valid);
   const max = Math.max(...valid);
-  return { mean, sd, variance, min, max, count: valid.length };
+  return { mean, sd, variance, min, max, count: valid.length, total };
+}
+
+// Arrival time only exists for seeds that arrived: always say how many did,
+// or a 1-of-5 success reads faster and more certain than 5-of-5.
+function arrivedOf(st) {
+  return `${st.count}/${st.total} arrived`;
 }
 
 function resolveScenario(spec) {
@@ -42,54 +51,99 @@ function resolveScenario(spec) {
   throw new Error(`Unknown scenario: ${spec}`);
 }
 
+// A scenario file must run exactly as written or not at all: an unknown radio,
+// airframe or environment silently replaced by a default is a different
+// experiment, which is worse than an error.
+function lookup(list, id, what) {
+  const hit = list.find(x => x.id === id);
+  if (!hit) throw new Error(`unknown ${what}: ${id}`);
+  return hit;
+}
+
+// Saved calibrated presets travel with the scenario (radioPreset /
+// relayRadioPreset); use them when the id matches, else a built-in radio.
+function resolveRadio(id, preset, what) {
+  if (preset && typeof preset === 'object' && preset.id === id) {
+    for (const k of ['freqMHz', 'txDbm', 'sensDbm', 'airRateKbps', 'rangeLosM']) {
+      if (!isFinite(preset[k])) throw new Error(`${what} preset ${id} lacks a finite ${k}`);
+    }
+    return { ...preset };
+  }
+  return lookup(R.RADIOS, id, what);
+}
+
+const posOf = (p, dx, dy) => (p ? { x: p.x, y: p.y } : { x: dx, y: dy });
+
+// Same geometry the page builds (main.js applyScenario): the city follows the
+// real base->target corridor and a density of 0 really is 0.
+function buildCompareTerrain(ctx, sc, seed) {
+  if (sc.terrain === 'osm') throw new Error('terrain osm needs the network; compare cannot run it offline');
+  const b = posOf(sc.base, 0, 0), t = posOf(sc.target, 2000, -500);
+  return ctx.makeTerrain(sc.terrain || 'flat', {
+    distM: Math.hypot(t.x - b.x, t.y - b.y),
+    altM: sc.altitudeM ?? 70,
+    baseX: b.x, baseY: b.y, targetX: t.x, targetY: t.y,
+    seed,
+    density: (sc.cityDensity ?? 40) / 100,
+    heightScale: (sc.cityHeight ?? 40) / 100,
+  });
+}
+
 function runScenarioSeed(ctx, scenarioObj, seed, durationSec) {
   const sc = scenarioObj.scenario;
-  const radio = R.RADIOS.find(r => r.id === sc.radio) || R.RADIOS[0];
-  const envMap = { open: [1.0, 2.5], suburban: [0.45, 4.5], urban: [0.2, 6.5] };
-  const [envFactor, shadowSigmaDb] = envMap[sc.env] || [1.0, 0];
+  const radio = resolveRadio(sc.radio || R.RADIOS[0].id, sc.radioPreset, 'radio');
+  const env = lookup(R.ENVIRONMENTS, sc.env || R.ENVIRONMENTS[0].id, 'env');
+  const airframe = lookup(A.AIRFRAMES, sc.airframe || A.AIRFRAMES[0].id, 'airframe');
+  const relayAirframe = sc.relayAirframe ? lookup(A.AIRFRAMES, sc.relayAirframe, 'relay airframe') : null;
+  const relayRadio = sc.relayRadio ? resolveRadio(sc.relayRadio, sc.relayRadioPreset, 'relay radio') : null;
+  const terrain = buildCompareTerrain(ctx, sc, seed);
+  const b = posOf(sc.base, 0, 0), t = posOf(sc.target, 2000, -500);
 
   const s = ctx.makeSwarm({
-    count: sc.count || 8,
-    airframe: A.AIRFRAMES.find(a => a.id === sc.airframe) || A.AIRFRAMES[0],
-    altitudeM: sc.altitudeM || 70,
-    deployFrac: (sc.spacingPct || 80) / 100,
+    count: sc.count ?? 8,
+    airframe,
+    altitudeM: sc.altitudeM ?? 70,
+    deployFrac: (sc.spacingPct ?? 80) / 100,
     corridorRouting: sc.corridor !== false,
     broadcastC2: sc.broadcast !== false,
-    windX: (sc.windSpd || 0) * Math.cos((sc.windDir || 0) * Math.PI / 180),
-    windY: (sc.windSpd || 0) * Math.sin((sc.windDir || 0) * Math.PI / 180),
-    baseX: sc.base ? sc.base.x : 0,
-    baseY: sc.base ? sc.base.y : 0,
-    targetX: sc.target ? sc.target.x : 2000,
-    targetY: sc.target ? sc.target.y : -500,
+    windX: (sc.windSpd ?? 0) * Math.cos((sc.windDir ?? 0) * Math.PI / 180),
+    windY: (sc.windSpd ?? 0) * Math.sin((sc.windDir ?? 0) * Math.PI / 180),
+    baseX: b.x,
+    baseY: b.y,
+    targetX: t.x,
+    targetY: t.y,
+    baseVel: sc.baseVelMps ? { x: sc.baseVelMps.x, y: sc.baseVelMps.y } : undefined,
+    targetVel: sc.targetVelMps ? { x: sc.targetVelMps.x, y: sc.targetVelMps.y } : undefined,
+    adversaryMode: !!sc.adversaryMode,
     radio,
-    envFactor,
-    shadowSigmaDb,
+    envFactor: env.factor,
+    shadowSigmaDb: env.shadowSigmaDb,
     seed,
-    terrain: ctx.makeTerrain(sc.terrain || 'flat', {
-      distM: Math.hypot(sc.target ? sc.target.x : 2000, sc.target ? sc.target.y : -500),
-      altM: sc.altitudeM || 70,
-      seed,
-      density: (sc.cityDensity || 40) / 100,
-      heightScale: (sc.cityHeight || 40) / 100,
-    }),
-    relayWing: sc.hetero ? (sc.relayWing || 0) : 0,
-    relayAirframe: sc.relayAirframe ? A.AIRFRAMES.find(a => a.id === sc.relayAirframe) : null,
-    relayRadio: sc.relayRadio ? R.RADIOS.find(r => r.id === sc.relayRadio) : null,
+    terrain,
+    relayWing: sc.hetero ? (sc.relayWing ?? 0) : 0,
+    relayAirframe,
+    relayRadio,
     jammers: sc.jammers || [],
     gpsZones: sc.gpsZones || [],
     spectrumAgility: !!sc.spectrumAgility,
     lpiMode: !!sc.lpiMode,
     videoOn: !!sc.videoBackhaul,
-    videoKbps: sc.videoKbps || 250,
+    videoKbps: sc.videoKbps ?? 250,
   });
 
-  // Calculate starting energy Wh
-  const startWhMap = new Map(s.drones.map(d => [d.id, d.energyWh]));
+  // Energy is integrated per step: a completed battery swap resets energyWh to
+  // full, so start-minus-final would forget everything burned before it.
+  let totalWhConsumed = 0;
   let firstArrivalTime = null;
   const targetDistThreshold = 200; // metres from target
 
   while (s.time < durationSec) {
+    const beforeWh = new Map(s.drones.map(d => [d.id, d.energyWh]));
     ctx.stepSwarm(s, SIM_DT_SEC);
+    for (const d of s.drones) {
+      const before = beforeWh.get(d.id);
+      if (before != null) totalWhConsumed += Math.max(0, before - d.energyWh);
+    }
 
     if (firstArrivalTime === null) {
       for (const d of s.drones) {
@@ -104,12 +158,6 @@ function runScenarioSeed(ctx, scenarioObj, seed, durationSec) {
     }
   }
 
-  // Energy consumed across all drones
-  let totalWhConsumed = 0;
-  for (const d of s.drones) {
-    const init = startWhMap.get(d.id) || d.energyWh;
-    totalWhConsumed += Math.max(0, init - d.energyWh);
-  }
   const meanWhConsumed = totalWhConsumed / Math.max(1, s.drones.length);
 
   const connSec = s.stats.fleetConnSec || s.stats.connSec || 0;
@@ -172,8 +220,8 @@ function compareScenarios(scenarioSpecs, options = {}) {
 function renderMarkdownDashboard(results, seeds, durationSec) {
   const rows = results.map(r => {
     const arrivalStr = r.arrival.count > 0
-      ? `${r.arrival.mean.toFixed(1)} s (±${r.arrival.sd.toFixed(1)})`
-      : 'N/A (unreached)';
+      ? `${r.arrival.mean.toFixed(1)} s (±${r.arrival.sd.toFixed(1)}), ${arrivedOf(r.arrival)}`
+      : `N/A (${arrivedOf(r.arrival)})`;
     return `| **${r.title}** | ${r.uptime.mean.toFixed(1)}% (±${r.uptime.sd.toFixed(1)}%) | ${arrivalStr} | ${r.droppedPct.mean.toFixed(1)}% (±${r.droppedPct.sd.toFixed(1)}%) | ${r.energyWh.mean.toFixed(2)} Wh (±${r.energyWh.sd.toFixed(2)}) |`;
   });
 
@@ -188,7 +236,7 @@ function renderMarkdownDashboard(results, seeds, durationSec) {
     '',
     '### Metric Definitions',
     '- **Uptime**: % of mission time fleet maintains active C2 connectivity to ground station.',
-    '- **Arrival Time**: Seconds from takeoff until the first tactical drone arrives within objective perimeter (200m).',
+    '- **Arrival Time**: Seconds from takeoff until the first tactical drone arrives within objective perimeter (200m), over the seeds that arrived; k/N says how many did.',
     '- **Packet Loss**: Total link and routing drops as a percentage of total transmitted packets.',
     '- **Energy Consumed**: Mean per-drone battery consumption in Watt-hours over the mission.',
     '- **Variance (SD)**: Standard deviation across the identical seed Monte Carlo iterations.',
@@ -206,7 +254,8 @@ function renderTextDashboard(results, seeds, durationSec) {
   for (const r of results) {
     const name = r.title.length > 30 ? r.title.slice(0, 27) + '…' : r.title;
     const uptime = `${r.uptime.mean.toFixed(1)}% (±${r.uptime.sd.toFixed(1)})`;
-    const arrival = r.arrival.count > 0 ? `${r.arrival.mean.toFixed(1)}s (±${r.arrival.sd.toFixed(1)})` : 'N/A';
+    const arrived = `${r.arrival.count}/${r.arrival.total}`;
+    const arrival = r.arrival.count > 0 ? `${r.arrival.mean.toFixed(1)}s (±${r.arrival.sd.toFixed(1)}) ${arrived}` : `N/A ${arrived}`;
     const loss = `${r.droppedPct.mean.toFixed(1)}% (±${r.droppedPct.sd.toFixed(1)})`;
     const energy = `${r.energyWh.mean.toFixed(1)}Wh (±${r.energyWh.sd.toFixed(1)})`;
     lines.push(`${name.padEnd(32)} ${uptime.padEnd(16)} ${arrival.padEnd(18)} ${loss.padEnd(16)} ${energy.padEnd(16)}`);
@@ -259,6 +308,7 @@ module.exports = {
   calcStats,
   resolveScenario,
   runScenarioSeed,
+  buildCompareTerrain,
   compareScenarios,
   renderMarkdownDashboard,
   renderTextDashboard,

@@ -34,3 +34,73 @@ test('Item 10: compareScenarios computes uptime, arrival, packet loss, energy an
   assert.ok(result.markdown.includes('ddil-disrupted') || result.markdown.includes('Disrupted'));
   assert.ok(result.text.includes('Scenario Comparison Dashboard'));
 });
+
+// audit: compare must run the scenario file exactly or refuse.
+const { runScenarioSeed, buildCompareTerrain } = require('../tools/compare.js');
+const { loadCore } = require('./helpers/sim.js');
+const R = require('../js/radios.js');
+
+test('compare refuses unknown radio, airframe, env and the network-only osm terrain', () => {
+  const ctx = loadCore(['scenarios.js']);
+  const base = resolveScenario('ddil-disrupted').scenario;
+  for (const patch of [{ radio: 'nope' }, { airframe: 'nope' }, { env: 'nope' }, { terrain: 'osm' }, { relayRadio: 'nope' }]) {
+    const sc = { ...base, ...patch };
+    assert.throws(() => runScenarioSeed(ctx, { id: 'x', title: 'x', scenario: sc }, 101, 1), /unknown|osm/i, JSON.stringify(patch));
+  }
+});
+
+test('compare honours a calibrated radioPreset instead of falling back to the stock radio', () => {
+  const ctx = loadCore(['scenarios.js']);
+  const base = resolveScenario('ddil-disrupted').scenario;
+  const stock = R.RADIOS.find(r => r.id === base.radio);
+  const preset = { ...stock, id: base.radio + '-calibrated', rangeLosM: stock.rangeLosM / 5, txDbm: stock.txDbm - 25 };
+  const a = runScenarioSeed(ctx, { id: 'a', title: 'a', scenario: base }, 101, 40);
+  const b = runScenarioSeed(ctx, { id: 'b', title: 'b', scenario: { ...base, radio: preset.id, radioPreset: preset } }, 101, 40);
+  assert.notDeepStrictEqual([a.delivered, a.dropped, a.uptimePct], [b.delivered, b.dropped, b.uptimePct]);
+});
+
+test('compare lays the city along the real base->target corridor and honours cityDensity 0', () => {
+  const ctx = loadCore(['scenarios.js']);
+  const sc = resolveScenario('ddil-intermittent').scenario;
+  const page = density => ctx.makeTerrain(sc.terrain, {
+    distM: Math.hypot(sc.target.x - sc.base.x, sc.target.y - sc.base.y), altM: sc.altitudeM,
+    baseX: sc.base.x, baseY: sc.base.y, targetX: sc.target.x, targetY: sc.target.y, seed: 101,
+    density, heightScale: (sc.cityHeight ?? 40) / 100,
+  });
+  const t = buildCompareTerrain(ctx, sc, 101);
+  assert.deepStrictEqual(t.gen, page((sc.cityDensity ?? 40) / 100).gen);
+  assert.strictEqual(t.buildings.length, page((sc.cityDensity ?? 40) / 100).buildings.length);
+  assert.strictEqual(buildCompareTerrain(ctx, { ...sc, cityDensity: 0 }, 101).buildings.length, page(0).buildings.length);
+});
+
+test('compare energy keeps what was burned before a battery swap reset the pack to full', () => {
+  const ctx = loadCore(['scenarios.js']);
+  const sc = resolveScenario('ddil-disrupted').scenario;
+  // Wrap the real step: at t=5 s every pack is swapped back to full, the way a
+  // completed swap does in swarm.js. Burn before the swap must still count.
+  let full = null, burnedBeforeSwap = 0, swapped = false;
+  const wrapped = Object.create(ctx);
+  wrapped.stepSwarm = (s, dt) => {
+    if (!full) full = new Map(s.drones.map(d => [d.id, d.energyWh]));
+    ctx.stepSwarm(s, dt);
+    if (!swapped && s.time >= 5) {
+      swapped = true;
+      for (const d of s.drones) { burnedBeforeSwap += full.get(d.id) - d.energyWh; d.energyWh = full.get(d.id); }
+    }
+  };
+  const r = runScenarioSeed(wrapped, { id: 'e', title: 'e', scenario: sc }, 101, 6);
+  assert.ok(swapped);
+  assert.ok(r.meanWhConsumed >= 0.99 * burnedBeforeSwap / sc.count, `${r.meanWhConsumed} vs ${burnedBeforeSwap / sc.count}`);
+});
+
+test('compare arrival statistics say how many seeds arrived, so 1-of-5 cannot read as faster than 5-of-5', () => {
+  const { calcStats, renderMarkdownDashboard, renderTextDashboard } = require('../tools/compare.js');
+  const row = (title, arr) => ({ title, uptime: calcStats([50, 50]), arrival: calcStats(arr), droppedPct: calcStats([1, 1]), energyWh: calcStats([2, 2]) });
+  const results = [row('A', [148, 150, 152, 149, 151]), row('B', [100, null, null, null, null])];
+  const md = renderMarkdownDashboard(results, [1, 2, 3, 4, 5], 300);
+  const txt = renderTextDashboard(results, [1, 2, 3, 4, 5], 300);
+  for (const out of [md, txt]) {
+    assert.ok(out.includes('1/5'), out);
+    assert.ok(out.includes('5/5'), out);
+  }
+});

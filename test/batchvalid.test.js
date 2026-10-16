@@ -21,6 +21,24 @@ const GOOD = {
   sweep: [{ name: 'base' }],
 };
 
+test('audit: duplicate seeds are pseudo-replication and are rejected', () => {
+  assert.match(B.validateConfig({ ...GOOD, seeds: [101, 101] }) || '', /distinct/);
+  assert.strictEqual(B.validateConfig({ ...GOOD, seeds: [101, 102] }), null);
+});
+
+test('audit: jammer and GPS-zone lists are capped, and jammers count toward the work budget', () => {
+  const jam = n => Array.from({ length: n }, (_, i) => ({ x: 100 + i, y: 0, erpDbm: 20 }));
+  const zones = n => Array.from({ length: n }, (_, i) => ({ x: 100 + i, y: 0, rM: 50 }));
+  assert.strictEqual(B.validateConfig({ ...GOOD, features: { jammers: jam(B.LIMITS.maxJammers) } }), null);
+  assert.match(B.validateConfig({ ...GOOD, features: { jammers: jam(B.LIMITS.maxJammers + 1) } }) || '', /jammers/);
+  assert.match(B.validateConfig({ ...GOOD, features: { gpsZones: zones(B.LIMITS.maxGpsZones + 1) } }) || '', /gpsZones/);
+  // A fleet-time load that fits with no jammers must be refused once 64
+  // jammers multiply the per-tick RF cost.
+  const heavy = { ...GOOD, count: 100, durationSec: 1800, seeds: [1, 2] }; // 360,000 drone-s
+  assert.strictEqual(B.validateConfig(heavy), null);
+  assert.match(B.validateConfig({ ...heavy, features: { jammers: jam(64) } }) || '', /workload/);
+});
+
 test('regression #30: provided-but-invalid fields are rejected, not defaulted', () => {
   assert.ok(B.validateConfig({ ...GOOD, count: 1.5 }), 'fractional count accepted');
   assert.ok(B.validateConfig({ ...GOOD, seeds: 'bad' }), "seeds='bad' silently became defaults");
@@ -146,6 +164,27 @@ function post(port, body, opts) {
     return req;
   });
 }
+
+test('audit: a cross-origin browser POST is refused with 403; the CLI binds loopback by default', async () => {
+  const { DEFAULT_HOST } = require('../tools/server.js');
+  assert.strictEqual(DEFAULT_HOST, '127.0.0.1');
+  const app = createApp({ workers: 1, queue: 1, timeoutMs: 60000 });
+  await new Promise(r => app.listen(0, '127.0.0.1', r));
+  const port = app.address().port;
+  const send = headers => new Promise((resolve, reject) => {
+    const req = http.request({ port, host: '127.0.0.1', path: '/api/batch', method: 'POST', headers }, res => {
+      res.resume(); res.on('end', () => resolve(res.statusCode));
+    });
+    req.on('error', reject);
+    req.end(JSON.stringify(GOOD));
+  });
+  try {
+    assert.strictEqual(await send({ 'Content-Type': 'text/plain', Origin: 'http://evil.example' }), 403);
+    assert.strictEqual(await send({ 'Content-Type': 'text/plain' }), 200);
+  } finally {
+    app.close();
+  }
+});
 
 test('regression #14: the server queues bounded work and rejects overflow with 429', async () => {
   const app = createApp({ workers: 1, queue: 1, timeoutMs: 60000 });
