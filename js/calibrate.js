@@ -143,6 +143,7 @@ function calibratePreset(fit, basePreset) {
     refPowerDbm: fit.refPowerDbm,
     nFit: fit.n,
     hopGainDb: basePreset.hopGainDb,
+    jamSirDb: basePreset.jamSirDb,
     dutyCycle: basePreset.dutyCycle,
     note: 'Calibrated against ' + fit.count + ' field samples: measured path-loss exponent n=' +
       fit.n.toFixed(2) + ' (datasheet model implied ' + pathLossExponent(basePreset).toFixed(2) +

@@ -830,7 +830,11 @@ function clampStepToBuildings(s, d, dt) {
 // Because it feeds straight into liveMarginDb, the coverage map LEARNS the
 // denied zone, the tether keeps drones from flying into it, and ETX routing
 // bends the chain around it — no special-case logic anywhere else.
-const JAM_SNR_OFFSET_DB = 10; // gap between raw interference power and the usable-floor scale
+// Default required signal-to-interference ratio (FSK-class waveforms: SiK,
+// RFD900x and similar). A preset overrides it with `jamSirDb`; LoRa CSS
+// demodulates below the interference, so its requirement is negative.
+const JAM_SNR_OFFSET_DB = 10;
+function jamSirDb(r) { return r && r.jamSirDb != null ? r.jamSirDb : JAM_SNR_OFFSET_DB; }
 
 // One band representation everywhere (review finding #20): a jammer's band
 // may arrive as a number (MHz), a numeric string, 'all', or a legacy name.
@@ -894,7 +898,7 @@ function interferenceFloorDbm(s, rxPos, rxAlt, rxRadio) {
     const pl = pl1 + 10 * n * Math.log10(Math.max(1, slant / s.envFactor));
     lin += Math.pow(10, (j.erpDbm - gainDb - pl) / 10);
   }
-  return lin > 0 ? 10 * Math.log10(lin) + JAM_SNR_OFFSET_DB : -Infinity;
+  return lin > 0 ? 10 * Math.log10(lin) + jamSirDb(rad) : -Infinity;
 }
 
 // How much interference degrades this link, in dB (>=0). Each end's floor is
@@ -909,6 +913,14 @@ function interferencePenaltyDb(s, aPos, aAlt, bPos, bAlt, ra, rb) {
   return Math.max(0,
     isNaN(fa) ? -Infinity : fa - rA.sensDbm,
     isNaN(fb) ? -Infinity : fb - rB.sensDbm);
+}
+
+// The same penalty for one receiver: its floor against its own sensitivity.
+function endPenaltyDb(s, pos, alt, radio) {
+  if (!s.jammers || !s.jammers.length) return 0;
+  const r = radio || s.radio;
+  const f = interferenceFloorDbm(s, pos, alt, r);
+  return Math.max(0, isNaN(f) ? -Infinity : f - r.sensDbm);
 }
 
 // Is a position inside a denial zone — i.e. would a relay's receiver there be
@@ -945,7 +957,7 @@ function jammerDenialRadiusM(s, j) {
   if (Number.isNaN(jf) || (jf != null && Math.abs(jf - r.freqMHz) > 150)) return 0;
   const n = pathLossExponent(r);
   const eff = j.erpDbm - agilityGainDb(s, r);
-  const exp = (eff - pl1m(r.freqMHz) + JAM_SNR_OFFSET_DB - r.sensDbm) / (10 * n);
+  const exp = (eff - pl1m(r.freqMHz) + jamSirDb(r) - r.sensDbm) / (10 * n);
   return s.envFactor * Math.pow(10, exp);
 }
 
@@ -992,9 +1004,18 @@ function liveMarginDb(s, aId, bId) {
   const slant = Math.hypot(ground, altA - altB);
   // LPI/LPD waveform: pay a fixed link-budget cost for the spread spectrum.
   const lpiCost = s.lpiMode ? AGILITY.lpiCostDb : 0;
-  const res = mixedLinkMarginDb(ra, rb, s.envFactor, slant) + fadeDb(s, aId, bId)
-    - lpiCost
-    - interferencePenaltyDb(s, a, altA, b, altB, ra, rb);
+  // Always read the fade: it registers the entry stepFades advances with the
+  // seeded RNG, so skipping it would shift the stream.
+  const fade = fadeDb(s, aId, bId);
+  // Each receiver's interference degrades only the direction it hears.
+  let res;
+  if (!bandCompatible(ra, rb)) res = -Infinity;
+  else {
+    const pa = endPenaltyDb(s, a, altA, ra), pb = endPenaltyDb(s, b, altB, rb);
+    res = Math.min(
+      rssiDirectionalDb(ra, rb, s.envFactor, slant) - rb.sensDbm + fade - lpiCost - pb,
+      rssiDirectionalDb(rb, ra, s.envFactor, slant) - ra.sensDbm + fade - lpiCost - pa);
+  }
   if (s && s._marginCache) s._marginCache.set(cacheKey, res);
   return res;
 }
