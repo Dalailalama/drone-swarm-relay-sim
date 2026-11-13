@@ -186,3 +186,72 @@ test('a full 3D scene rebuild builds the camera basis once, not per vertex', () 
   assert.ok(vm.runInContext('view3dScene.items.length', ctx) > 1000, 'the rebuild projected the full ground mesh');
   assert.ok(bases <= 2, 'camera basis built ' + bases + ' times in one frame');
 });
+
+// Records every stroke/fill (with the style in force) and every text draw.
+function recordCanvas(c2d) {
+  const log = [];
+  for (const op of ['stroke', 'fill']) {
+    const real = c2d[op];
+    c2d[op] = function () { log.push({ op, style: op === 'stroke' ? c2d.strokeStyle : c2d.fillStyle }); return real.apply(this, arguments); };
+  }
+  for (const op of ['fillText', 'strokeText']) {
+    const real = c2d[op];
+    c2d[op] = function (t, x, y) { log.push({ op, text: String(t), x, y }); return real.apply(this, arguments); };
+  }
+  return log;
+}
+
+function overlayScene() {
+  return {
+    base: { x: 0, y: 0 }, target: { x: 1000, y: 0 }, altitudeM: 70, time: 1,
+    drones: [{ id: 'D1', x: 200, y: 0, mode: 'ok', role: 'relay' }],
+    terrain: { seed: 42, groundAmpM: 100, groundScaleM: 800, buildings: [] },
+    gpsZones: [{ id: 'G1', x: 500, y: 0, rM: 300 }],
+    c2: { lost: { D3: { x: 400, y: 120 } }, cov: new Map([['10,2', { good: 4, bad: 0 }], ['12,2', { good: 0, bad: 3 }]]) },
+    covCellM: 50, showCoverage: false,
+    takMarks: [{ x: 600, y: -80, callsign: 'ALPHA' }],
+    net: { packets: [{ path: ['C2', 'D1'], hop: 0, tHopStart: 0, tArrive: 2, kind: 'cmd' }] },
+  };
+}
+
+function renderOverlayScene(mutate) {
+  const nodePos = (s, id) => id === 'C2' ? s.base : s.drones.find(d => d.id === id);
+  const { ctx, document } = loadUI({ scripts: ['js/terrain.js', 'js/view3d.js'],
+    globals: { effRole: d => d.role, nodePos } });
+  const s = overlayScene();
+  if (mutate) mutate(s);
+  const cv = document.createElement('canvas');
+  cv.width = 800; cv.height = 600;
+  const c2d = cv.getContext('2d');
+  const log = recordCanvas(c2d);
+  ctx.renderView3D(c2d, cv, s, { hops: [], links: [] }, ctx.makeCamera3D(s), null);
+  return log;
+}
+
+test('3D view draws the live overlays the 2D map does: GPS-denied zones, lost ghosts, TAK marks, packets, coverage (audit ui-render/3d-missing-overlays)', () => {
+  const log = renderOverlayScene();
+  const texts = log.filter(e => e.op === 'fillText').map(e => e.text);
+  assert.ok(log.some(e => e.op === 'stroke' && /164,143,224/.test(e.style)), 'GPS-denied zone ring not drawn');
+  assert.ok(texts.some(t => t.includes('GPS DENIED')), 'GPS-denied label missing: ' + texts.join(' | '));
+  assert.ok(texts.includes('D3 last seen'), 'lost-drone ghost label missing');
+  assert.ok(log.some(e => e.op === 'stroke' && e.style === '#e06050'), 'lost-drone ghost ring missing');
+  assert.ok(texts.includes('ALPHA'), 'TAK mark callsign missing');
+  assert.ok(log.some(e => e.op === 'fill' && e.style === '#6f9fe6'), 'command packet on the air not drawn');
+  const covFill = e => e.op === 'fill' && /^rgba\((127,201,94|224,96,80),0\.(08|16)\)$/.test(e.style);
+  assert.ok(!log.some(covFill), 'coverage drawn with the Coverage map toggle off');
+  const on = renderOverlayScene(s => { s.showCoverage = true; });
+  assert.ok(on.some(e => covFill(e) && e.style.startsWith('rgba(127,201,94')), 'good coverage cell not drawn');
+  assert.ok(on.some(e => covFill(e) && e.style.startsWith('rgba(224,96,80')), 'bad coverage cell not drawn');
+});
+
+test('3D labels carry a dark halo, so drone IDs stay legible on lit hillsides (audit ui-render/3d-label-contrast)', () => {
+  const log = renderOverlayScene();
+  const fills = log.filter(e => e.op === 'fillText');
+  assert.ok(fills.some(e => e.text === 'D1'), 'drone label not drawn');
+  for (const f of fills) {
+    const i = log.indexOf(f);
+    const halo = log.slice(0, i).reverse().find(e => e.op === 'strokeText');
+    assert.ok(halo && halo.text === f.text && halo.x === f.x && halo.y === f.y,
+      'label "' + f.text + '" has no halo stroke under it');
+  }
+});

@@ -266,6 +266,131 @@ const ROLE_COLOR_3D = {
   rtb: '#a48fe0',
 };
 
+// Text with a dark halo under a light fill, as map apps do: a bare dim fill
+// measured ~3:1 on flat ground and ~1:1 on a lit 100 m hill.
+function label3D(ctx, text, x, y, fill, U) {
+  ctx.save();
+  ctx.lineWidth = 3 * U; ctx.lineJoin = 'round';
+  ctx.strokeStyle = 'rgba(19,20,16,0.85)';
+  ctx.strokeText(text, x, y);
+  ctx.fillStyle = fill;
+  ctx.fillText(text, x, y);
+  ctx.restore();
+}
+
+// Trace a terrain-hugging circle of radius R around (x, y) as a closed path —
+// a perspective ellipse. False, with no path, when too little of it projects.
+function groundRing3D(ctx, proj, terrain, x, y, R, N) {
+  const ring = [];
+  for (let k = 0; k < N; k++) {
+    const a = k / N * Math.PI * 2;
+    const rx = x + Math.cos(a) * R, ry = y + Math.sin(a) * R;
+    const rp = proj(rx, ry, terrainGroundAt(terrain, rx, ry));
+    if (rp) ring.push(rp);
+  }
+  if (ring.length <= 8) return false;
+  ctx.beginPath(); ctx.moveTo(ring[0].x, ring[0].y);
+  for (let k = 1; k < ring.length; k++) ctx.lineTo(ring[k].x, ring[k].y);
+  ctx.closePath();
+  return true;
+}
+
+// Live overlays the 2D map also draws (same colours as render.js). They
+// change while the camera is parked, so they're drawn every frame on top of
+// the cached static scene, never inside it. Every input is optional — callers
+// may pass a stub swarm.
+const COVERAGE_3D_CAP = 1500; // cells per frame, nearest the camera's aim point
+
+// Ground layer, under the links: the learned coverage map and GPS-denied zones.
+function drawGroundOverlays3D(ctx, s, proj, U, cam, x0, y0, x1, y1) {
+  const cov = s.showCoverage && s.c2 && s.c2.cov;
+  const cell = s.covCellM;
+  if (cov && cov.size && cell > 0) {
+    const cells = [];
+    for (const [key, e] of cov) {
+      const [i, j] = key.split(',').map(Number);
+      const wx = i * cell, wy = j * cell;
+      if (wx + cell < x0 || wx > x1 || wy + cell < y0 || wy > y1) continue;
+      const dx = wx + cell / 2 - cam.cx, dy = wy + cell / 2 - cam.cy;
+      cells.push({ wx, wy, e, d2: dx * dx + dy * dy });
+    }
+    if (cells.length > COVERAGE_3D_CAP) { cells.sort((a, b) => a.d2 - b.d2); cells.length = COVERAGE_3D_CAP; }
+    for (const c of cells) {
+      const h = terrainGroundAt(s.terrain, c.wx + cell / 2, c.wy + cell / 2); // one sample per cell
+      const p1 = proj(c.wx, c.wy, h), p2 = proj(c.wx + cell, c.wy, h);
+      const p3 = proj(c.wx + cell, c.wy + cell, h), p4 = proj(c.wx, c.wy + cell, h);
+      if (!p1 || !p2 || !p3 || !p4) continue;
+      ctx.beginPath(); ctx.moveTo(p1.x, p1.y); ctx.lineTo(p2.x, p2.y); ctx.lineTo(p3.x, p3.y); ctx.lineTo(p4.x, p4.y);
+      ctx.closePath();
+      ctx.fillStyle = c.e.bad > c.e.good ? 'rgba(224,96,80,0.16)' : 'rgba(127,201,94,0.08)';
+      ctx.fill();
+    }
+  }
+  for (const z of (s.gpsZones || [])) {
+    const on = z.on !== false;
+    if (on && z.rM > 3 && groundRing3D(ctx, proj, s.terrain, z.x, z.y, z.rM, 48)) {
+      ctx.fillStyle = 'rgba(164,143,224,0.08)'; ctx.fill();
+      ctx.strokeStyle = 'rgba(164,143,224,0.55)'; ctx.lineWidth = 1 * U; ctx.setLineDash([8 * U, 4 * U]);
+      ctx.stroke(); ctx.setLineDash([]);
+    }
+    const c = proj(z.x, z.y, terrainGroundAt(s.terrain, z.x, z.y));
+    if (!c) continue;
+    const col = on ? '#a48fe0' : '#8a887a';
+    ctx.beginPath(); ctx.arc(c.x, c.y, 5 * U, 0, Math.PI * 2); ctx.fillStyle = col; ctx.fill();
+    ctx.font = (11 * U) + 'px "IBM Plex Mono", monospace'; ctx.textAlign = 'center';
+    label3D(ctx, (on ? '' : 'off · ') + z.id + ' · GPS DENIED', c.x, c.y + 20 * U, col, U);
+  }
+}
+
+// Marker layer, over the links: packets on the air, C2's ghosts of lost
+// drones at their last-known point, and imported TAK marks.
+function drawMarkers3D(ctx, s, proj, U) {
+  const air = (x, y) => terrainGroundAt(s.terrain, x, y) + s.altitudeM;
+  if (s.net && s.net.packets && typeof nodePos === 'function') {
+    for (const p of s.net.packets) {
+      if (p.tArrive == null) continue; // still queued — not on the air yet
+      const idA = p.path[p.hop], idB = p.path[p.hop + 1];
+      const a = nodePos(s, idA), b = nodePos(s, idB);
+      if (!a || !b) continue;
+      const pa = proj(a.x, a.y, idA === 'C2' ? terrainGroundAt(s.terrain, a.x, a.y) + 2 : air(a.x, a.y));
+      const pb = proj(b.x, b.y, idB === 'C2' ? terrainGroundAt(s.terrain, b.x, b.y) + 2 : air(b.x, b.y));
+      if (!pa || !pb) continue;
+      const span = p.tArrive - p.tHopStart;
+      const f = span > 0 ? Math.min(1, Math.max(0, (s.time - p.tHopStart) / span)) : 1;
+      ctx.beginPath(); ctx.arc(pa.x + (pb.x - pa.x) * f, pa.y + (pb.y - pa.y) * f, 2.5 * U, 0, Math.PI * 2);
+      ctx.fillStyle = p.kind === 'cmd' ? '#6f9fe6' : '#e8e6da';
+      ctx.fill();
+    }
+  }
+  const lost = (s.c2 && s.c2.lost) || {};
+  const ids = Object.keys(lost);
+  const dronePts = ids.length ? (s.drones || []).map(d => proj(d.x, d.y, air(d.x, d.y))).filter(Boolean) : [];
+  for (const id of ids) {
+    const e = lost[id];
+    const c = proj(e.x, e.y, air(e.x, e.y));
+    if (!c) continue;
+    ctx.beginPath(); ctx.arc(c.x, c.y, 10 * U, 0, Math.PI * 2);
+    ctx.strokeStyle = '#e06050'; ctx.lineWidth = 1.5 * U; ctx.setLineDash([3 * U, 4 * U]);
+    ctx.stroke(); ctx.setLineDash([]);
+    if (dronePts.some(p => Math.hypot(p.x - c.x, p.y - c.y) < 26 * U)) continue; // found again: no label
+    ctx.font = (11 * U) + 'px "Segoe UI", sans-serif'; ctx.textAlign = 'center';
+    label3D(ctx, '?', c.x, c.y + 4 * U, '#e06050', U);
+    label3D(ctx, id + ' last seen', c.x, c.y - 16 * U, '#d6d4c8', U);
+  }
+  for (const m of (s.takMarks || [])) {
+    const c = proj(m.x, m.y, terrainGroundAt(s.terrain, m.x, m.y));
+    if (!c) continue;
+    const r = 8 * U;
+    ctx.beginPath();
+    ctx.moveTo(c.x, c.y - r); ctx.lineTo(c.x + r, c.y); ctx.lineTo(c.x, c.y + r); ctx.lineTo(c.x - r, c.y);
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(164,143,224,0.85)'; ctx.fill();
+    ctx.strokeStyle = '#e8e6da'; ctx.lineWidth = 1 * U; ctx.stroke();
+    ctx.font = (10 * U) + 'px "Segoe UI", sans-serif'; ctx.textAlign = 'center';
+    label3D(ctx, m.callsign, c.x, c.y - 12 * U, '#d6d4c8', U);
+  }
+}
+
 // --- Main render -----------------------------------------------------------
 
 function renderView3D(ctx, cv, s, status, cam, selected) {
@@ -424,6 +549,8 @@ function renderView3D(ctx, cv, s, status, cam, selected) {
     }
   }
 
+  drawGroundOverlays3D(ctx, s, proj, U, cam, x0, y0, x1, y1);
+
   // Radio links, drawn above the terrain/buildings so they read as an
   // overlay rather than something the mesh could occlude mid-hop. The rest
   // of the live mesh goes first, thin, under the labelled chain (#8).
@@ -458,6 +585,8 @@ function renderView3D(ctx, cv, s, status, cam, selected) {
     ctx.lineWidth = 1.5 * U;
     ctx.stroke(); ctx.setLineDash([]);
   }
+
+  drawMarkers3D(ctx, s, proj, U);
 
   // Drones: a stem from the ground point up to flight altitude, then the
   // drone itself as a colored dot. Dead drones get a ground-level x instead;
@@ -501,8 +630,7 @@ function renderView3D(ctx, cv, s, status, cam, selected) {
     ctx.fillStyle = col; ctx.fill();
 
     ctx.font = (10 * U) + 'px "Segoe UI", sans-serif'; ctx.textAlign = 'center';
-    ctx.fillStyle = 'rgba(120,118,103,1)';
-    ctx.fillText(d.id, dp.x, dp.y + 14 * U);
+    label3D(ctx, d.id, dp.x, dp.y + 14 * U, '#d6d4c8', U);
   }
 
   // C2 mast — a tall marker (12 m, well above real gear) purely so it reads
@@ -517,8 +645,7 @@ function renderView3D(ctx, cv, s, status, cam, selected) {
       ctx.beginPath(); ctx.arc(tp.x, tp.y, 3 * U, 0, Math.PI * 2);
       ctx.fillStyle = '#a5a293'; ctx.fill();
       ctx.font = (12 * U) + 'px "Segoe UI", sans-serif'; ctx.textAlign = 'center';
-      ctx.fillStyle = '#a5a293';
-      ctx.fillText('C2', tp.x, tp.y - 10 * U);
+      label3D(ctx, 'C2', tp.x, tp.y - 10 * U, '#a5a293', U);
     }
   }
 
@@ -534,8 +661,7 @@ function renderView3D(ctx, cv, s, status, cam, selected) {
       ctx.beginPath(); ctx.moveTo(tp.x, tp.y - 18 * U); ctx.lineTo(tp.x, tp.y - 6 * U); ctx.stroke();
       ctx.beginPath(); ctx.moveTo(tp.x, tp.y + 6 * U); ctx.lineTo(tp.x, tp.y + 18 * U); ctx.stroke();
       ctx.font = (12 * U) + 'px "Segoe UI", sans-serif'; ctx.textAlign = 'center';
-      ctx.fillStyle = '#6f9fe6';
-      ctx.fillText('target', tp.x, tp.y + 32 * U);
+      label3D(ctx, 'target', tp.x, tp.y + 32 * U, '#6f9fe6', U);
     }
   }
 
@@ -546,22 +672,10 @@ function renderView3D(ctx, cv, s, status, cam, selected) {
     const g = terrainGroundAt(s.terrain, j.x, j.y);
     const R = typeof jammerDenialRadiusM === 'function' ? jammerDenialRadiusM(s, j) : 0;
     const col = j.on === false ? '#8a887a' : '#e06050';
-    if (j.on !== false && R > 3) {
-      const N = 48, ring = [];
-      for (let k = 0; k < N; k++) {
-        const a = k / N * Math.PI * 2;
-        const rx = j.x + Math.cos(a) * R, ry = j.y + Math.sin(a) * R;
-        const rp = proj(rx, ry, terrainGroundAt(s.terrain, rx, ry));
-        if (rp) ring.push(rp);
-      }
-      if (ring.length > 8) {
-        ctx.beginPath(); ctx.moveTo(ring[0].x, ring[0].y);
-        for (let k = 1; k < ring.length; k++) ctx.lineTo(ring[k].x, ring[k].y);
-        ctx.closePath();
-        ctx.fillStyle = 'rgba(224,96,80,0.10)'; ctx.fill();
-        ctx.strokeStyle = 'rgba(224,96,80,0.5)'; ctx.lineWidth = 1 * U; ctx.setLineDash([4 * U, 5 * U]);
-        ctx.stroke(); ctx.setLineDash([]);
-      }
+    if (j.on !== false && R > 3 && groundRing3D(ctx, proj, s.terrain, j.x, j.y, R, 48)) {
+      ctx.fillStyle = 'rgba(224,96,80,0.10)'; ctx.fill();
+      ctx.strokeStyle = 'rgba(224,96,80,0.5)'; ctx.lineWidth = 1 * U; ctx.setLineDash([4 * U, 5 * U]);
+      ctx.stroke(); ctx.setLineDash([]);
     }
     const base = proj(j.x, j.y, g);
     const top = proj(j.x, j.y, g + (j.altM || 15) + 10);
@@ -569,8 +683,8 @@ function renderView3D(ctx, cv, s, status, cam, selected) {
       ctx.strokeStyle = col; ctx.lineWidth = 2 * U;
       ctx.beginPath(); ctx.moveTo(base.x, base.y); ctx.lineTo(top.x, top.y); ctx.stroke();
       ctx.beginPath(); ctx.arc(top.x, top.y, 4 * U, 0, Math.PI * 2); ctx.fillStyle = col; ctx.fill();
-      ctx.font = (11 * U) + 'px "IBM Plex Mono", monospace'; ctx.textAlign = 'center'; ctx.fillStyle = col;
-      ctx.fillText((j.on === false ? 'off · ' : '') + j.erpDbm + ' dBm', top.x, top.y - 10 * U);
+      ctx.font = (11 * U) + 'px "IBM Plex Mono", monospace'; ctx.textAlign = 'center';
+      label3D(ctx, (j.on === false ? 'off · ' : '') + j.erpDbm + ' dBm', top.x, top.y - 10 * U, col, U);
     }
   }
 }
