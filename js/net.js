@@ -324,12 +324,35 @@ function eligibleStartPkt(s, p) {
     s.net.nodeDutyUntil[p.res.txKey] || 0);
 }
 
+// A broadcast whose transmitter goes down before its last bit is cut off:
+// nobody hears it, and the channel and node clocks are freed at the moment
+// of death, as discardPacket does for unicast. A death AFTER the last bit
+// (tFire) is too late to matter — the table aired, even when this tick only
+// processes it afterwards (NET-08). Returns true when cut.
+function cutDeadBcast(s, b) {
+  if (b.srcId === 'C2') return false;
+  const d = nodePos(s, b.srcId);
+  if (d && alive(d)) return false;
+  const tDead = (d && d.endpointDeadAt != null) ? d.endpointDeadAt : s.time;
+  if (tDead >= b.tFire) return false;
+  const cutEnd = Math.max(b.tStart, tDead);
+  b.air.end = cutEnd;
+  if (s.net.chanBusyUntil[b.chan] === b.tFire) s.net.chanBusyUntil[b.chan] = cutEnd;
+  if (s.net.nodeTxUntil[b.txKey] === b.tFire) s.net.nodeTxUntil[b.txKey] = cutEnd;
+  const dc = (b.radio || s.radio).dutyCycle;
+  if (dc && dc < 1) s.net.nodeDutyUntil[b.txKey] = cutEnd + (cutEnd - b.tStart) * (1 - dc) / dc;
+  b._gone = true;
+  return true;
+}
+
 function commitBcast(s, b, eStart) {
   pendAir(s, b.chan, -b.airtime);
   forgetPendingBcast(s, b);
   if (b.srcId !== 'C2') {
     const d = nodePos(s, b.srcId);
-    if (!d || !alive(d)) { b._gone = true; return; } // dead transmitter (B17) — never went on air
+    // Down before its slot came up (B17): never went on air. A death after
+    // eStart — the commit is backdated within the tick — keyed up first.
+    if (!d || (!alive(d) && !(d.endpointDeadAt != null && d.endpointDeadAt > eStart))) { b._gone = true; return; }
   }
   if (b.payload.seq === s.net.floodSeq) s.net.floodCount++;
   // Advance the clocks by the ACTUAL airtime, bill it once (finding #16),
@@ -341,10 +364,12 @@ function commitBcast(s, b, eStart) {
     const rest = b.airtime * (1 - rad0.dutyCycle) / rad0.dutyCycle;
     s.net.nodeDutyUntil[b.txKey] = Math.max(eStart + b.airtime, s.net.nodeDutyUntil[b.txKey] || 0) + rest;
   }
-  billAir(s, b.chan, eStart, eStart + b.airtime);
+  b.air = billAir(s, b.chan, eStart, eStart + b.airtime);
   s.net.txAt[b.srcId] = eStart;
   b.committed = true;
+  b.tStart = eStart;
   b.tFire = eStart + b.airtime; // reception rolls when the last bit lands
+  cutDeadBcast(s, b); // backdated start, sender already down mid-air
 }
 
 // One lifecycle per FRAME (finding #15): a frame terminates exactly once —
@@ -484,6 +509,8 @@ function commitTransmissions(s) {
     if (failure) discardPacket(s, p, failure);
     else if (packetExpired(s, p, s.time)) discardPacket(s, p, 'ttl-expired');
   }
+  // likewise free the air of broadcasts whose sender died mid-air (NET-08)
+  for (const b of s.net.bcasts) if (b.committed && !b._gone) cutDeadBcast(s, b);
   for (;;) {
     let best = null, bestStart = Infinity, bestIsBcast = false, completing = false;
     for (const b of s.net.bcasts) {
@@ -517,10 +544,7 @@ function stepBcasts(s) {
     if (b._gone) continue;
     if (!b.committed) { next.push(b); continue; }
     if (s.time < b.tFire) { next.push(b); continue; }
-    if (b.srcId !== 'C2') {
-      const d = nodePos(s, b.srcId);
-      if (!d || !alive(d)) continue; // transmitter died mid-air — nobody hears the cut-off table
-    }
+    if (cutDeadBcast(s, b)) continue; // transmitter died mid-air — nobody hears the cut-off table
     const rad = b.radio || (b.srcId === 'C2' ? s.radio : txRadioOf(s, b.srcId, null));
     for (const id of nodeIds(s)) {
       if (id === b.srcId || id === 'C2') continue;

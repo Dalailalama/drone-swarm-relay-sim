@@ -690,3 +690,34 @@ test('capture schema: every event type and drop reason net.js emits is documente
     assert.ok(new RegExp("(^|[^a-z-])" + name + "([^a-z-]|$)", 'm').test(doc), name + ' is emitted but not documented');
   }
 });
+
+// NET-08: a drone's broadcast was dropped whenever its sender was dead at
+// PROCESSING time, even if the death came after the last bit landed later in
+// the same tick. Like unicast, the death time is compared with the airtime.
+// 60 bytes at 64 kbps = 7.5 ms of air.
+test('NET-08: a drone broadcast that finished airing is heard even if the sender dies later in the tick', () => {
+  // When B hears the table it re-sends it at t=0.05, so the channel is then
+  // busy until 0.0575.
+  for (const [busyUntil, deathAt, heard, chanFreeAt] of [
+    [0, 0.05, true, 0.0575],      // aired 0 .. 0.0075, died after
+    [0, 0.004, false, 0.004],     // died mid-air: cut off, channel freed at death
+    [0.01, 0.03, true, 0.0575],   // commit backdated to 0.01 within the tick, died after it aired
+    [0.01, 0.012, false, 0.012],  // backdated commit, died mid-air
+    [0.01, 0.005, false, 0.01],   // died before its slot: never keyed up
+  ]) {
+    const s = mk(2), [a, b] = s.drones;
+    a.x = 100; a.y = 0;
+    b.x = 150; b.y = 0;
+    s.net.rng = () => 0.01;
+    s.net.chanBusyUntil['sub1g'] = busyUntil;
+    s.time = 0;
+    ctx.sendBroadcast(s, a.id, { seq: 5, orders: {} }, 60);
+    ctx.stepNet(s, 0);
+    s.time = deathAt; ctx.killDrone(s, a);
+    s.time = 0.05; ctx.stepNet(s, 0.05);
+    const label = 'busy until ' + busyUntil + ', death at ' + deathAt;
+    assert.strictEqual(b.bcastSeen === 5, heard, label + ': reception');
+    assert.ok(Math.abs(s.net.chanBusyUntil['sub1g'] - chanFreeAt) < 1e-12,
+      label + ': channel busy until ' + s.net.chanBusyUntil['sub1g'] + ', expected ' + chanFreeAt);
+  }
+});
