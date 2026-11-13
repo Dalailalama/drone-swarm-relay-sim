@@ -625,8 +625,10 @@
     spacingOut.textContent = spacingRange.value + '%';
     if (swarm) swarm.deployFrac = frac;
     recordAction({ type: 'set', key: 'deployFrac', value: frac });
-    const hopM = usable() * frac;
-    const margin = linkMarginDb(radio, env.factor, hopM);
+    // The LPI waveform's budget cost shortens planned hops (planLossDb in swarm.js).
+    const lpiDb = lpiChk.checked ? AGILITY.lpiCostDb : 0;
+    const hopM = usableRangeM(radio, env.factor, lpiDb) * frac;
+    const margin = linkMarginDb(radio, env.factor, hopM) - lpiDb;
     const loss = (1 - pktSuccessProb(margin)) * 100;
     spacingInfo.innerHTML = 'Hops of ' + fmtDist(hopM) + ' &middot; nominal margin <b>' +
       margin.toFixed(1) + ' dB</b> &middot; pkt loss ~' + (loss < 1 ? '<1' : loss.toFixed(0)) + '%' +
@@ -661,6 +663,7 @@
   });
   lpiChk.addEventListener('change', () => {
     applyLpi();
+    applySpacing(); // the hop readout pays the LPI budget cost
     if (swarm) logEvent(swarm, 'LPI/LPD waveform ' + (swarm.lpiMode ? 'ON — trading link budget for survivability' : 'off'), 'info');
   });
   // --- Video backhaul -----------------------------------------------------------

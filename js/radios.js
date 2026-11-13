@@ -192,15 +192,17 @@ function linkMarginDb(radio, envFactor, dMetres) {
 
 // Usable planning range: where margin hits the fade reserve (default 6 dB —
 // you never plan a link at 0 dB margin; multipath fading will drop it).
+// extraLossDb is any fixed budget cost the live link also pays (the LPI
+// waveform's), so planned hops keep the full reserve.
 const FADE_MARGIN_DB = 6;
 
-function usableRangeM(radio, envFactor) {
+function usableRangeM(radio, envFactor, extraLossDb = 0) {
   const n = pathLossExponent(radio);
   if (radio.refPowerDbm != null) {
-    const d = Math.pow(10, (radio.refPowerDbm - radio.sensDbm - FADE_MARGIN_DB) / (10 * n));
+    const d = Math.pow(10, (radio.refPowerDbm - radio.sensDbm - FADE_MARGIN_DB - extraLossDb) / (10 * n));
     return d * envFactor;
   }
-  const budget = radio.txDbm + 2 * radio.antGainDbi - radio.sensDbm - FADE_MARGIN_DB;
+  const budget = radio.txDbm + 2 * radio.antGainDbi - radio.sensDbm - FADE_MARGIN_DB - extraLossDb;
   const d = Math.pow(10, (budget - pl1m(radio.freqMHz)) / (10 * n));
   return d * envFactor;
 }

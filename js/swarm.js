@@ -81,8 +81,13 @@ function plannedHopMarginDb(s, d) {
   // Per-drone: a heterogeneous fleet plans each unit's hop against the radio
   // THAT UNIT flies — the tactical edge is shorter-legged than the wing.
   const r = (d && droneRadio(d)) || s.radio;
-  return linkMarginDb(r, s.envFactor, usableRangeM(r, s.envFactor) * s.deployFrac);
+  const extra = planLossDb(s);
+  return linkMarginDb(r, s.envFactor, usableRangeM(r, s.envFactor, extra) * s.deployFrac) - extra;
 }
+
+// Fixed budget cost every live link pays right now (liveMarginDb): the LPI
+// waveform's. Hop planning spaces relays against the same budget.
+function planLossDb(s) { return s.lpiMode ? AGILITY.lpiCostDb : 0; }
 
 const COVERAGE = {
   deadLogIntervalSec: 5,  // while disconnected, log a dead-zone sample this often
@@ -478,7 +483,7 @@ function planChain(s) {
   const worldKey = planWorldKey(s);
   if (cached && !cached.feasible && cached.worldKey === worldKey && s.time - cached.at < PLAN.failedHoldSec) return cached;
 
-  const usable = Math.min(usableRangeM(chainRadio(s), s.envFactor), radioHorizonM(C2_ANTENNA_M, s.altitudeM));
+  const usable = Math.min(usableRangeM(chainRadio(s), s.envFactor, planLossDb(s)), radioHorizonM(C2_ANTENNA_M, s.altitudeM));
   const span = usable * s.deployFrac;
   // The search box must be wide enough to route AROUND the widest denial zone,
   // otherwise A* can't find a detour and the chain fails through it.
@@ -647,7 +652,7 @@ function planChain(s) {
   // Without this the chain "closes" on paper over wing-radio hops and then
   // can't hand off to short-range mission drones at all.
   if (s.relayIdx && s.relayIdx.length) {
-    const tactReach = usableRangeM(s.radio, s.envFactor) * s.deployFrac * 0.9;
+    const tactReach = usableRangeM(s.radio, s.envFactor, planLossDb(s)) * s.deployFrac * 0.9;
     if (pathLen > tactReach) {
       const arcs = [];
       const nEven = kSlots + 1;
@@ -1050,7 +1055,7 @@ function liveMarginDb(s, aId, bId) {
 // god-view needed.
 function corridorGoal(s, d, g) {
   if (!s.corridorRouting) return g;
-  const hop = usableRangeM(droneRadio(d) || s.radio, s.envFactor) * 0.8;
+  const hop = usableRangeM(droneRadio(d) || s.radio, s.envFactor, planLossDb(s)) * 0.8;
   if (dist2d(d, g) <= hop) return g;                    // final hop: go direct
   const B = s.base, T = d.order.target;
   const L = dist2d(B, T);
@@ -1235,7 +1240,7 @@ function c2Step(s) {
   // distance. Hop span stays capped by the radio horizon at altitude, and is
   // sized to whatever radio holds the slots (relay wing in a mixed fleet).
   const usable = Math.min(
-    usableRangeM(chainRadio(s), s.envFactor),
+    usableRangeM(chainRadio(s), s.envFactor, planLossDb(s)),
     radioHorizonM(C2_ANTENNA_M, s.altitudeM));
   const plan = planChain(s);
   const k = s.c2.relays.length;
