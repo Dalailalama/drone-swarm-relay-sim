@@ -1367,9 +1367,13 @@ function c2Step(s) {
     if (!lostIds.length || s.c2.rescuers.length >= RESCUE.maxChain) return false;
     if (!lostIds.some(id => s.time - s.c2.lost[id].at > RESCUE.delaySec)) return false;
     if (!s.c2.rescuers.length) return true;
-    // extend only when the current tip is on station and still short
-    const tip = known[s.c2.rescuers[s.c2.rescuers.length - 1]];
-    return tip && dist2d(tip, lostCentroid(s)) > reach * 1.05;
+    // extend only when the current tip is on station and still short. "On
+    // station" is the goto C2 gave it last round: a tip still in transit
+    // always looks short, and drafted a new link every round (audit C2-05).
+    const tipId = s.c2.rescuers[s.c2.rescuers.length - 1];
+    const tip = known[tipId];
+    const tipGoto = s.c2.rescueGoto && s.c2.rescueGoto[tipId];
+    return tip && tipGoto && dist2d(tip, tipGoto) < reach * 0.25 && dist2d(tip, lostCentroid(s)) > reach * 1.05;
   })();
   if (wantMoreRescuers) {
     // Rescue prefers TACTICAL units: pulling a relay-wing drone off the chain
@@ -1456,6 +1460,8 @@ function c2Step(s) {
       anchorId = rid;
     }
   }
+  s.c2.rescueGoto = {};
+  for (const rid of Object.keys(rescueOrders)) s.c2.rescueGoto[rid] = rescueOrders[rid].goto;
 
   // Build every drone's order. Every order names the drone's UPSTREAM chain
   // neighbor, so it can tether to it: relays hang off the previous slot
