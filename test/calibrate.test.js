@@ -237,3 +237,62 @@ test('wide-span fits pass and their 95% CI on n covers the truth', () => {
   const md = C.validationReportMd(fit, SIK, samples, null);
   assert.ok(md.includes('95% CI'), 'report must state the uncertainty on n');
 });
+
+// Audit calibrate-censoring-bias: radios only log RSSI for packets they
+// receive, so near the edge of range the weak tail goes missing. Dropping the
+// distance-but-no-RSSI rows as junk biased n low and the re-derived range
+// ~15% long — the unsafe direction for a planning tool.
+function edgeFlightCsv(g, n, A, sigma, sens, dHi, randomLoss) {
+  const rows = ['dist,rssi'];
+  for (let i = 0; i < 400; i++) {
+    const d = 10 + (dHi - 10) * i / 399;
+    const rssi = A - 10 * n * Math.log10(d) + sigma * g();
+    // randomLoss: a standard-normal draw below -1.881 happens 3% of the time.
+    const lost = rssi < sens || (randomLoss && g() < -1.881);
+    rows.push(d.toFixed(1) + ',' + (lost ? '' : rssi.toFixed(1)));
+  }
+  return rows.join('\n');
+}
+
+test('regression: lost packets are censored below sensitivity, so a flight past the edge of range is not biased low (audit calibrate-censoring-bias)', () => {
+  const n = 3.0, A = -30, sigma = 6, sens = SIK.sensDbm;
+  const trueRange = Math.pow(10, (A - sens) / (10 * n));
+  const trials = 100;
+  let sumN = 0, sumRange = 0, lostRows = 0;
+  for (let t = 0; t < trials; t++) {
+    const parsed = C.parseFlightLogCsv(edgeFlightCsv(gaussFrom(9000 + t), n, A, sigma, sens, 1.3 * trueRange, false));
+    const fit = C.fitPathLoss(parsed.samples, { lost: parsed.lost, floorDbm: sens });
+    assert.ok(fit.ok, 'trial ' + t + ': ' + fit.reason);
+    sumN += fit.n;
+    sumRange += C.calibratePreset(fit, SIK).rangeLosM;
+    lostRows += (parsed.lost || []).length;
+  }
+  assert.ok(Math.abs(sumN / trials - n) <= 0.05, 'mean fitted n ' + (sumN / trials).toFixed(3) + ', truth ' + n);
+  assert.ok(Math.abs(sumRange / trials / trueRange - 1) <= 0.05,
+    'mean re-derived range ' + (sumRange / trials).toFixed(0) + ' m, truth ' + trueRange.toFixed(0) + ' m');
+  assert.ok(lostRows > 0, 'blank-RSSI rows must be kept as lost packets, not dropped');
+});
+
+test('censored fit: random packet loss at every range does not read as a short link, and the report says what it did', () => {
+  // 3% of packets lost to collisions/interference regardless of distance: a
+  // lost packet at 20 m is not evidence of -105 dBm there.
+  const n = 3.0, A = -30, sigma = 6, sens = SIK.sensDbm;
+  const trueRange = Math.pow(10, (A - sens) / (10 * n));
+  let sumN = 0;
+  for (let t = 0; t < 40; t++) {
+    const parsed = C.parseFlightLogCsv(edgeFlightCsv(gaussFrom(7000 + t), n, A, sigma, sens, 1.3 * trueRange, true));
+    const fit = C.fitPathLoss(parsed.samples, { lost: parsed.lost, floorDbm: sens });
+    assert.ok(fit.ok, 'trial ' + t + ': ' + fit.reason);
+    assert.ok(fit.nCi95 > 0 && fit.nCi95 <= 0.5, 'CI half-width ' + fit.nCi95);
+    sumN += fit.n;
+  }
+  assert.ok(Math.abs(sumN / 40 - n) <= 0.1, 'mean fitted n ' + (sumN / 40).toFixed(3) + ' with random loss');
+  const csv = 'dist,rssi\n10,-60\n20,lost\n30,-74.3\n40,\n50,abc\n60,-83.4';
+  const p = C.parseFlightLogCsv(csv);
+  assert.deepStrictEqual(p.lost.map(l => l.dM), [20, 40], "blank and 'lost' RSSI cells are lost packets");
+  assert.strictEqual(p.dropped, 1, 'a non-numeric RSSI is still junk');
+  const parsed = C.parseFlightLogCsv(edgeFlightCsv(gaussFrom(1), n, A, sigma, sens, 1.3 * trueRange, false));
+  const fit = C.fitPathLoss(parsed.samples, { lost: parsed.lost, floorDbm: sens });
+  const md = C.validationReportMd(fit, SIK, parsed.samples, parsed);
+  assert.ok(/lost packets?/i.test(md) && md.includes(String(fit.lost)), 'report must state the censored rows it used');
+});
