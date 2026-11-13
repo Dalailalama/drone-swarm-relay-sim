@@ -68,10 +68,11 @@ python -B sitl/test_bridge.py                    # bridge scenarios
 python -B sitl/test_mock_vehicles.py             # executable mock (needs websockets)
 python -B sitl/test_protocol_conformance.py      # wire protocol
 python -B sitl/test_failure_scenarios.py         # failure scenarios
+python -B sitl/test_tak_bridge.py                # TAK bridge (needs websockets)
 python -B sitl/run_acceptance.py --mode mock --logs-dir out/acc --report out/acc/report.json
 ```
 
 Changes under `sitl/` need the Python suites green (Python 3.11 or 3.12);
 `test_bridge.py`, the conformance suite and the failure scenarios run with
-nothing installed, the mock suite and the acceptance run need
+nothing installed, the mock and TAK bridge suites and the acceptance run need
 `websockets`.

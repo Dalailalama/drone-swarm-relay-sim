@@ -1306,10 +1306,11 @@ async def scenario_c04_airborne_and_grounded_abort():
         # ...and re-sent at most every STEP_RESEND_DT, not on every 20 ms
         # poll (an identical target at 50/s floods a telemetry radio)
         holds = conn.count("setpoint")
+        hold_at = clock.now  # the hold (and its first target) began on this tick
         for _ in range(10):
             await bridge._advance_init(v)
         assert conn.count("setpoint") == holds, f"hold target re-sent {conn.count('setpoint') - holds}x within one poll window"
-        clock.now = 0.5 + bridge.STEP_RESEND_DT
+        clock.now = hold_at + bridge.STEP_RESEND_DT
         conn.push(hb_msg(armed=True, custom_mode=GUIDED_MODE_ID))
         conn.push(pos_msg(-8.0, 12.0, -20.0))
         bridge._drain_messages(v)
@@ -1429,8 +1430,9 @@ async def scenario_c04_airborne_and_grounded_abort():
         await bridge.handle_message(ws, json.dumps(abort_req), None, 14550)
         assert v.init_state == bridge.INIT_CONFIRM_ABORT
         assert conn.count("setpoint") == 0, "must not command hold before GUIDED confirmation"
-        # Resend interval (STEP_RESEND_DT = 0.5s in test harness)
-        clock.now += 0.5
+        # Resend interval (STEP_RESEND_DT = 0.5s in test harness); the margin
+        # keeps the accumulated float clock from landing a hair short of it.
+        clock.now += bridge.STEP_RESEND_DT + 1e-6
         conn.push(hb_msg(armed=True, custom_mode=9))
         bridge._drain_messages(v)
         await bridge._advance_init(v)

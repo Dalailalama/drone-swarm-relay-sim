@@ -84,6 +84,7 @@ python -B sitl/test_bridge.py
 python -B sitl/test_mock_vehicles.py
 python -B sitl/test_protocol_conformance.py
 python -B sitl/test_failure_scenarios.py
+python -B sitl/test_tak_bridge.py
 python -B sitl/run_acceptance.py --mode mock --report acceptance_mock.json
 ```
 
@@ -96,7 +97,9 @@ and the controller-ownership rules. `test_mock_vehicles.py` covers the mock
 server, `test_protocol_conformance.py` checks both servers against
 `docs/PROTOCOL.md`, and `test_failure_scenarios.py` injects faults (late
 ACKs, stale heartbeats, frozen positions, controller handoffs, service
-phase mismatches). `run_acceptance.py --mode mock` runs the full acceptance sequence (READY, waypoints, abort/resume, landing,
+phase mismatches). `test_tak_bridge.py` runs `tak_bridge.py` on loopback
+(one CoT `<event>` line becomes one datagram, a foreign Origin gets 403).
+`run_acceptance.py --mode mock` runs the full acceptance sequence (READY, waypoints, abort/resume, landing,
 battery swap) against `mock_vehicles.py`; `--mode real` runs it against
 SITL started with `run_ardupilot_sitl.sh`. All of this proves
 protocol/state-machine behaviour only — **not** that anything flies.
@@ -170,6 +173,8 @@ checks both servers against its examples.
 - `test_protocol_conformance.py` — runs the same checks against both
   servers and compares their messages with `docs/PROTOCOL.md`.
 - `test_failure_scenarios.py` — fault-injection scenarios for both servers.
+- `test_tak_bridge.py` — loopback tests for `tak_bridge.py`: CoT forwarding
+  and the Origin check. Needs `websockets`.
 - `run_acceptance.py` — end-to-end acceptance runner, `--mode mock` (CI)
   or `--mode real` against running SITL; `--report` writes a JSON report.
 - `tak_bridge.py` — separate relay from the browser's Cursor-on-Target
