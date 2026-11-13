@@ -106,12 +106,16 @@ function c2HopEstimate(s) {
   return 1 + (slots ? slots.length : 0);
 }
 
-// Every drone reports once per interval across the chain's hops.
-function tlmIntervalSec(s) {
+// Every drone reports once per interval across the chain's hops. C2 sizes
+// it (fleet manifest x its own planned hops) and announces it in every order
+// table, the way a GCS sets stream rates; drones pace on the announced value
+// (audit C2-10). Counting the truly-alive drones let C2's staleness timer
+// shrink the moment a drone died unseen, and drones read C2's private plan.
+function tlmIntervalSec(s, hops) {
   const tx = ((NET.tlmBytes + 8) * 8) / (s.radio.airRateKbps * 1000);
-  const n = s.drones ? s.drones.filter(alive).length : 1;
+  const n = s.drones ? s.drones.length : 1;
   return Math.max(C2.tlmIntervalSec, s.radio.dutyCycle ? tx / s.radio.dutyCycle : 0,
-    n * c2HopEstimate(s) * tx / TLM_AIR_SHARE);
+    n * (hops != null ? hops : c2HopEstimate(s)) * tx / TLM_AIR_SHARE);
 }
 
 function cmdIntervalSec(s, nDrones) {
@@ -1537,9 +1541,11 @@ function c2Step(s) {
     };
   };
 
+  const tlmEvery = tlmIntervalSec(s);
   const orderFor = id => {
     const order = buildOrder(id);
     const up = known[order.upstream];
+    order.tlmEvery = tlmEvery;
     order.c2 = { x: s.base.x, y: s.base.y, at: s.time };
     order.upstreamPos = order.upstream === 'C2' ? { ...order.c2 }
       : up && Number.isFinite(up.posAt) ? { x: up.x, y: up.y, at: up.posAt } : null;
@@ -1588,9 +1594,9 @@ function c2Step(s) {
     for (const id of ids) orders[id] = orderFor(id);
     s.c2.bcastSeq += 1;
     const bcastBytes = NET.bcastHeaderBytes + 4 + (NET.bcastRowBytes + 12) * ids.length;
-    sendBroadcast(s, 'C2', { seq: s.c2.bcastSeq, orders, c2: { x: s.base.x, y: s.base.y, at: s.time } }, bcastBytes);
+    sendBroadcast(s, 'C2', { seq: s.c2.bcastSeq, orders, tlmEvery, c2: { x: s.base.x, y: s.base.y, at: s.time } }, bcastBytes);
     if (s.relayRadio && !bandCompatible(s.radio, s.relayRadio)) {
-      sendBroadcast(s, 'C2', { seq: s.c2.bcastSeq, orders, c2: { x: s.base.x, y: s.base.y, at: s.time } }, bcastBytes, s.relayRadio);
+      sendBroadcast(s, 'C2', { seq: s.c2.bcastSeq, orders, tlmEvery, c2: { x: s.base.x, y: s.base.y, at: s.time } }, bcastBytes, s.relayRadio);
     }
   } else {
     // Unicast: one routed packet per drone — best effort, dies without a route
@@ -1640,6 +1646,10 @@ function droneComms(s, d) {
         Number.isFinite(c2at) && c2at <= s.time && (!d.baseKnown || c2at >= d.baseKnown.at)) {
       d.baseKnown = { x: c2pos.x, y: c2pos.y, at: c2at };
     }
+    // The report interval C2 announces rides in every table, even one
+    // without a row for us yet.
+    const every = p.payload && p.payload.tlmEvery;
+    if (Number.isFinite(every) && every > 0) d.tlmEvery = every;
     const inExternalService = (typeof externalServiceActive === 'function' && externalServiceActive(d.id)) ||
                               (typeof ExternalMode !== 'undefined' && ExternalMode.services && ExternalMode.services[d.id] && ExternalMode.services[d.id].phase !== 'failed') ||
                               (typeof window !== 'undefined' && window.ExternalMode && window.ExternalMode.services && window.ExternalMode.services[d.id] && window.ExternalMode.services[d.id].phase !== 'failed');
@@ -1699,7 +1709,8 @@ function droneComms(s, d) {
   // Any dead-zone samples collected while disconnected ride along (black box
   // upload) and are retained until network delivery is confirmed by ACK.
   if (s.time >= d.nextTlm) {
-    d.nextTlm = s.time + tlmIntervalSec(s);
+    // Before C2's first table: the manifest-sized single-hop interval.
+    d.nextTlm = s.time + (d.tlmEvery || tlmIntervalSec(s, 1));
     // Report what the drone's navigation believes — GNSS denial poisons the
     // position C2 sees, which is exactly how a real jammed airframe lies.
     const repX = d.gpsDenied ? d.belX : d.x + GPS_SIGMA_M * gaussian(s.net.rng);
@@ -1841,7 +1852,13 @@ function updateBattery(s, d, dt, vAirMs) {
       logEvent(s, d.id + (isFinite(secsHome) ? ' battery low'
         : ' home leg unflyable (wind ' + Math.hypot(s.wind.x, s.wind.y).toFixed(0) + ' m/s vs ' + af.maxSpeedMs + ' m/s airspeed)') +
         ' — RTB (' + d.batteryPct.toFixed(0) + '%)', 'warn');
-      sendPacket(s, 'tlm', d.id, 'C2', { x: d.x, y: d.y, battery: d.batteryPct, role: 'rtb' });
+      // Reported like any beacon — the navigation position, never truth —
+      // and stamped, so C2 can age it (audit C2-10).
+      sendPacket(s, 'tlm', d.id, 'C2', {
+        x: d.gpsDenied ? d.belX : d.x + GPS_SIGMA_M * gaussian(s.net.rng),
+        y: d.gpsDenied ? d.belY : d.y + GPS_SIGMA_M * gaussian(s.net.rng),
+        gps: d.gpsDenied ? 'denied' : 'ok', battery: d.batteryPct, role: 'rtb', posAt: s.time,
+      });
     }
   }
 
