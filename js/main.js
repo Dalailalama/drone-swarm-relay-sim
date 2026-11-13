@@ -280,9 +280,12 @@
       shadowSigmaDb: env.shadowSigmaDb,
       seed: terrainSeed,
       // Heterogeneous fleet: the relay wing flies its own airframe + radio.
+      // With the wing off there is no relay radio at all (as replay.js builds
+      // it): a leftover one widened the C2 tree's search span, so a capture
+      // stopped replaying exactly once the step timing moved.
       relayWing: heteroChk.checked ? +wingRange.value : 0,
-      relayAirframe: AIRFRAMES.find(a => a.id === relayAirframeSel.value) || null,
-      relayRadio: RADIOS.find(r => r.id === relayRadioSel.value) || null,
+      relayAirframe: heteroChk.checked ? AIRFRAMES.find(a => a.id === relayAirframeSel.value) || null : null,
+      relayRadio: heteroChk.checked ? RADIOS.find(r => r.id === relayRadioSel.value) || null : null,
     });
     selected = null; selectedJammer = null; selectedZone = null;
     fleetRowMap.clear();
