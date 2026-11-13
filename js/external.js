@@ -237,6 +237,12 @@
         // Readiness counts against what the sim asked for: a bridge started
         // with --count 3 under a 10-drone swarm is 3/10, not "all ready".
         ExternalMode.expectedCount = Math.max(ExternalMode.expectedCount, ExternalMode.ids.length);
+        // The fleet is what 'ready' lists: a telemetry frame sent before the
+        // bridge handled the init can still carry a vehicle it dropped, and
+        // that one must not stay counted against the fleet.
+        for (const id of Object.keys(ExternalMode.vehicleStates)) {
+          if (!ExternalMode.ids.includes(id)) { delete ExternalMode.vehicleStates[id]; delete ExternalMode.telem[id]; }
+        }
         for (const v of vehicleList(m.vehicles)) {
           if (!ExternalMode.telem[v.id]) ExternalMode.vehicleStates[v.id] = { ready: v.ready === true, state: v.state };
         }

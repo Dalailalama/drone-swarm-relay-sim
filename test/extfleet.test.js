@@ -155,3 +155,24 @@ test('reinit-adopts-swapped-vehicle: a vehicle the bridge kept parked already sw
   assert.strictEqual(ui.ctx.ExternalMode.services[d.id], undefined);
   assert.strictEqual(d.mode, 'ok', 'the relaunched vehicle is back in the fleet');
 });
+
+test('reinit-dropped-vehicle-readiness: a vehicle an init dropped no longer counts in the readiness line', () => {
+  // A telemetry frame the bridge sent before it handled the init still lists
+  // the vehicle the init drops; it arrives after externalReinit wiped the
+  // states, and used to stay counted forever ("partially ready (9/10)").
+  const ui = loadUI();
+  const s = ui.ctx.sim.swarm;
+  const all = s.drones.map(d => d.id);
+  const ws = connect(ui);
+  let seq = 0;
+  const tel = (ids, over) => ws.onmessage({ data: JSON.stringify({ type: 'telemetry', t: 0, vehicles: ids.map((id, k) => ({
+    id, x: 30 * k, y: 0, alt: 60, connected: true, armed: true, ready: true, state: 'ready',
+    positionSeq: ++seq, positionAge: 0.05, heartbeatAge: 0.05, ...over })) }) });
+  tel(all);
+  const kept = all.slice(0, -1);
+  ui.ctx.externalReinit(() => ui.ctx.sim.swarm, kept.length, 60);
+  tel(all.slice(-1), { ready: false, state: 'landing' });   // in flight before the init was handled
+  ws.onmessage({ data: JSON.stringify({ type: 'ready', ids: kept, vehicles: kept.map(id => ({ id, ready: true, state: 'ready' })) }) });
+  tel(kept);
+  assert.strictEqual(ui.ctx.ExternalMode.status, 'vehicles ready (' + kept.length + ') — flying under external control');
+});
