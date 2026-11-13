@@ -38,8 +38,12 @@ lets you design and stress-test that — against real radio hardware specs,
 real terrain, and real interference — before spending a cent on drones.
 
 No build step, no dependencies. Open `index.html` from any static server.
-(UI typeface — IBM Plex Mono — loads from Google Fonts and degrades
-gracefully to your system monospace offline.)
+Nothing is fetched from a third party on load: the UI uses your system
+monospace font (IBM Plex only if it is installed locally), and basemap tiles
+and OpenStreetMap lookups happen only when you use those features. The page
+carries a Content-Security-Policy `<meta>` (if your server also sends a CSP
+header, the browser applies both); WebSockets may go to any `ws:`/`wss:`
+host so remote SITL and TAK bridges work.
 
 ```
 python -m http.server 8000
@@ -75,7 +79,12 @@ the link last worked:
   to that last-link point and listen → fall back one radio-range step toward
   base and listen again → third strike → only then RTL home.* Three attempts
   before the mission position is abandoned — base is the last resort, not
-  the first one.
+  the first one. Each point is flown by the drone's own navigation belief,
+  and an attempt that cannot reach its point (inside a tower, say) expires
+  after twice its straight-line transit time plus the listening time. A
+  drone that reaches its last-known home with the link still dead lands
+  there; the ground crew swaps its battery only if the base really is there
+  (if the operator moved in radio silence, it stays landed).
 - **C2 side** — the ground station remembers where every lost drone was
   last heard (rendered as dashed ghost markers). After a grace period it
   dispatches a rescue drone toward that point — held one link-length from
@@ -97,8 +106,9 @@ trajectories in unknown terrain; here it's applied to energy. Before a drone
 adopts any in-flight tasking — relay slot, rescue point, new mission target —
 it checks that flying there still leaves enough battery to get home against
 the current wind, with pessimism margin and reserve intact. If not, it
-declines the order, keeps flying its current (already-vetted) one, and
-reports the refusal; C2 benches it for a while and elects a drone that can
+declines the order, keeps flying its current one while that one still
+closes (if neither closes, it takes the cheaper of the two), and reports the
+refusal; C2 benches it for a while and elects a drone that can
 actually afford the job. A drone that says yes has proven it can also say
 goodbye safely.
 
@@ -114,9 +124,11 @@ becomes a caterpillar unroll — the flock waits for the chain instead of
 sprinting into blackout — and in bad RF the chain compresses automatically,
 spacing itself by measured link quality instead of planned geometry.
 
-Measured effect: launch-phase dark time drops to zero, and the urban
-scenario at 50 m AGL goes from ~15% link uptime (swarm repeatedly marooned
-in street canyons) to 100%, with the mission still reaching its target.
+Measured effect when the tether was introduced: launch-phase dark time
+dropped to zero, and the urban scenario at 50 m AGL went from ~15% link
+uptime (swarm repeatedly marooned in street canyons) to 100%, with the
+mission still reaching its target. Later radio-preset, Fresnel-clearance and
+planner changes move these numbers, so re-measure before quoting them.
 
 ### Corridor transit
 
@@ -144,21 +156,31 @@ all tested:
   (*Mixed fleet* in Mission setup): an endurance relay wing on long-range
   radios holds the backhaul while tactical drones fly the objective on cheap
   short-range hardware. Link budgets between different radios are computed per
-  direction over each radio's own calibrated curve; band-incompatible nodes
-  simply cannot hear each other. C2 elects wing units for relay duty, keeps
+  direction from each transmitter's own power and calibration, over one
+  shared path-loss exponent per link (the larger of the two range fits, so
+  the path stays reciprocal; a jammer reaching either end uses the same one);
+  band- or protocol-incompatible nodes simply cannot hear each other (radios
+  link only when they share a preset's `air` protocol key, e.g. SiK and
+  RFD900x). C2 elects wing units for relay duty, keeps
   them off rescue tasking, and always plans a *tactical-tail slot* so the
-  short-legged flock can actually hang off the chain.
+  short-legged flock can actually hang off the chain. The panel caps the wing
+  at fleet size minus one, so at least one tactical drone always flies.
 - **GPS-denied navigation** (*Interference → Add GPS outage*) — inside a
   denial zone drones fly on dead reckoning: their believed position integrates
   airspeed with Ornstein-Uhlenbeck drift, they steer by that belief (and miss
   slots by exactly their nav error), and telemetry poisons C2's picture of
   where they are. The planner hedges: relay slots sidestep zones it cannot
-  trust positions in.
-- **Anti-jam spectrum agility + LPI/LPD** (*Mission setup*) — frequency-hopping
-  presets (Doodle Mesh Rider, Silvus, ELRS) shed a datasheet-class amount of
-  interference when agility is on; LPI waveforms trade 3 dB of link budget for
-  6 dB of denial rejection; denial zones visibly shrink for agile chains; link
-  uptime is measured so recovery is a number, not an adjective.
+  trust positions in, and C2 reads each report's GNSS flag, so a
+  dead-reckoned position paints no coverage, calls off no search, anchors no
+  rescue chain and earns no election credit, and a drone lost there is
+  marked uncertain.
+- **Anti-jam spectrum agility + LPI/LPD** (*Mission setup*) — anti-jam /
+  agile presets (FHSS for ELRS; interference avoidance and cancellation for
+  Silvus and Doodle Mesh Rider) shed an assumed processing gain of 12–16 dB
+  when agility is on (a modelling estimate: no vendor publishes such a
+  figure, see [RADIOS.md](RADIOS.md)); LPI waveforms trade 3 dB of link
+  budget for 6 dB of denial rejection; denial zones visibly shrink for agile
+  chains; link uptime is measured so recovery is a number, not an adjective.
 - **Payload/video backhaul** (*Mission setup → Video backhaul*) — streamed
   chunks are real packets paying real airtime on the one shared channel.
   C2 grants ONE streamer at a time in round-robin turns delivered inside order
@@ -170,10 +192,20 @@ all tested:
   scheduler, and the full combination (mixed fleet + jammer + GNSS denial +
   LPI + payload). Each is plain JSON-shaped data — save/load compatible.
 - **Sim-to-real calibration loop** (*Calibration section*) — feed any CSV log
-  of RSSI vs distance from real hardware (`dist,rssi` or `x,y[,z],rssi`);
-  least-squares fits the path-loss exponent and reference power with RMSE/R²,
-  re-derives a field-calibrated radio preset whose model exponent equals your
-  measurement, and emits a Markdown validation report with per-band residuals.
+  of RSSI vs distance from real hardware (`dist,rssi` or `x,y[,z],rssi`;
+  headers may carry units such as `distance_m` or `RSSI (dBm)`, positions may
+  be `east`/`north`, cells may be quoted). Distances are metres and RSSI must
+  be dBm: device-scale RSSI such as MAVLink `RADIO_STATUS` 0..254 is refused.
+  Least squares fits the path-loss exponent and reference power with
+  RMSE/R² and n ± its 95% interval, re-derives a field-calibrated radio
+  preset whose model exponent equals your measurement, and emits a Markdown
+  validation report with per-band residuals. A fit is refused when the
+  distances span less than half a decade, the 95% interval on n is wider
+  than ±0.5, n is outside 1.2–6.5, or the 1 m power is outside −120 to
+  +40 dBm. Rows with a distance but no RSSI (blank, `lost`, `nan`, `-`) are
+  lost packets, fitted as censored below the radio's sensitivity, which
+  removes the edge-of-range bias; a log that drops lost packets cannot be
+  corrected, so keep them (or fit only distances with reliable reception).
   This is the loop that turns the simulator from plausible into validated.
 
 ## Tier-2 capabilities (the moat)
@@ -189,41 +221,67 @@ Five features that make this hard to copy — all software-only, all tested:
   the flock follows.
 - **Red-team adversary mode** (*Interference → Red-team mode*) — interference
   sources direction-find the swarm's own transmissions (sensor-honest: no
-  god view, just a radio receiver) and crawl toward the recency-weighted
-  traffic centroid at limited ground speed. A denial zone that hunts. Uptime
-  with hunting vs static jammers is measurable; the report accounts for how
-  far the adversary moved.
+  god view, just a radio receiver; each fix is a noisy bearing at an
+  RSSI-estimated range) and crawl toward the recency-weighted
+  traffic centroid at limited ground speed. A denial zone that hunts. C2
+  does not see the hunters move either: it plans against where they were
+  placed and learns of a move only through coverage (lost telemetry,
+  black-box uploads). Uptime with hunting vs static jammers is measurable;
+  the report accounts for how far the adversary moved.
 - **ATAK / TAK integration** (*ATAK / TAK section*) — exports the live common
-  operating picture as Cursor-on-Target atoms: every drone, the command post,
-  the objective, and denial/GNSS-dead zones as ellipse hazards. Download a
+  operating picture as Cursor-on-Target atoms: every drone (`a-f-A-M-H-Q`),
+  the command post, the objective (`b-m-p-w` waypoint), and denial/GNSS-dead
+  zones as drawn circles (`u-d-c-c`), each marked `how="m-s"` (simulated).
+  Uids are `<prefix>-GCS`, `<prefix>-DR-n`, `<prefix>-TGT`, `<prefix>-JX-n`
+  and `<prefix>-GZ-n`; the prefix is a random per-page `SIM-xxxxxx`, editable
+  in the TAK panel's *UID prefix* field, so two pages never overwrite each
+  other's marks. Download a
   snapshot `.xml`, or stream live (5 s cadence) through `sitl/tak_bridge.py`
   onto TAK's UDP multicast (`239.2.3.1:6969`) where real ATAK clients
-  subscribe. Import someone else's CoT marks onto the map; one click turns
+  subscribe. Import someone else's CoT marks onto the map (named from their
+  `<contact callsign>`; they survive a relaunch); one click turns
   any mark into the mission objective. Georeferencing reuses a loaded OSM
-  area's exact anchor, or an operator origin (equirectangular, sub-metre at
-  these scales).
-- **Scale: 100+ nodes** — drone slider to 120. Upstream routing uses one
-  C2-rooted shortest-path tree refreshed on a 0.5 s cadence instead of a
-  Dijkstra per packet (16× faster at n=100), separation runs on a uniform
-  neighbor grid. `node bench/run.js` regenerates `bench/BASELINE.md` —
-  committed numbers so performance regressions diff in review. At scale the
-  binding constraint is the shared channel, honestly.
+  area's exact anchor, or an operator origin; TAK, OSM and the basemap share
+  one WGS-84 local projection, under 1 m of error within about 3 km of the
+  anchor, and longitudes wrap at the antimeridian.
+- **Scale: 100+ nodes** — drone slider to 120. Unicast traffic to and from
+  C2 uses one C2-rooted shortest-path tree refreshed on a 0.5 s cadence
+  (and rebuilt when a node dies or launches) instead of a Dijkstra per
+  packet, and separation runs on a uniform neighbor grid. `npm run bench`
+  regenerates `bench/BASELINE.md` — committed numbers so performance
+  regressions diff in review. The committed baseline predates several core
+  changes and no longer reproduces (see its header); re-run it before
+  quoting a figure. At scale the binding constraint is the shared channel,
+  honestly.
 - **Batch Monte Carlo + REST API** — `node tools/batch.js --config
-  batch/example.json` sweeps parameter cells across seeds overnight and emits
-  a Markdown confidence report (uptime/loss/contact as mean ± sd, p05/p95)
-  plus raw CSV. Same engine served over zero-dependency HTTP:
-  `node tools/server.js`, then `POST /api/batch`. The bundled example already
-  surfaced a quotable finding: in dense urban terrain with short-range
-  radios, LOWER altitude holds more uptime than high altitude.
+  batch/example.json` sweeps parameter cells across seeds and emits a
+  Markdown report plus raw CSV. Each metric (link uptime, control-packet
+  drop, video chunk loss, C2 contact %) is printed as mean [95% CI on the
+  mean, Student t] with its n, plus observed min/max below 20 runs and
+  sample p05/p95 from 20 runs; a single run prints `n=1, no interval`.
+  Packet drop counts control traffic only (telemetry, commands, acks and
+  broadcast order reach); video has its own loss column. A batch is capped
+  at 200 runs, 20 distinct seeds per cell and a work budget (chain batches
+  for more). Same engine served over zero-dependency HTTP:
+  `node tools/server.js` (binds `127.0.0.1`; `--host <addr>` exposes it, and
+  then only behind an authenticating reverse proxy; requests carrying a
+  browser `Origin` get 403 unless allowed), then `POST /api/batch`. The
+  bundled example is an urban altitude sweep (SiK radios, 45/90/140 m AGL)
+  to copy for your own study; it is a template, not a result.
+  `node tools/compare.js` runs two or more scenarios on identical seeds and
+  prints objective uptime, fleet contact and arrival side by side.
 
 ## The radio model (and its honesty)
 
 Every radio preset is a real product with datasheet numbers — TX power,
 receiver sensitivity, frequency, air rate, and the vendor's claimed
-line-of-sight range (sources in [RADIOS.md](RADIOS.md)).
+line-of-sight range — where the vendor publishes them. Fields that are
+estimates (for example Doodle's RF figures, the MANET ranges and air rates,
+and every anti-jam `hopGainDb`) are marked *(estimate)* in
+[RADIOS.md](RADIOS.md), next to the sources.
 
 Free-space path loss alone would predict absurd ranges (a 100 mW SiK radio
-"reaches" 290 km in free space; in the field it does 300 m near the ground).
+"reaches" ~73 km in free space; in the field it does 300 m near the ground).
 So the model uses **log-distance path loss with a per-radio exponent
 calibrated so the link margin hits exactly 0 dB at the vendor's rated LOS
 range**. That single fitted parameter absorbs ground reflection, Fresnel
@@ -232,11 +290,19 @@ losses, and antenna reality. On top of that sit:
 - **Log-normal shadowing** — an Ornstein-Uhlenbeck dB offset per link
   (σ = 2.5 dB open field → 6.5 dB urban), so links breathe and flicker
 - **Packet error curve** — success probability is logistic in margin
-  (50% at +2 dB, ~95% at +6 dB), with per-hop link-layer retries
+  (~16% at 0 dB, 50% at +2 dB, ~97% at +6 dB), with per-hop link-layer
+  retries; at 0 dB or below nothing is delivered. Datasheet sensitivity is
+  quoted at a low error rate, so the rated range is the model's ~84%-loss
+  edge ([RADIOS.md](RADIOS.md))
+- **Interference** — a source's ERP is converted to EIRP and adds to the
+  receiver's noise in milliwatts, against a per-preset required
+  signal-to-interference ratio ([MODEL.md](MODEL.md) §3.3)
 - **3D slant range** and a **4/3-Earth radio horizon** — beyond
   `4.12(√h₁+√h₂) km` the planet blocks the link no matter the power
 - **Shared-channel contention** — every transmission (and retry) occupies
-  the one frequency; C2 traffic overhead visibly eats chain throughput
+  the one frequency; C2 traffic overhead visibly eats chain throughput.
+  Each channel is one perfectly serialized swarm-wide timeline: there are no
+  collisions, but no spatial reuse either
 - **Regulatory duty cycle** (EU868 LoRa preset) — throttles telemetry and
   command rates; failsafe timeouts scale to match, like PX4's `COM_DL_LOSS_T`
 
@@ -246,17 +312,30 @@ calibrated exponent is a modeling choice, stated here so you can judge it.
 
 ## The energy model
 
-No endurance sliders. Airframes are defined by mass, rotor disc area, and
-battery watt-hours; hover power comes from actuator-disc momentum theory at
-a lumped 0.55 powertrain efficiency, forward flight adds a cubic drag term,
-and endurance *emerges* — within a couple of minutes of the real aircraft
-each preset is modeled on (sub-250 g micro ≈ 36 min, 450-class ≈ 22 min,
-endurance X8 ≈ 46 min). Drones run wind-aware smart-RTH: energy to get home
-is continuously re-estimated, and they leave while they still can.
+No endurance sliders. Airframes are defined by mass, rotor disc area, drag
+area and battery watt-hours; hover power comes from actuator-disc momentum
+theory over a lumped powertrain efficiency (0.55 by default; the micro
+carries 0.24, fitted to its reference aircraft), and forward flight is
+level-flight momentum theory: induced power falls with airspeed while
+parasite drag on each preset's drag area rises with its cube. Endurance
+*emerges*: on the usable pack, about 24 min of hover for the sub-250 g micro
+(the DJI Mini 4 Pro's published 30 min on the full pack), 22 min for the
+450-class and 36 min for the endurance X8. Only the micro is fitted to a real
+aircraft; the q450 and X8 are class-typical estimates. Drones run wind-aware
+smart-RTH: energy to get home is continuously re-estimated, and they leave
+while they still can.
+
+The battery model is deliberately simple: a constant-energy pack, of which
+80% of the nominal watt-hours is usable (100% on screen is that 80%), and a
+drone that runs the usable energy out is down. Smart-RTH keeps a reserve of
+7% of usable energy and bills the home leg at maximum-speed power with a 1.3
+margin. Voltage sag, C-rate, temperature and ageing are not modeled (see
+[MODEL.md](MODEL.md) §5 and §7).
 
 Wind is a ground-frame/air-frame split: speed limits and power draw are paid
-in airspeed, so holding a relay slot in a 10 m/s wind costs real watts, and
-a 16 m/s gale blows a 14 m/s quad backwards.
+in airspeed, so wind changes power in both directions (moderate airspeed
+lowers it below hover; it climbs toward maximum speed), and a 16 m/s gale
+blows a 14 m/s quad backwards.
 
 ## Terrain and the learned coverage map
 
@@ -264,18 +343,38 @@ Terrain (Mission setup → Terrain) is a fractal-noise heightfield — endless
 seeded rolling hills and valleys, sampled analytically at any point — plus
 procedural city districts: street grids of low-rise blocks with a
 scattering of 60-140 m towers. Radio links need genuine line of sight over
-both (with a Fresnel clearance that tapers at the antennas). Drones fly
+both (a clearance of 0.6 of the first Fresnel zone at the link frequency,
+shrinking to zero at the antennas; the test is pass/fail, with no partial
+diffraction loss). Drones fly
 terrain-following (AGL), so ridges between valleys cut links even though
 nobody crashes; buildings taller than the flight altitude are no-fly boxes
 the drones steer around (they carry a terrain database, like real
 autopilots — and so does C2, which never plans a relay slot inside a
 tower). Try the urban preset at 50 m AGL, watch the swarm suffer in the
-street canyons, then raise the altitude slider over the low-rise — measured
-uptime goes from ~15% to 100%, which is exactly how real urban BVLOS works.
+street canyons, then raise the altitude slider over the low-rise and
+compare. For short-range radios height is a trade, not a cure: it clears
+roofs, but it also lengthens every slant range, so measure it for your
+radio rather than assume it (an older version of this README quoted ~15% to
+100% uptime; that figure predates later radio, Fresnel and planner changes).
 
 The **3D view** button (header) switches to a FASTER-style perspective
 render — shaded terrain mesh, extruded buildings, drones on altitude stems,
-link lines colored by health. Drag to orbit, wheel to zoom.
+link lines colored by health, plus GPS-denied zones, C2's ghosts of lost
+drones, TAK marks, packets on the air and (with *Coverage map* checked) the
+coverage map, capped to the 1,500 cells nearest the camera aim. Drag to
+orbit, wheel to zoom.
+
+**Controls.** On the map a tap selects and a drag moves: pressing on the
+target, C2, a source or a zone grabs it only once the pointer has moved a
+few pixels. From the keyboard, Tab to a fleet-list row and press Enter or
+Space to select it; with the map focused, arrows pan (orbit in 3D), + and −
+zoom, `[` and `]` select the previous or next drone, N cycles through RF
+sources and GPS zones, Escape clears that selection, Shift+arrows move the
+selected source or zone (or the objective when none is selected) and
+Alt+arrows move C2. Keyboard moves are recorded in the capture like drags.
+At high time scales each frame steps for at most 10 ms; when the CPU cannot
+keep up, the clock readout appends the rate actually achieved (for example
+`T+04:10 · 23×`).
 
 What no terrain database can predict is the *RF shadow* — the region where
 hops between valid positions still die because the hill cuts the ray. That
@@ -314,22 +413,39 @@ view, but over the city you actually care about: your neighbourhood, a
 disaster-response sector, an inspection corridor.
 
 And it's map-first: with a real area loaded, the 2D canvas stops being an
-abstract dark plane and renders the *actual map* — genuine OSM cartography
-(CARTO dark tiles), streets and parks and block layout — with the swarm,
-relay chain, coverage and interference drawn on top, the way a professional
-ground-control station does it. Pan and zoom (mouse or pinch) work on the
-map itself. The map is the picture; the fetched buildings remain the
-physics — a river on the tile does not block radio, and we don't pretend it
-does.
+abstract dark plane and renders the *actual map* — the OpenStreetMap
+standard tile style from `tile.openstreetmap.org`, streets and parks and
+block layout — with the swarm, relay chain, coverage and interference drawn
+on top, the way a professional ground-control station does it. Pan and zoom
+(mouse or pinch) work on the map itself. The map is the picture; the
+fetched buildings remain the physics — a river on the tile does not block
+radio, and we don't pretend it does. (CARTO's raster basemaps now need an
+API key and are no longer used.)
 
 Honesty notes, because the physics depends on them: OSM building heights are
 used when surveyed, estimated from floor counts when not (the UI shows the
-split); a small staging clearing is carved at the GCS and objective; very
-dense fetches keep the largest 6,000 buildings (the UI says when); ground
-under a real city is flat in this version. Needs internet (this is the one
-feature that does); saved scenarios store the coordinates and re-fetch on
-load. Building data © [OpenStreetMap](https://www.openstreetmap.org/copyright)
+split); each building is its footprint's minimum-area rectangle, turned to
+match it, and multipolygon building relations give one box per outer ring
+(courtyards ignored); LOS uses the turned box, while flight avoidance uses
+the axis-aligned box around it, which is conservative; a small staging
+clearing is carved at the GCS and objective; very dense fetches keep the
+largest 6,000 buildings (the UI says when); ground under a real city is flat
+in this version. Needs internet (this is the one feature that does); saved
+scenarios store the coordinates and re-fetch on load. Building data and map
+tiles © [OpenStreetMap](https://www.openstreetmap.org/copyright)
 contributors (ODbL).
+
+Data sources and usage policies: tiles are used under the OSMF
+[Tile Usage Policy](https://operations.osmfoundation.org/policies/tiles/),
+which needs a valid Referer, so serve the page over http(s) (for example
+`python -m http.server`); a page opened from `file://` sends none and its
+tiles may be refused. Place search uses
+[Nominatim](https://operations.osmfoundation.org/policies/nominatim/): the
+app spaces requests at least 1.1 s apart and caches searches per page.
+Buildings come from the public Overpass API; the app pauses about 30 s on a
+server that answers 429, 406 or 504 and tries the next. Heavy users should
+run their own instances (the endpoints are set at the top of `js/osm.js`,
+and the CSP in `index.html` must allow them).
 
 ## Things to try
 
@@ -349,11 +465,16 @@ contributors (ODbL).
    station, RTB triggers early.
 6. **Load *Full DDIL* from the Scenario dropdown** — mixed fleet, jammer,
    GNSS denial over the objective, LPI waveforms, and a 300 kbps video feed
-   all fighting for one channel. Then toggle spectrum agility off mid-run and
-   watch link uptime fall.
-7. **Enable *Mixed fleet*** — an X8 relay wing on RFD900x radios bridges
-   3 km while SiK-equipped micros work the target; kill a wing relay and
-   watch C2 re-elect another *wing* unit, not a tactical one.
+   all fighting for one channel. Then toggle LPI off mid-run and watch the
+   jammer's denial zone grow. (Its RFD900x radios have no agility gain, so
+   the spectrum-agility toggle changes nothing here; try that one on
+   *Disrupted*, whose Doodle Mesh Rider chain has it.)
+7. **Enable *Mixed fleet*** — an X8 relay wing on RFD900x radios holds the
+   long backhaul while SiK-equipped micros work the target; kill a wing relay
+   and watch C2 re-elect another *wing* unit, not a tactical one. The
+   planner covers the micros' hop at the objective end of the chain, not
+   their transit to it, so a far objective can still leave short-range
+   micros out of reach.
 8. **Add a GPS outage over the objective** — drones cross on dead reckoning,
    miss their slots by tens of metres, and C2's picture of them drifts with
    them. Toggle the zone off and navigation snaps back.
@@ -362,20 +483,26 @@ contributors (ODbL).
    it. This is the demo clip.
 10. **Switch on *Red-team mode*** with two jammers placed — they stop sitting
    still and start hunting whoever transmits.
-11. **Run the overnight study** — `node tools/batch.js --config batch/example.json`
-    and read the confidence report it writes; or serve the same thing as an
+11. **Run a batch study** — `node tools/batch.js --config batch/example.json`
+    and read the Markdown report it writes; or serve the same thing as an
     API: `node tools/server.js`, `curl -X POST localhost:8090/api/batch -d @batch/example.json`.
 
 ## Architecture
 
 ```
 js/radios.js     radio presets (datasheet values + sources) & link physics
+js/terrain.js    fractal heightfield, procedural city, LOS / Fresnel test
+js/osm.js        OpenStreetMap building import + the shared WGS-84 projection
+js/tiles.js      OpenStreetMap raster basemap under the 2D map
 js/airframes.js  airframe presets & momentum-theory energy model
 js/fleet.js      heterogeneous fleets: mixed-band per-direction link budgets
 js/gpsnav.js     GPS-denied dead-reckoning belief model
 js/net.js        packet network: routing, per-hop airtime, fading, retries
 js/swarm.js      C2 planner, drone onboard logic, failsafes, motion
+js/replay.js     replays a packet capture from seed + settings + user actions
 js/render.js     canvas map: links, packets, range rings, wind, scale bar
+js/view3d.js     hand-rolled 3D perspective view (no WebGL)
+js/external.js   external vehicle mode: browser side of the SITL bridge
 js/scenarios.js  DDIL scenario pack (bundled one-click demos)
 js/missions.js   vertical mission library (SAR/wildfire/pipeline/convoy/perimeter)
 js/adversary.js  red-team mode: DF-hunting interference sources
@@ -383,20 +510,28 @@ js/tak.js        ATAK/TAK Cursor-on-Target export + import
 js/calibrate.js  sim-to-real loop: CSV ingest, path-loss fit, validation
 js/batchstats.js Monte Carlo aggregation (distributions per cell)
 js/main.js       UI wiring, sim loop, camera
-sitl/            MAVLink bridge, mock vehicles, TAK multicast bridge
-tools/           batch engine CLI (batch.js) + REST API server (server.js)
+sitl/            MAVLink bridge, mock vehicles, TAK multicast bridge (tak_bridge.py)
+tools/           batch engine CLI (batch.js), REST API server (server.js),
+                 scenario comparison dashboard (compare.js)
 bench/           scale benchmark suite + committed BASELINE.md
-test/            physics + integration tests (node --test)
+test/            physics + integration tests (npm test)
 ```
 
-Plain ES5-ish JavaScript, zero dependencies, deterministic under a seeded
-RNG (same seed → bit-identical run, which is what makes the tests possible).
+Modern JavaScript (ES2020: `??`, arrow functions, object spread) with no
+transpiler, so it needs a current browser (roughly Chrome 80, Firefox 72 or
+Safari 13.1 and later). Zero dependencies, deterministic under a seeded RNG
+(same seed → bit-identical run, which is what makes the tests possible).
 
 ## Tests
 
 ```
-node --test
+npm test
 ```
+
+`npm test` runs `node --test "test/*.test.js"` and needs Node 22 or later
+(CI runs 22.x and 24.x). A bare `node --test` also picks up the helpers in
+`test/helpers/` and reports two extra tests. [CONTRIBUTING.md](CONTRIBUTING.md)
+lists the Python suites and the other pre-PR checks.
 
 ## Interference / RF denial
 
@@ -416,6 +551,10 @@ swarm maps it, holds its connected frontier, and reports it.
 
 - **Save/Load scenario** serializes every setting plus placed interference
   sources to a JSON file, so a study or demo is reproducible and shareable.
+  A loaded file is validated in full before anything changes: unknown env,
+  airframe, terrain or radio ids (a radio id is accepted when the file's own
+  `radioPreset`/`relayRadioPreset` defines it), malformed numbers, and bad
+  jammer or zone entries are rejected with one alert.
 - **After-action report** exports a Markdown mission summary — did the link
   hold, how many relays and failsafes, what dead zones were mapped, packet
   loss, interference survived — the artifact a planner or customer actually
@@ -423,12 +562,24 @@ swarm maps it, holds its connected frontier, and reports it.
 
 ## Packet capture
 
-Tick the "Packet capture" box (Mission setup) to record every network event —
+Tick the "Packet capture" box (Mission setup) to record network events —
 sends, per-hop forwards with their retry count and link margin, deliveries,
-drops (no-route or link-fail), and broadcast receptions. "Export capture"
-downloads it as JSONL (one JSON event per line), a portable trace any tool
-can parse — think tcpdump for the mesh. Schema is documented at the top of
-[js/net.js](js/net.js) (`exportCaptureJSONL`).
+drops (with one of ten reasons: no-route, queue-latency, link-fail,
+ttl-expired, dead-src, dead-dst, bcast-superseded, bcast-backlog,
+bcast-suppressed, bcast-miss), and broadcast receptions. The capture is a
+rolling window of the last 4,000 events, not the whole run; its header
+(format version 3) reports `firstSeq`, `totalEvents` and `truncated`.
+"Export capture" downloads it as JSONL (one JSON event per line), a
+portable trace any tool can parse — think tcpdump for the mesh. Schema is
+documented at the top of [js/net.js](js/net.js) (`exportCaptureJSONL`).
+
+The header also carries the seed, the settings and every user action from
+t=0 (recorded even while capture is off; `captureStartT` says when packet
+events begin), so "Replay capture…" can regenerate the run. It runs in the
+background with progress on the button, then logs whether the replay
+reproduced the capture's deliveries (`matches` or `DIVERGES from`, with
+both counts and the time window). It is a parity check, not a visual
+replay; the replayed state is kept on `window.sim.lastReplay`.
 
 ## Physics, Protocol & Model Specifications
 
@@ -440,8 +591,9 @@ can parse — think tcpdump for the mesh. Schema is documented at the top of
 The swarm logic here can command actual autopilot firmware instead of the
 built-in physics. In "external vehicle" mode the browser keeps running every
 bit of its C2 logic — planning, ETX routing, the tether, coverage learning —
-but the drones are flown by ArduPilot/PX4 SITL (or a mock), reached over a
-WebSocket bridge:
+but the drones are flown by ArduCopter SITL (or a mock), reached over a
+WebSocket bridge (the bridge refuses PX4: it needs ArduCopter's `GUIDED`
+mode):
 
 ```
 browser sim  <--WebSocket-->  bridge.py  <--MAVLink/UDP-->  SITL
@@ -458,9 +610,12 @@ motion is externalized. See [sitl/README.md](sitl/README.md).
   relaunch verification with `python sitl/run_acceptance.py`.
 - **Real ArduPilot SITL**: Real SITL flight requires a Linux ArduPilot
   environment (`./run_ardupilot_sitl.sh` and `python sitl/bridge.py`).
-- **CI**: every push runs the JavaScript suite plus the Python bridge,
-  executable-mock, protocol-conformance and failure-scenario suites. These are
-  mock-level checks; real SITL flight is not part of CI.
+- **CI**: every push to `main` and every pull request to `main` runs the
+  JavaScript suite plus the Python bridge, executable-mock,
+  protocol-conformance, failure-scenario and TAK-bridge suites and the mock
+  acceptance run. These are mock-level checks; real SITL flight is not part
+  of CI. A Playwright browser-to-mock end-to-end test is opt-in (the manual
+  "Browser E2E" workflow; see [CONTRIBUTING.md](CONTRIBUTING.md)).
 
 ## Where this is going
 

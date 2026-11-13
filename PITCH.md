@@ -31,7 +31,7 @@ Every feature below exists to make one of those four signatures defensible.
   dead zone onto a learned coverage map and physically bends the chain around it.
 - **Real places** — type any place on Earth, fetch actual OSM buildings, fly over
   real geography in 2D map view or hand-rolled 3D.
-- **Bridge to reality** — the same C2 logic commands ArduPilot/PX4 SITL (or a
+- **Bridge to reality** — the same C2 logic commands ArduCopter SITL (or a
   mock) over a WebSocket→MAVLink bridge. The sim is already half a ground station.
 - **Evidence artifacts** — JSONL packet capture ("tcpdump for the mesh"),
   Markdown after-action reports, reproducible seeded scenarios.
@@ -61,8 +61,9 @@ buyer's checklist.
   drones act on *believed* positions while truth diverges; planner hedges relay
   placement accordingly. *Why it sells:* appears in essentially every autonomy
   RFP; cheap to build (drift term on the belief state) and instantly quotable.
-- **Anti-jam spectrum agility (LPI/LPD)** — frequency-hopping radio presets,
-  low-probability-of-intercept toggle, and quantified recovery: "frequency
+- **Anti-jam spectrum agility (LPI/LPD)** — anti-jam / spectrum-agile radio
+  presets (only ELRS is frequency-hopping; their 12–16 dB gain is a modelling
+  estimate), low-probability-of-intercept toggle, and quantified recovery: "frequency
   agility restored X% of chain throughput under Y dBm jamming." *Why it sells:*
   converts the interference demo from "it suffers honestly" into "we have
   countermeasures and numbers."
@@ -87,14 +88,15 @@ buyer's checklist.
 
 - **Red-team adversary mode** — an adaptive jammer AI that learns the swarm's
   routes and moves to exploit them; wargame connectivity before deployment.
-- **ATAK / TAK integration** — export the live common operating picture (tracks,
-  coverage heatmap, chain health) to ATAK; import real TAK markers as objectives.
+- **ATAK / TAK integration** — export the live common operating picture (drone
+  tracks, command post, objective, denial and GNSS-dead zones as hazard circles)
+  to ATAK; import real TAK markers as objectives.
   *Every* public-safety and defense buyer lives in ATAK.
 - **Scale run** — 100+ nodes with published performance benchmarks; larger swarms
   are a stated gap in competitor tooling.
-- **Batch Monte Carlo engine + REST API** — "run 500 seeded missions overnight,
-  wake up to a confidence report": uptime distributions vs altitude/radio/fleet
-  mix. Turns a browser toy into an enterprise evaluation harness (metered cloud
+- **Batch Monte Carlo engine + REST API** — up to 200 seeded runs per batch
+  (chain batches for more), reported as means with 95% confidence intervals:
+  uptime distributions vs altitude/radio/fleet mix. Turns a browser toy into an enterprise evaluation harness (metered cloud
   service = recurring revenue).
 - **Vertical mission library** — one-click templates: SAR grid search, wildfire
   overwatch, powerline/pipeline linear inspection, convoy escort, perimeter.

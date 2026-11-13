@@ -54,8 +54,9 @@ test('100-drone fleet flies a real mission and closes the chain', () => {
   assert.ok(st.freshCount >= 80, 'C2 should be in contact with most of the fleet, got ' + st.freshCount);
   assert.ok(s.net.vid.framesDelivered > 10, 'payload stream survives at scale');
   // Loose perf guard: ~360 ticks of a 100-drone sim must not take minutes.
-  // The committed baseline is ~44 ms/tick on the dev machine (~16 s here);
-  // 60 s of wall clock means something went superlinear again.
+  // It ran in ~16 s on the dev machine when this guard was written (not the
+  // bench/BASELINE.md setup, which runs 90 s at dt 0.05); 60 s of wall clock
+  // means something went superlinear again.
   assert.ok(wallS < 60,
     '100-node run took ' + wallS.toFixed(1) + 's wall — superlinear regression (baseline ~16 s)');
 });

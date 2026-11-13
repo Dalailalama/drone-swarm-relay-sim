@@ -84,6 +84,13 @@ the radio sheds versus a fixed-channel link:
 - **Doodle Labs Mesh Rider (2.4 GHz)**: 13 dB (estimate) — channel/band
   agility ("Sense" switches channels to route around jamming).
 
+Required signal-to-interference ratio against a barrage jammer
+(`jamSirDb`) defaults to +10 dB, a modelling figure for FSK-class radios.
+Only the LoRa preset overrides it: −15 dB, because SF10 demodulates 15 dB
+under the noise (Semtech SX1276/77/78/79 datasheet Rev.4, Table 13). The
+ExpressLRS preset (SX1280 LoRa) still uses the +10 dB default; it has no
+sourced figure yet.
+
 Corrections and additional radios are very welcome — see
 [CONTRIBUTING.md](CONTRIBUTING.md). A preset PR must cite a datasheet or a
 reproducible field test.

@@ -13,13 +13,15 @@ Radio presets live in [js/radios.js](js/radios.js) as plain data:
   id: 'my-radio',
   name: 'Vendor Model (band)',
   freqMHz: 915,
+  air: 'my-protocol', // optional: air-protocol key; radios link only if they share it
   txDbm: 20,          // transmit power
   sensDbm: -110,      // receiver sensitivity at the air rate below
   antGainDbi: 2,      // stock antenna, per end
   airRateKbps: 64,
   rangeLosM: 1000,    // vendor-rated or reproducibly field-tested LOS range
   dutyCycle: 0.1,     // optional: legal duty limit, omit if none
-  hopGainDb: 12,      // optional: FHSS / anti-jam rejection, omit for fixed-channel radios
+  hopGainDb: 12,      // optional: anti-jam rejection with agility on, omit for fixed-channel radios
+  jamSirDb: 10,       // optional: required SIR vs a barrage jammer, dB (default 10; LoRa -15)
   note: 'One sentence of practical character.',
   source: 'https://link-to-datasheet',
 }
@@ -32,6 +34,15 @@ Rules:
   it has to be defensible. Add a row to [RADIOS.md](RADIOS.md) with any
   judgment calls you made.
 - Sensitivity must correspond to the quoted air rate (they trade off).
+- `air` names the air protocol. Two presets link only when they share it
+  (SiK and RFD900x both use `'sik'`); a preset without one links only to
+  itself.
+- No vendor publishes an anti-jam gain, so `hopGainDb` is a modelling
+  estimate: label it as one in RADIOS.md (the tests check this).
+- `air` and `jamSirDb` survive preset export/import and field calibration.
+  An imported preset is rejected if a number is outside its sanity bounds
+  (`jamSirDb` −30..30) or, without a fitted `nFit`, if its fields imply a
+  path-loss exponent outside 1.2–6.5.
 
 ## Everything else
 
@@ -40,7 +51,10 @@ Rules:
 - **Simulation logic** (planner, failsafes, network): keep the separation of
   knowledge honest. C2 code may only read `s.c2.*` (its beliefs); drone code
   may only read its own fields; only physics reads truth. If your feature
-  needs a node to know something, send it a packet.
+  needs a node to know something, send it a packet. One known simplification:
+  drone-side energy planning (smart-RTH and order feasibility) plans from
+  the drone's belief position and last-known base but reads the true wind
+  vector, because no onboard wind estimate is modelled.
 - **Determinism**: never call `Math.random()` in simulation code — use the
   seeded RNG (`s.net.rng` / `gaussian(s.net.rng)`). Same seed must produce a
   bit-identical run; `test/hygiene.test.js` fails on any `Math.random` call

@@ -74,7 +74,8 @@ real drones, one honest step at a time.
 
 ### Week 1 — Bridge on real radios
 - **Goal:** the SITL bridge talks to a real autopilot over a real radio link.
-- **Tasks:** Flash ArduPilot/PX4 on the autopilot. Connect it to a companion
+- **Tasks:** Flash ArduCopter on the autopilot (the bridge supports
+  ArduCopter only; PX4 has no `GUIDED` mode). Connect it to a companion
   computer. Run your existing MAVLink bridge over the *real* telemetry radio
   (not UDP loopback). Confirm telemetry flows and you can send a goal.
 - **Kit/Cost:** T0.
@@ -210,7 +211,8 @@ simulation was right all along.
 ## Full hardware bill of materials (reference)
 
 **T0 — Bench (~$400–$1,500)**
-- SiK/RFD900-class telemetry radio pair — ~$40–$200
+- SiK/RFD900-class telemetry radio pair — ~$60–$200 (Holybro lists the SiK
+  V3 pair at $58.99)
 - ExpressLRS + LoRa module set — ~$60
 - 2× companion computer (Raspberry Pi 5 class) — ~$160
 - Pixhawk-class autopilot — ~$150–$300 (or bundled in a dev drone)

@@ -34,7 +34,7 @@ const LIMITS = {
   maxDurationSec: 1800,
   maxDrones: 120,
   maxCoordM: 100000,
-  maxTotalWorkDroneSec: 600000, // ~10 min of wall clock at the measured ~1 ms per drone-sim-second
+  maxTotalWorkDroneSec: 600000, // sized at a measured ~1 ms per drone-sim-second (~10 min); that cost has moved with core changes since, so re-measure before relying on the wall time
   maxVideoKbps: 2000,           // the UI slider's maximum; above it a chunk fragments into thousands of packets
   // Relay-chain planning is paid per replan, independent of fleet size
   // (soak finding R8): cap the A* grid of one replan, and the total

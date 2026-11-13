@@ -8,7 +8,7 @@ This folder lets a browser-based drone-swarm command-and-control sim command
 ## Architecture
 
 ```
- browser sim  <--WebSocket (JSON)-->  Python bridge process  <--MAVLink/UDP-->  ArduPilot/PX4 SITL
+ browser sim  <--WebSocket (JSON)-->  Python bridge process  <--MAVLink/UDP-->  ArduCopter SITL
 ```
 
 In "external vehicle" mode, the browser sim stops simulating drone motion
@@ -20,16 +20,21 @@ itself. Instead:
 
 Browsers can't speak UDP/MAVLink directly, so a Python process bridges the
 two: it terminates the WebSocket connection from the browser on one side,
-and (for the real path) talks MAVLink/UDP to ArduPilot/PX4 SITL on the
+and (for the real path) talks MAVLink/UDP to ArduCopter SITL on the
 other.
+
+The real bridge supports **ArduCopter only**. Its init sequence needs the
+`GUIDED` mode, which PX4 does not have (PX4 would need `OFFBOARD` with a
+continuous setpoint stream), so a vehicle whose heartbeat says PX4 is
+reported as `failed:unsupported-autopilot` and is never armed or retried.
 
 Two servers implement the exact same WebSocket protocol, so the browser sim
 doesn't need to know or care which one it's talking to:
 
 | File | Role |
 |---|---|
-| `mock_vehicles.py` | No-firmware stand-in. Pure Python, simulates simple point-mass vehicles. Verifies the whole browser <-> protocol <-> vehicle pipeline without needing ArduPilot/PX4 at all. |
-| `bridge.py` | The real bridge. Talks MAVLink/UDP to ArduPilot/PX4 SITL (or real vehicles) via `pymavlink`. |
+| `mock_vehicles.py` | No-firmware stand-in. Pure Python, simulates simple point-mass vehicles. Verifies the whole browser <-> protocol <-> vehicle pipeline without needing ArduPilot at all. |
+| `bridge.py` | The real bridge. Talks MAVLink/UDP to ArduCopter SITL (or real ArduCopter vehicles) via `pymavlink`. |
 
 ## Running
 
@@ -69,13 +74,49 @@ python bridge.py --count 3
 
 Then point the browser sim (external-vehicle mode) at `ws://localhost:8765`.
 The bridge binds `localhost` by default; for a browser on another machine
-start it with `--ws-host 0.0.0.0` and use `ws://<that box's address>:8765`
-(any client that can reach the port can then send `init`). The bridge will, per vehicle: wait for a
+start it with `--ws-host 0.0.0.0` and connect with the token it prints
+(see [Connecting safely](#connecting-safely)). The bridge will, per vehicle: wait for a
 MAVLink heartbeat, switch it to `GUIDED` mode, arm it, command takeoff to
 the requested altitude, then forward `goals` as MAVLink position setpoints
 and stream back `telemetry` from the vehicle's real position.
 
+`--count` overrides the count in the browser's `init` (the bridge says so in
+a `status` line). If the browser runs a bigger swarm, its extra drones have
+no vehicle on the bridge and are marked down at once, and readiness reads
+N/M against the browser's count, so set the browser's drone count to match.
+
+While it holds a vehicle the bridge sends it a 1 Hz GCS `HEARTBEAT`
+(system id 255), so ArduCopter's GCS-loss failsafe can engage if the bridge
+dies. That failsafe is off unless `FS_GCS_ENABLE` is set on the vehicle;
+set it (and its action) if a dead bridge should trigger RTL or LAND instead
+of leaving the vehicle holding its last target. MAVLink from anything other
+than the vehicle's own autopilot (for example a GCS sharing the SITL link)
+is ignored.
+
 `pymavlink` is only required for this real path — see `requirements.txt`.
+
+### Connecting safely
+
+All three servers (`bridge.py`, `mock_vehicles.py`, `tak_bridge.py`) share
+the handshake gate in `ws_origin.py`:
+
+- **Origin check.** A WebSocket handshake from a web page on another origin
+  gets HTTP 403, so a page open in your browser cannot arm or steer the
+  fleet. Always allowed: http(s) on `localhost` / `127.0.0.1` / `[::1]` (any
+  port), `file://` pages (Origin `null`), the GitHub Pages demo
+  (`https://dalailalama.github.io`), and clients that send no Origin header
+  (Python tools). Add more with the repeatable `--allow-origin ORIGIN`;
+  `--allow-origin '*'` turns the check off. Allowing `null` also admits
+  sandboxed iframes on any site.
+- **Token.** `--token SECRET` (or `$BRIDGE_TOKEN`) makes every client
+  connect with `?token=SECRET` in its URL, e.g.
+  `ws://<box>:8765/?token=SECRET` typed into the sim's Bridge URL field;
+  anything else gets HTTP 401. A server bound beyond loopback without a
+  token generates one and prints it.
+- **Bind address.** All three bind `localhost` by default. `bridge.py` and
+  `tak_bridge.py` take `--ws-host`, `mock_vehicles.py` takes `--host`.
+  `ws://` is plaintext: beyond a trusted LAN, use an SSH or VPN tunnel or a
+  TLS (`wss://`) proxy.
 
 ### (C) MOCK-LEVEL TESTS for the bridge itself — nothing installed
 
@@ -122,11 +163,30 @@ times out leaves the vehicle in `failed:<step>` (`failed:no-heartbeat`,
 `failed:mode`, `failed:arm`, `failed:takeoff`), which is what the `ready`
 reply reports for it — while its task keeps polling and restarts the
 sequence from the earliest unsatisfied step if the vehicle later shows up.
+A PX4 vehicle (`failed:unsupported-autopilot`) is the exception: it is never
+retried.
 
-**Ownership**: the socket whose `init` built the current fleet controls it.
-While that socket is open, `init`/`goals` from any other client are refused
-with a `status` line and change nothing. If the controller disconnects the
-fleet keeps flying and the next `init` from anyone takes over.
+READY is also revoked when the vehicle's own heartbeats show it left
+`GUIDED` (state `mode-lost:<custom_mode>`) or disarmed (state `disarmed`),
+for example after an autopilot failsafe or a pilot takeover. The bridge
+never re-commands a vehicle out of these states. A failed relaunch parks
+the vehicle (service phase `failed`, then `landed` once it is confirmed on
+the ground) instead of retrying.
+
+**Init**: an `init` with a non-numeric count or altitude, an altitude of
+1 m or less, or a malformed origin is refused with a `status` line and does
+not take control. The count is clamped to 256 vehicles. A later `init`
+(reset, selector change, reconnect) does not rebuild the fleet: vehicles
+still listed keep flying, and a vehicle the new count drops is commanded to
+LAND if it was armed and watched until it is down. The `ready` reply comes
+from a background task, so goals and services are answered while vehicles
+boot.
+
+**Ownership**: the socket whose `init` took control of the fleet controls
+it. While that socket is open, `init`/`goals` from any other client are
+refused with a `status` line and change nothing. If the controller
+disconnects the fleet keeps flying and the next `init` from anyone takes
+over.
 
 ## Coordinate frame contract
 
@@ -179,7 +239,9 @@ checks both servers against its examples.
   or `--mode real` against running SITL; `--report` writes a JSON report.
 - `tak_bridge.py` — separate relay from the browser's Cursor-on-Target
   live feed (`js/tak.js`) to ATAK clients over UDP multicast; unrelated to
-  the vehicle protocol.
+  the vehicle protocol. Multicast TTL defaults to 1 (same subnet; raise
+  `--ttl` only for routed multicast). Lines that are not a well-formed CoT
+  `<event>` (uid and type, at most 16 KiB, no DOCTYPE) are dropped.
 - `ws_origin.py` — shared Origin allowlist (stdlib only) that `bridge.py`,
   `mock_vehicles.py` and `tak_bridge.py` use to reject WebSocket handshakes
   from foreign web pages (cross-site WebSocket hijacking). Local origins,

@@ -3,7 +3,7 @@
 // range the vendor claims / the community reproduces with the stock antennas
 // listed, near ground level. Free-space math alone wildly overestimates range,
 // so the RSSI model below is calibrated per-preset: path-loss exponent `n` is
-// solved so link margin reaches the fade floor exactly at rangeLosM.
+// solved so link margin is exactly 0 dB (RSSI = sensDbm) at rangeLosM.
 
 const RADIOS = [
   {
