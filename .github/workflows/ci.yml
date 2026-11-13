@@ -101,3 +101,57 @@ jobs:
             ${{ runner.temp }}/acceptance_mock.json
             ${{ runner.temp }}/acceptance-logs/
           if-no-files-found: ignore
+
+  # The live demo deploys only a main push that passed every job above. It
+  # stays inert while the repository's Pages source is "Deploy from a branch"
+  # (that builder runs alongside CI, ungated); switching Settings > Pages >
+  # Source to "GitHub Actions" turns this gate on, with no further edit.
+  pages-source:
+    name: Read the GitHub Pages source
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: read
+    outputs:
+      build_type: ${{ steps.read.outputs.build_type }}
+    steps:
+      - name: Read the Pages build type (workflow = GitHub Actions)
+        id: read
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Any API failure (Pages off, no access) reads as "none": skip, never fail.
+          type="$(gh api "repos/${{ github.repository }}/pages" --jq .build_type 2>/dev/null)" || type=none
+          case "$type" in workflow|legacy) ;; *) type=none ;; esac
+          echo "build_type=$type" >> "$GITHUB_OUTPUT"
+          if [ "$type" != workflow ]; then
+            echo "::notice::Pages source is '$type', not GitHub Actions: the tested deploy is skipped."
+          fi
+
+  deploy-pages:
+    name: Deploy live demo to GitHub Pages
+    needs: [whitespace-and-lint, test-javascript, test-python, pages-source]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.pages-source.outputs.build_type == 'workflow'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Package the static site
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: .
+
+      - name: Deploy to GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@v5

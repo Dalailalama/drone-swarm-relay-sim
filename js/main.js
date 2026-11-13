@@ -1116,7 +1116,8 @@
     if (!calText) return;
     const basePreset = RADIOS.find(r => r.id === calRadioSel.value) || radio;
     const parsed = parseFlightLogCsv(calText);
-    const fit = fitPathLoss(parsed.samples);
+    // Lost packets (distance, no RSSI) are censored below this radio's sensitivity.
+    const fit = fitPathLoss(parsed.samples, { lost: parsed.lost, floorDbm: basePreset.sensDbm });
     calResult.style.display = 'block';
     if (!fit.ok) {
       calOutRow.style.display = 'none';
@@ -1137,7 +1138,7 @@
     const dsN = pathLossExponent(basePreset);
     const drift = fit.n - dsN;
     calResult.innerHTML =
-      '<b>Fit complete</b> — ' + fit.count + ' samples<br>' +
+      '<b>Fit complete</b> — ' + fit.count + ' samples' + (fit.lost ? ' + ' + fit.lost + ' lost packets (censored)' : '') + '<br>' +
       'measured n = <b>' + fit.n.toFixed(2) + ' ± ' + fit.nCi95.toFixed(2) + '</b> (95% CI; datasheet model: ' + dsN.toFixed(2) +
         ', drift ' + (drift >= 0 ? '+' : '') + drift.toFixed(2) + ')<br>' +
       'RMSE <b>' + fit.rmse.toFixed(1) + ' dB</b> · R² <b>' + fit.r2.toFixed(3) + '</b><br>' +

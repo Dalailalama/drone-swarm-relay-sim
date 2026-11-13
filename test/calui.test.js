@@ -4,6 +4,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
 const { loadUI, makeFile } = require('./helpers/dom.js');
+const { RADIOS } = require('../js/radios.js');
 
 // Clean two-decade dist,rssi log: n = 2.7, A = -30 dBm, tiny deterministic wobble.
 function csvFor(n, A) {
@@ -68,4 +69,23 @@ test('calibration: an empty file says so instead of staying silent', () => {
   assert.notStrictEqual(res.style.display, 'none');
   assert.ok(res.textContent.includes('empty'), res.textContent);
   assert.strictEqual(ui.el('calFitBtn').disabled, true);
+});
+
+test('calibration: lost packets (distance, blank RSSI) reach the fit as censored rows (audit calibrate-censoring-bias)', () => {
+  const ui = loadUI();
+  const sel = ui.el('calRadioSel');
+  const sens = RADIOS.find(r => r.id === sel.value).sensDbm;
+  const rows = csvFor(2.7, -30).split('\n');
+  let lost = 0;
+  const csv = rows.map((line, i) => {
+    if (i === 0) return line;
+    const [d, rssi] = line.split(',');
+    return +rssi < sens ? (lost++, d + ',') : line;
+  }).join('\n');
+  assert.ok(lost > 0, 'test log must run past the sensitivity floor');
+  loadCsv(ui, 'edge.csv', csv);
+  ui.fire('calFitBtn', 'click');
+  const html = ui.el('calResult').innerHTML;
+  assert.ok(html.includes('Fit complete'), html);
+  assert.ok(html.includes(lost + ' lost packets'), 'readout must count the censored rows: ' + html);
 });
