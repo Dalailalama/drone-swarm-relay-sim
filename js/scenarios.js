@@ -88,11 +88,17 @@ const SCENARIO_PACK = [
   {
     id: 'ddil-full',
     title: 'Full DDIL — everything at once',
-    blurb: 'The flagship: an endurance relay wing on long-range radios holds the backhaul while tactical micros work the objective; a jammer squats beside the corridor, GNSS dies over the target area, LPI/LPD waveforms are up, and payload video competes for the channel. This is the run that sells the capability.',
+    blurb: 'The flagship: an endurance X8 relay wing holds the backhaul while tactical micros on the same long-range telemetry work the objective; a jammer squats beside the corridor, GNSS dies over the target area, LPI/LPD waveforms are up, and payload video competes for the channel.',
+    // The micros fly the wing's RFD900x. On 95 m SiK legs they lost C2 about
+    // 250 m out and never crossed the 3.4 km to the wing's hand-off relay —
+    // nor with the jammer, LPI, video or GNSS zone removed, or under the open
+    // clutter factor — so only wing units ever reached the objective (audit
+    // SCN-02). The planner covers the objective end of a tactical hop, not
+    // the transit to it.
     scenario: {
       version: 1,
       name: 'DDIL: full combination',
-      radio: 'sik-v3', env: 'suburban', airframe: 'micro',
+      radio: 'rfd900x', env: 'suburban', airframe: 'micro',
       hetero: true, relayWing: 4, relayAirframe: 'x8', relayRadio: 'rfd900x',
       count: 12, altitudeM: 75, spacingPct: 78,
       terrain: 'rolling', seed: 4105,

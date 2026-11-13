@@ -133,3 +133,21 @@ test('ddil-intermittent reaches its objective and the link flickers rather than 
   assert.ok(S.stats.connSec > 60, 'objective covered for ' + S.stats.connSec.toFixed(0) + ' s of 300');
   assert.ok(drops >= 1, 'objective contact must drop at least once (the I in DDIL)');
 });
+
+// audit swarm-onboard/SCN-02: ddil-full's tactical micros flew 95 m SiK legs,
+// lost C2 about 250 m out and cycled hold/relink by the base for 15 minutes
+// while only wing units ever reached the objective (0-9% objective uptime).
+// A minute in, every micro must still be in contact and well on its way.
+test('ddil-full tactical micros stay in contact and leave the base area', () => {
+  const p = SCENARIO_PACK.find(x => x.id === 'ddil-full');
+  let S = null;
+  const wrapped = Object.create(ctx);
+  wrapped.stepSwarm = (s, dt) => { S = s; return ctx.stepSwarm(s, dt); };
+  runScenarioSeed(wrapped, p, p.scenario.seed, 60);
+  const micros = S.drones.filter(d => d.cls === 'mission');
+  assert.strictEqual(micros.length, p.scenario.count - p.scenario.relayWing);
+  for (const d of micros) {
+    assert.strictEqual(d.mode, 'ok', d.id + ' is in ' + d.mode);
+    assert.ok(Math.hypot(d.x - S.base.x, d.y - S.base.y) > 400, d.id + ' is still by the base');
+  }
+});
