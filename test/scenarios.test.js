@@ -151,3 +151,18 @@ test('ddil-full tactical micros stay in contact and leave the base area', () => 
     assert.ok(Math.hypot(d.x - S.base.x, d.y - S.base.y) > 400, d.id + ' is still by the base');
   }
 });
+
+// A jammer that "squats beside the corridor" must not deny the ground station
+// or the objective outright: ddil-full's 18 dBm source denied a 3.9 km disc of
+// the wing's band, so on most terrain seeds the chain had nowhere to go.
+test('no bundled jammer denies the base or the objective of its own scenario', () => {
+  for (const p of SCENARIO_PACK) {
+    if (!(p.scenario.jammers || []).length) continue;
+    let S = null;
+    const wrapped = Object.create(ctx);
+    wrapped.makeSwarm = opts => (S = ctx.makeSwarm(opts));
+    runScenarioSeed(wrapped, p, p.scenario.seed, 0); // built as the page builds it, never stepped
+    assert.ok(!ctx.inDenialZone(S, S.base), p.id + ': base inside a denial zone');
+    assert.ok(!ctx.inDenialZone(S, S.target), p.id + ': objective inside a denial zone');
+  }
+});

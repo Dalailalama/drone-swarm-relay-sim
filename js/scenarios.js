@@ -108,8 +108,12 @@ const SCENARIO_PACK = [
       spectrumAgility: true, lpiMode: true,
       videoBackhaul: true, videoKbps: 300,
       gpsZones: [{ x: 3150, y: -720, rM: 330, on: true }],
+      // 5 dBm denies a ~950 m disc of the wing's band beside the corridor
+      // (~1.8 km with agility and LPI off). At 18 dBm the disc was 3.9 km —
+      // base, objective and every detour — and on the compare tool's seeds
+      // 101-105 the objective was reached late or never (audit SCN-02).
       jammers: [
-        { x: 1700, y: -560, erpDbm: 18, band: 'all', altM: 15, on: true },
+        { x: 1700, y: -560, erpDbm: 5, band: 'all', altM: 15, on: true },
       ],
     },
   },
