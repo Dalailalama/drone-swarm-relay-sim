@@ -313,7 +313,8 @@ function captureInitialSettings(s) {
     // A map with no generator (OSM, hand-built) travels as its geometry.
     terrainCustom: custom ? {
       seed: t.seed, groundAmpM: t.groundAmpM || 0, groundScaleM: t.groundScaleM || 1,
-      buildings: (t.buildings || []).map(b => ({ x: b.x, y: b.y, w: b.w, d: b.d, heightM: b.heightM })),
+      buildings: (t.buildings || []).map(b => Object.assign({ x: b.x, y: b.y, w: b.w, d: b.d, heightM: b.heightM },
+        b.angleRad ? { angleRad: b.angleRad } : null)),
     } : undefined,
   };
 }
@@ -705,9 +706,11 @@ function nodeAltAbsM(s, id, pos) {
 
 // Buildings taller than the swarm's AGL can't be overflown — each one is a
 // no-fly cylinder (radius = half footprint diagonal plus a safety skirt).
+// Flight treats a turned footprint as the axis-aligned box enclosing it, so
+// the cylinder covers the box the hard clamp below enforces.
 function buildingObstacleRadiusM(s, b) {
   if (b.heightM <= s.altitudeM) return 0;
-  return Math.hypot(b.w, b.d) / 2 + 18;
+  return Math.hypot(buildingHalfW(b), buildingHalfD(b)) + 18;
 }
 
 // External vehicles fly straight at whatever goal they're given — the
@@ -726,8 +729,9 @@ function clipGoalToNoFly(s, from, goal) {
   let firstHit = null;
   for (const b of buildingsNear(s.terrain, from.x, from.y, scanM)) {
     if (b.heightM <= s.altitudeM) continue;
-    const minX = b.x - b.w / 2 - OBSTACLE_CLEAR_M, maxX = b.x + b.w / 2 + OBSTACLE_CLEAR_M;
-    const minY = b.y - b.d / 2 - OBSTACLE_CLEAR_M, maxY = b.y + b.d / 2 + OBSTACLE_CLEAR_M;
+    const hw = buildingHalfW(b), hd = buildingHalfD(b);
+    const minX = b.x - hw - OBSTACLE_CLEAR_M, maxX = b.x + hw + OBSTACLE_CLEAR_M;
+    const minY = b.y - hd - OBSTACLE_CLEAR_M, maxY = b.y + hd + OBSTACLE_CLEAR_M;
     if (from.x > minX && from.x < maxX && from.y > minY && from.y < maxY) continue; // expel logic owns this case
     const hit = rayIntersectsAABB(from.x, from.y, goal.x, goal.y, minX, maxX, minY, maxY);
     if (hit && hit.tmin > 0 && hit.tmin <= 1 && (firstHit == null || hit.tmin < firstHit)) firstHit = hit.tmin;
@@ -771,9 +775,10 @@ function clampStepToBuildings(s, d, dt) {
   const boxes = [];
   for (const b of buildingsNear(s.terrain, x, y, reach)) {
     if (b.heightM <= s.altitudeM) continue; // scenery below flight level
+    const hw = buildingHalfW(b), hd = buildingHalfD(b); // a turned footprint's enclosing box
     const box = {
-      minX: b.x - b.w / 2 - OBSTACLE_CLEAR_M, maxX: b.x + b.w / 2 + OBSTACLE_CLEAR_M,
-      minY: b.y - b.d / 2 - OBSTACLE_CLEAR_M, maxY: b.y + b.d / 2 + OBSTACLE_CLEAR_M,
+      minX: b.x - hw - OBSTACLE_CLEAR_M, maxX: b.x + hw + OBSTACLE_CLEAR_M,
+      minY: b.y - hd - OBSTACLE_CLEAR_M, maxY: b.y + hd + OBSTACLE_CLEAR_M,
     };
     if (x > box.minX && x < box.maxX && y > box.minY && y < box.maxY) {
       // Already inside the clearance band (spawn, drift, loaded state):

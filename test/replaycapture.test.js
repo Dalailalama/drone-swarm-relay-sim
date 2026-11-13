@@ -72,7 +72,8 @@ test('R16: a UI mission with jammer, GPS zone, relay wing and shadowing replays 
 
 test('R16: moving missions and custom (OSM-style) buildings replay exactly', () => {
   const ctx = loadCore();
-  const buildings = [{ x: 150, y: 20, w: 30, d: 30, heightM: 120 }, { x: 260, y: -40, w: 24, d: 40, heightM: 90 }];
+  const buildings = [{ x: 150, y: 20, w: 30, d: 30, heightM: 120 }, { x: 260, y: -40, w: 24, d: 40, heightM: 90 },
+    { x: 220, y: 70, w: 60, d: 14, heightM: 100, angleRad: 0.5 }]; // a turned OSM footprint
   const s = ctx.makeSwarm({
     count: 5, seed: 505, radio: R.RADIOS.find(r => r.id === 'sik-v3'), airframe: A.AIRFRAMES[1],
     envFactor: 0.45, shadowSigmaDb: 4.5, altitudeM: 60, targetX: 380, targetY: -60, captureOn: true,
@@ -81,6 +82,8 @@ test('R16: moving missions and custom (OSM-style) buildings replay exactly', () 
   });
   const meta = JSON.parse(ctx.exportCaptureJSONL(s).split('\n')[0]);
   assert.strictEqual(meta.settings.terrain, 'custom', 'a generator-less map must not be recorded as flat');
+  assert.strictEqual(meta.settings.terrainCustom.buildings[2].angleRad, 0.5, 'a turned footprint keeps its angle');
+  assert.ok(!('angleRad' in meta.settings.terrainCustom.buildings[0]), 'north-up boxes carry no angle');
   while (s.time < 30) ctx.stepSwarm(s, 0.05);
   const rep = replayMission(ctx.exportCaptureJSONL(s), { untilTime: s.time, core: loadCore() });
   assert.ok(maxPositionError(s, rep) < 1e-9, 'replay diverged by ' + maxPositionError(s, rep) + ' m');

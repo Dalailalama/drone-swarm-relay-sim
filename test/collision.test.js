@@ -83,3 +83,24 @@ test('buildings at or below flight altitude are overflown, not collided with', (
   }
   assert.ok(crossed, 'drone never crossed a low building it should overfly (x=' + d.x.toFixed(1) + ')');
 });
+
+test('a turned (OSM) footprint is a no-fly box at its real orientation', () => {
+  // 60 x 12 m slab turned 45°: its broad face runs well outside the box the
+  // same w/d would make north-up, which is where this approach aims.
+  const b = { x: 100, y: 0, w: 60, d: 12, heightM: 100, angleRad: Math.PI / 4 };
+  const c = Math.cos(b.angleRad), sn = Math.sin(b.angleRad);
+  const inside = d => {
+    const dx = d.x - b.x, dy = d.y - b.y;
+    return Math.abs(dx * c + dy * sn) < b.w / 2 && Math.abs(dy * c - dx * sn) < b.d / 2;
+  };
+  const s = swarmWithBuilding(b);
+  const d = s.drones[0];
+  // 8 m off the face point 20 m along the slab, closing at 14 m/s along its normal.
+  const fx = b.x + 20 * c - 6 * sn, fy = b.y + 20 * sn + 6 * c;
+  d.x = fx - 8 * sn; d.y = fy + 8 * c; d.vx = 14 * sn; d.vy = -14 * c;
+  for (let i = 0; i < 400; i++) {
+    ctx.stepSwarm(s, 0.05);
+    assert.ok(!inside(d), 'entered the turned footprint at t=' + (i * 0.05).toFixed(2) + 's, x=' +
+      d.x.toFixed(3) + ', y=' + d.y.toFixed(3));
+  }
+});

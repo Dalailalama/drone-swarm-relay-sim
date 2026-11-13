@@ -246,7 +246,7 @@
       // procedural city), plus small cleared staging areas at the GCS and the
       // objective — you'd stage in a lot, not on somebody's roof.
       const cx = (tX + baseX) / 2, cy = (tY + baseY) / 2;
-      const bs = osmArea.buildings.map(b => ({ x: b.x + cx, y: b.y + cy, w: b.w, d: b.d, heightM: b.heightM, estimated: b.estimated }));
+      const bs = osmArea.buildings.map(b => ({ x: b.x + cx, y: b.y + cy, w: b.w, d: b.d, heightM: b.heightM, estimated: b.estimated, angleRad: b.angleRad }));
       osmArea.cleared = osmClearZones(bs, [{ x: baseX, y: baseY, rM: 70 }, { x: tX, y: tY, rM: 60 }]);
       terrain = indexBuildings({ seed: terrainSeed, groundAmpM: 0, groundScaleM: 1, buildings: bs });
       // Pin the fetched area's geographic center to the corridor midpoint —
