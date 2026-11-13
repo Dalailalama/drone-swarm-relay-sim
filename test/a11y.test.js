@@ -116,7 +116,9 @@ test('a Content-Security-Policy contains any future unescaped innerHTML sink', (
   assert.deepStrictEqual(dir['script-src'], ["'self'"], 'scripts only from the page origin, no inline/eval');
   assert.deepStrictEqual(dir['object-src'], ["'none'"]);
   for (const need of ['ws:', 'wss:']) assert.ok(dir['connect-src'].includes(need), 'bridges run on any host: ' + need);
-  assert.ok(dir['img-src'].some(s => s.includes('basemaps.cartocdn.com')), 'basemap tiles still load');
+  // The basemap host is read from tiles.js so a provider change cannot leave the CSP blocking every tile.
+  const tileOrigin = fs.readFileSync(path.join(ROOT, 'js', 'tiles.js'), 'utf8').match(/img\.src = '(https:\/\/[^/']+)\//)[1];
+  assert.ok(dir['img-src'].includes(tileOrigin), 'basemap tiles still load from ' + tileOrigin);
   assert.ok(!/<script(?![^>]*\bsrc=)[^>]*>/.test(HTML), 'no inline <script> bodies');
   assert.ok(!/\son[a-z]+="/.test(HTML), 'no inline on* handlers');
 });
