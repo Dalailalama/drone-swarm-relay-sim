@@ -2,6 +2,42 @@
 // information that didn't physically arrive as a packet over a live link.
 // Packets travel hop-by-hop: each hop costs real airtime (bytes / air rate)
 // plus a forwarding delay, and is only possible while that link has margin.
+//
+// Packet capture schema (exportCaptureJSONL; JSONL, one JSON object per line).
+// Line 1 is a header:
+//   {seq: -1, t: 0, ev: 'meta', version: 3, seed, radio, broadcast, settings,
+//    captureStartT, userActions, events, firstSeq, totalEvents, truncated}
+//   The capture is a rolling window of the last CAP_MAX (4000) events, not the
+//   whole run: firstSeq is the seq of the first event kept, totalEvents how
+//   many were logged, truncated whether older ones were discarded. Events
+//   before captureStartT (capture switched on late) were never logged; replay
+//   regenerates the run from seed + settings + userActions.
+// Every following line is {seq, t, ev, ...}, ev one of:
+//   send    {pid, kind, src, dst, hops, path}        kind: tlm|cmd|ack|vid
+//           a video chunk larger than the MTU is ONE send for the frame:
+//           {pid: frameId, kind: 'vid', src, dst, hops, path, frags, bytes}
+//   hop     {pid, kind, from, to, retries, marginDb}
+//   deliver {pid, kind, src, dst}     logged once the receiver is known alive
+//   drop    {reason, ...}             fields per reason below
+//   bcast   {seqNo, from, to, marginDb}   first reception of an order table
+//   Video fragments travel as packets of their own (pid 'pN'); their hop,
+//   deliver and drop events also carry frameId (the frame send's pid) and
+//   fragIdx, so every fragment joins its frame's send.
+// Drop reasons:
+//   no-route          no path at send time                {kind, src, dst}
+//   queue-latency     video chunk refused: backlog > 1 s  {kind, src, dst}
+//   link-fail         a hop failed all its retries        {pid, kind, from, to, marginDb}
+//   ttl-expired       aged out while queued (tlm 6 s, vid 3 s, else 10 s)
+//   dead-src          the sending node went down before its frame finished
+//   dead-dst          the receiving node went down before the frame landed
+//                     or before arrival (store-and-forward delay)
+//                     (these four: {pid, kind, from, to, marginDb?})
+//   bcast-superseded  a queued table copy replaced by a newer table  {from, seqNo}
+//   bcast-backlog     broadcast queue full, copy not queued          {from, seqNo}
+//   bcast-suppressed  a node cancelled its re-send: enough copies heard {from, seqNo}
+//   bcast-miss        an addressed drone never heard a closed C2 order round
+//                     {kind: 'bcast', to, seqNo} — counted like a lost order
+// The version is bumped whenever a line's shape changes.
 
 const NET = {
   procDelaySec: 0.02,   // per-hop forward/processing delay (store-and-forward)
@@ -41,6 +77,8 @@ function makeNet(seed) {
   return {
     packets: [], bcasts: [], fades: new Map(), rng: mulberry32(seed),
     dropped: 0, delivered: 0,
+    // the same outcomes split by kind (tlm/cmd/ack/vid/bcast) — see countOutcome
+    byKind: {},
     // shared-channel accounting: ACTUAL on-air seconds, billed per channel at
     // the moment of transmission (never at enqueue — see stepNet), plus an
     // estimate of queued-but-unsent air per channel for latency decisions
@@ -66,7 +104,46 @@ function makeNet(seed) {
     // duplicate suppression), and copies actually aired per C2 order round
     bcastPendingBy: new Map(),
     floodSeq: null, floodCount: 0, floodCopiesEma: null,
+    // drone ids the open C2 round's table addresses (scored at round close)
+    floodAddr: null,
   };
+}
+
+// Outcome counters (NET-04). One delivered/dropped per unicast packet or
+// video fragment, and one per drone a broadcast round addresses — reached or
+// missed, scored when the next round closes it — so broadcast and unicast C2
+// count the same unreachable drone the same way. Kinds are kept apart because
+// a video fragment, a telemetry report and an order are different quantities.
+function countOutcome(s, kind, ok) {
+  if (ok) s.net.delivered++; else s.net.dropped++;
+  const k = s.net.byKind[kind] || (s.net.byKind[kind] = { delivered: 0, dropped: 0 });
+  if (ok) k.delivered++; else k.dropped++;
+}
+
+// Control-plane loss: telemetry, orders, acks and broadcast reach — video
+// fragments excluded (video has its own frame-loss metric).
+function controlLossPct(s) {
+  let ok = 0, lost = 0;
+  for (const kind in s.net.byKind) {
+    if (kind === 'vid') continue;
+    ok += s.net.byKind[kind].delivered;
+    lost += s.net.byKind[kind].dropped;
+  }
+  return 100 * lost / Math.max(1, ok + lost);
+}
+
+// Score a closed C2 round: every drone its table addressed either heard that
+// round (bcastSeen) or missed it. A dead or unreachable addressee is a miss,
+// as the unicast order to it would have been a no-route drop.
+function scoreBcastRound(s) {
+  const seq = s.net.floodSeq, addr = s.net.floodAddr;
+  if (seq == null || !addr) return;
+  for (const id of addr) {
+    const d = nodePos(s, id);
+    const heard = !!d && d.bcastSeen >= seq;
+    countOutcome(s, 'bcast', heard);
+    if (!heard) capLog(s, { ev: 'drop', reason: 'bcast-miss', kind: 'bcast', to: id, seqNo: seq });
+  }
 }
 
 // Packet capture: append one event to the rolling trace. Kept lightweight so
@@ -80,6 +157,12 @@ function capLog(s, ev) {
   // O9: shift() per event is O(n) — trim in batches so the rolling window
   // costs amortized O(1) while consumers still see a plain ordered array.
   if (s.net.cap.length > CAP_MAX + 512) s.net.cap.splice(0, s.net.cap.length - CAP_MAX);
+}
+
+// A video fragment's events name their frame, so they join the frame's send.
+function fragTag(p, ev) {
+  if (p.frameId) { ev.frameId = p.frameId; ev.fragIdx = p.fragIdx; }
+  return ev;
 }
 
 // --- Hardware matching & Channel ID ------------------------------------------
@@ -182,13 +265,16 @@ function scheduleBcast(s, srcId, payload, bytes, rad) {
     }
   }
   // A new C2 round closes the last one: fold its aired copies into the
-  // estimate that paces C2's order rounds (cmdIntervalSec).
+  // estimate that paces C2's order rounds (cmdIntervalSec), and score its
+  // reach (NET-04).
   if (srcId === 'C2' && payload.seq !== s.net.floodSeq) {
     if (s.net.floodSeq != null) {
       const e = s.net.floodCopiesEma;
       s.net.floodCopiesEma = e == null ? s.net.floodCount : e + 0.3 * (s.net.floodCount - e);
+      scoreBcastRound(s);
     }
     s.net.floodSeq = payload.seq;
+    s.net.floodAddr = payload.orders ? Object.keys(payload.orders) : null;
     s.net.floodCount = 0;
   }
   if (list.length >= BCAST_QUEUE_MAX) {
@@ -238,12 +324,35 @@ function eligibleStartPkt(s, p) {
     s.net.nodeDutyUntil[p.res.txKey] || 0);
 }
 
+// A broadcast whose transmitter goes down before its last bit is cut off:
+// nobody hears it, and the channel and node clocks are freed at the moment
+// of death, as discardPacket does for unicast. A death AFTER the last bit
+// (tFire) is too late to matter — the table aired, even when this tick only
+// processes it afterwards (NET-08). Returns true when cut.
+function cutDeadBcast(s, b) {
+  if (b.srcId === 'C2') return false;
+  const d = nodePos(s, b.srcId);
+  if (d && alive(d)) return false;
+  const tDead = (d && d.endpointDeadAt != null) ? d.endpointDeadAt : s.time;
+  if (tDead >= b.tFire) return false;
+  const cutEnd = Math.max(b.tStart, tDead);
+  b.air.end = cutEnd;
+  if (s.net.chanBusyUntil[b.chan] === b.tFire) s.net.chanBusyUntil[b.chan] = cutEnd;
+  if (s.net.nodeTxUntil[b.txKey] === b.tFire) s.net.nodeTxUntil[b.txKey] = cutEnd;
+  const dc = (b.radio || s.radio).dutyCycle;
+  if (dc && dc < 1) s.net.nodeDutyUntil[b.txKey] = cutEnd + (cutEnd - b.tStart) * (1 - dc) / dc;
+  b._gone = true;
+  return true;
+}
+
 function commitBcast(s, b, eStart) {
   pendAir(s, b.chan, -b.airtime);
   forgetPendingBcast(s, b);
   if (b.srcId !== 'C2') {
     const d = nodePos(s, b.srcId);
-    if (!d || !alive(d)) { b._gone = true; return; } // dead transmitter (B17) — never went on air
+    // Down before its slot came up (B17): never went on air. A death after
+    // eStart — the commit is backdated within the tick — keyed up first.
+    if (!d || (!alive(d) && !(d.endpointDeadAt != null && d.endpointDeadAt > eStart))) { b._gone = true; return; }
   }
   if (b.payload.seq === s.net.floodSeq) s.net.floodCount++;
   // Advance the clocks by the ACTUAL airtime, bill it once (finding #16),
@@ -255,10 +364,12 @@ function commitBcast(s, b, eStart) {
     const rest = b.airtime * (1 - rad0.dutyCycle) / rad0.dutyCycle;
     s.net.nodeDutyUntil[b.txKey] = Math.max(eStart + b.airtime, s.net.nodeDutyUntil[b.txKey] || 0) + rest;
   }
-  billAir(s, b.chan, eStart, eStart + b.airtime);
+  b.air = billAir(s, b.chan, eStart, eStart + b.airtime);
   s.net.txAt[b.srcId] = eStart;
   b.committed = true;
+  b.tStart = eStart;
   b.tFire = eStart + b.airtime; // reception rolls when the last bit lands
+  cutDeadBcast(s, b); // backdated start, sender already down mid-air
 }
 
 // One lifecycle per FRAME (finding #15): a frame terminates exactly once —
@@ -273,9 +384,9 @@ function markVidFrameDropped(s, id) {
 }
 
 function dropPacketBookkeeping(s, p, reason, from, to, marginDb) {
-  s.net.dropped++;
+  countOutcome(s, p.kind, false);
   if (p.kind === 'vid') markVidFrameDropped(s, p.frameId || p.pid);
-  capLog(s, { ev: 'drop', reason, pid: p.pid, kind: p.kind, from, to, marginDb });
+  capLog(s, fragTag(p, { ev: 'drop', reason, pid: p.pid, kind: p.kind, from, to, marginDb }));
 }
 
 function packetExpired(s, p, at) {
@@ -398,6 +509,8 @@ function commitTransmissions(s) {
     if (failure) discardPacket(s, p, failure);
     else if (packetExpired(s, p, s.time)) discardPacket(s, p, 'ttl-expired');
   }
+  // likewise free the air of broadcasts whose sender died mid-air (NET-08)
+  for (const b of s.net.bcasts) if (b.committed && !b._gone) cutDeadBcast(s, b);
   for (;;) {
     let best = null, bestStart = Infinity, bestIsBcast = false, completing = false;
     for (const b of s.net.bcasts) {
@@ -431,10 +544,7 @@ function stepBcasts(s) {
     if (b._gone) continue;
     if (!b.committed) { next.push(b); continue; }
     if (s.time < b.tFire) { next.push(b); continue; }
-    if (b.srcId !== 'C2') {
-      const d = nodePos(s, b.srcId);
-      if (!d || !alive(d)) continue; // transmitter died mid-air — nobody hears the cut-off table
-    }
+    if (cutDeadBcast(s, b)) continue; // transmitter died mid-air — nobody hears the cut-off table
     const rad = b.radio || (b.srcId === 'C2' ? s.radio : txRadioOf(s, b.srcId, null));
     for (const id of nodeIds(s)) {
       if (id === b.srcId || id === 'C2') continue;
@@ -461,7 +571,7 @@ function stepBcasts(s) {
       }
       d.bcastSeen = b.payload.seq;
       d.inbox.push({ kind: 'bcast', src: 'C2', payload: b.payload });
-      s.net.delivered++;
+      // counted when the round closes (scoreBcastRound), not per reception
       capLog(s, { ev: 'bcast', seqNo: b.payload.seq, from: b.srcId, to: id, marginDb: +m.toFixed(1) });
       // this node re-transmits the table once — through the same scheduler
       scheduleBcast(s, id, b.payload, b.bytes, txRadioOf(s, id, null));
@@ -474,12 +584,20 @@ function stepBcasts(s) {
 // Each link carries a slowly-wandering dB offset (Ornstein-Uhlenbeck process):
 // terrain and obstruction effects that persist for seconds as drones move,
 // on top of deterministic path loss. Stationary std dev = environment sigma.
+// Each fade starts IN that stationary distribution, so a link that appears
+// at t=0, or re-forms after being pruned, carries the full sigma from birth
+// instead of growing out of 0 dB over a few tau. (No shadowing, no draw:
+// sigma-0 runs keep their RNG stream.)
 const FADE = { tauSec: 10, pruneSec: 30 };
 
 function fadeDb(s, aId, bId) {
   const key = aId < bId ? aId + '|' + bId : bId + '|' + aId;
   let f = s.net.fades.get(key);
-  if (!f) { f = { db: 0, lastUsed: s.time }; s.net.fades.set(key, f); }
+  if (!f) {
+    const sigma = s.shadowSigmaDb || 0;
+    f = { db: sigma ? sigma * gaussian(s.net.rng) : 0, lastUsed: s.time };
+    s.net.fades.set(key, f);
+  }
   f.lastUsed = s.time;
   return f.db;
 }
@@ -490,10 +608,6 @@ function stepFades(s, dt) {
     if (s.time - f.lastUsed > FADE.pruneSec) { s.net.fades.delete(key); continue; }
     f.db += (-f.db * dt / FADE.tauSec) + sigma * Math.sqrt(2 * dt / FADE.tauSec) * gaussian(s.net.rng);
   }
-}
-
-function hopTimeSec(radio, bytes) {
-  return (bytes * 8) / (radio.airRateKbps * 1000) + NET.procDelaySec;
 }
 
 // --- Topology ---------------------------------------------------------------
@@ -627,7 +741,11 @@ function c2Tree(s) {
   const done = new Set();
   rank.set('C2', 0);
   dist.set('C2', 0);
-  const maxRadio = (s.relayRadio && s.relayRadio.rangeLosM > s.radio.rangeLosM) ? s.relayRadio : s.radio;
+  // Only a flying relay wing carries the relay radio (chainRadio): a relay
+  // radio merely selected for a homogeneous fleet must not widen the search
+  // (the capture omits it, so replays diverged from the page).
+  const wingRadio = chainRadio(s);
+  const maxRadio = wingRadio.rangeLosM > s.radio.rangeLosM ? wingRadio : s.radio;
   const maxSpan = usableRangeM(maxRadio, s.envFactor) * 2.5;
   for (;;) {
     let cur = null, best = Infinity;
@@ -749,7 +867,7 @@ function sendPacket(s, kind, src, dst, payload, bytesOverride) {
     path = dst === 'C2' ? pathToC2(s, src) : routePath(s, src, dst);
   }
   if (!path || path.length < 2) {
-    s.net.dropped++;
+    countOutcome(s, kind, false);
     if (kind === 'vid') s.net.vid.droppedFrames++;
     capLog(s, { ev: 'drop', reason: 'no-route', kind, src, dst });
     return false; // no route — radio silence
@@ -770,7 +888,7 @@ function sendPacket(s, kind, src, dst, payload, bytesOverride) {
   // chunk needs hops x its airtime before the last fragment lands (NET-02).
   const hops = path.length - 1;
   if (kind === 'vid' && (queueDelay > 1.0 || queueDelay + frameAirtime * hops > 2.0)) {
-    s.net.dropped++;
+    countOutcome(s, kind, false);
     s.net.vid.droppedFrames++;
     capLog(s, { ev: 'drop', reason: 'queue-latency', kind, src, dst });
     return false;
@@ -780,6 +898,9 @@ function sendPacket(s, kind, src, dst, payload, bytesOverride) {
   if (kind === 'vid' && bytes > MTU) {
     const numFrags = Math.ceil(bytes / MTU);
     const frameId = 'vf' + (++s.net.vidFrameSeq);
+    // Send first, so a fragment dropped while being queued follows it in the trace.
+    capLog(s, { ev: 'send', pid: frameId, kind, src, dst, hops, path: path.join('>'), frags: numFrags, bytes });
+    let queued = 0;
     for (let i = 0; i < numFrags; i++) {
       const fragBytes = Math.min(MTU, bytes - i * MTU);
       const p = {
@@ -796,10 +917,10 @@ function sendPacket(s, kind, src, dst, payload, bytesOverride) {
       };
       if (preparePacketHop(s, p)) {
         s.net.packets.push(p);
+        queued++;
       }
     }
-    capLog(s, { ev: 'send', pid: frameId, kind, src, dst, frags: numFrags, bytes });
-    return true;
+    return queued > 0;
   }
 
   const pid = 'p' + s.net.pktSeq++;
@@ -811,15 +932,28 @@ function sendPacket(s, kind, src, dst, payload, bytesOverride) {
     tSent: s.time,
     tReady: s.time,
   };
-  if (preparePacketHop(s, p)) {
-    s.net.packets.push(p);
-  }
-  capLog(s, { ev: 'send', pid, kind, src, dst, hops: path.length - 1, path: path.join('>') });
+  // Send first: a stale route's dead first hop drops the packet while it is
+  // being queued, and that drop must follow its send in the trace (NET-07).
+  capLog(s, { ev: 'send', pid, kind, src, dst, hops, path: path.join('>') });
+  if (!preparePacketHop(s, p)) return false; // dropped: nothing queued
+  s.net.packets.push(p);
   return true;
 }
 
 function deliverPacket(s, p) {
-  s.net.delivered++;
+  if (p.dst !== 'C2') {
+    // Receiver must still be up at arrival (it may die during the
+    // store-and-forward delay after the last bit landed): otherwise this is
+    // a drop, and the trace shows it as one — never a bare 'deliver'.
+    const d = nodePos(s, p.dst);
+    const aliveAtArrive = d && (alive(d) || (d.endpointDeadAt != null && d.endpointDeadAt >= p.tArrive));
+    if (!aliveAtArrive) {
+      dropPacketBookkeeping(s, p, 'dead-dst', p.path[p.hop - 1], p.dst, p.marginDb);
+      return;
+    }
+  }
+  capLog(s, fragTag(p, { ev: 'deliver', pid: p.pid, kind: p.kind, src: p.src, dst: p.dst }));
+  countOutcome(s, p.kind, true);
   if (p.kind === 'vid') {
     if (s.net.vidDropped.has(p.frameId || p.pid)) {
       // Straggler of a frame already counted as lost: the RF delivery
@@ -851,12 +985,7 @@ function deliverPacket(s, p) {
     // telemetry ingest — C2's belief state only updates from real reports.
     if (p.kind !== 'vid' && s.c2 && s.c2.inbox) s.c2.inbox.push(p);
   }
-  else {
-    const d = nodePos(s, p.dst);
-    const aliveAtArrive = d && (alive(d) || (d.endpointDeadAt != null && d.endpointDeadAt >= p.tArrive));
-    if (aliveAtArrive) d.inbox.push(p);
-    else s.net.delivered--, s.net.dropped++;
-  }
+  else nodePos(s, p.dst).inbox.push(p);
 }
 
 function stepNet(s, dt) {
@@ -890,11 +1019,10 @@ function stepNet(s, dt) {
     }
 
     const from = p.path[p.hop], to = p.path[p.hop + 1];
-    capLog(s, { ev: 'hop', pid: p.pid, kind: p.kind, from, to, retries: p.retries, marginDb: p.marginDb });
+    capLog(s, fragTag(p, { ev: 'hop', pid: p.pid, kind: p.kind, from, to, retries: p.retries, marginDb: p.marginDb }));
     p.hop++;
     if (p.hop >= p.path.length - 1) {
-      capLog(s, { ev: 'deliver', pid: p.pid, kind: p.kind, src: p.src, dst: p.dst });
-      deliverPacket(s, p);
+      deliverPacket(s, p); // logs 'deliver' (or the drop) itself
       continue;
     }
 
@@ -933,13 +1061,7 @@ function stepNet(s, dt) {
 }
 
 // Export the capture as JSONL (one JSON event per line) — a portable trace
-// any tool can parse. Schema per line:
-//   {seq, t, ev, ...}  where ev ∈ send|hop|deliver|drop|bcast
-//     send    {pid, kind, src, dst, hops, path}
-//     hop     {pid, kind, from, to, retries, marginDb}
-//     deliver {pid, kind, src, dst}
-//     drop    {pid?, kind, reason, from?, to?, marginDb?}  reason: no-route|link-fail
-//     bcast   {seqNo, from, to, marginDb}
+// any tool can parse. The schema is documented at the top of this file.
 // Mid-run UI actions are recorded ALWAYS, not only while capture is on: the
 // header describes t=0, so an action taken before capture was switched on
 // must still be in the file or the replay diverges (audit C-replay). They
@@ -979,11 +1101,14 @@ function exportCaptureJSONL(s) {
     envFactor: s.envFactor,
     terrain: s.terrain ? (s.terrain.name || s.terrain.type || 'flat') : 'flat',
   };
+  const caps = (s.net && s.net.cap) ? s.net.cap : [];
+  const totalEvents = s.net ? s.net.capSeq : 0;
+  const firstSeq = caps.length ? caps[0].seq : totalEvents;
   const header = {
     seq: -1,
     t: 0,
     ev: 'meta',
-    version: 2,
+    version: 3,
     seed: s.seed,
     radio: s.radio ? s.radio.id : undefined,
     broadcast: !!s.broadcastC2,
@@ -992,9 +1117,12 @@ function exportCaptureJSONL(s) {
     // late); replay regenerates them from the seed.
     captureStartT: s.captureStartT || 0,
     userActions: s.userActions ? [...s.userActions] : [],
-    events: (s.net && s.net.cap) ? s.net.cap.length : 0,
+    events: caps.length,
+    // The trace is a rolling window (CAP_MAX), not the whole run.
+    firstSeq,
+    totalEvents,
+    truncated: firstSeq > 0,
   };
-  const caps = (s.net && s.net.cap) ? s.net.cap : [];
   return [header, ...caps].map(e => JSON.stringify(e)).join('\n');
 }
 
@@ -1003,28 +1131,18 @@ if (typeof window !== 'undefined') {
   window.exportCaptureJSONL = exportCaptureJSONL;
 }
 
-// Hop attempt: the link must still exist when the packet actually crosses it,
-// then each transmission rolls against the packet-error curve. Returns number
-// of retries used (0 = first try), or -1 if all attempts failed.
+// Link-layer retries per hop (completePacketAttempt): each attempt rolls the
+// packet-error curve against the live margin at its own start.
 const HOP_RETRIES = 2; // SiK, DigiMesh etc. do link-layer retransmits like this
 const HOP_RETRY_GAP_SEC = 0.02; // listen-for-ACK gap between attempts
-
-function hopDelivered(s, fromId, toId) {
-  if (!linkUsable(s, fromId, toId)) return -1;
-  const p = pktSuccessProb(liveMarginDb(s, fromId, toId));
-  for (let t = 0; t <= HOP_RETRIES; t++) {
-    if (s.net.rng() < p) return t;
-  }
-  return -1;
-}
 
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     NET, VID, makeNet, capLog, sendBroadcast, stepBcasts,
-    txRadioOf, channelKeyOf, hopTimeSec, nodeIds, nodePos,
+    txRadioOf, channelKeyOf, nodeIds, nodePos,
     linkUsable, linkCost, routePath, c2Tree, pathToC2,
-    sendPacket, deliverPacket, stepNet, exportCaptureJSONL,
-    hopDelivered, HOP_RETRIES, interruptEndpointAttempts,
+    sendPacket, deliverPacket, stepNet, exportCaptureJSONL, controlLossPct,
+    HOP_RETRIES, interruptEndpointAttempts,
     recordUserAction,
   };
 }

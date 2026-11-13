@@ -9,6 +9,8 @@
 // assertion is about the scheduler, not swarm dynamics.
 const { test } = require('node:test');
 const assert = require('node:assert');
+const fs = require('node:fs');
+const path = require('node:path');
 const { loadCore } = require('./helpers/sim.js');
 const ctx = loadCore();
 const R = require('../js/radios.js');
@@ -554,4 +556,190 @@ test('NET-06: a relay death invalidates the cached C2 tree on the same tick', ()
   s.time = 0.1;
   ctx.killDrone(s, relay);
   assert.strictEqual(ctx.pathToC2(s, far.id), null, 'route through a dead relay');
+});
+
+// A relay radio picked on the page while the relay wing is off flies on no
+// drone, yet it widened the C2 tree's candidate-link span, so the page and
+// the replay of its capture (which leaves the unflown radio out) could build
+// different routes.
+test('C2 tree: a relay radio with no relay wing does not change the routes', () => {
+  const RFD = R.RADIOS.find(r => r.id === 'rfd900x');
+  const X8 = A.AIRFRAMES.find(a => a.id === 'x8');
+  const route = relayRadio => {
+    const s = ctx.makeSwarm({
+      count: 1, airframe: Q450, radio: SIK, envFactor: 1, targetX: 600, targetY: 0,
+      altitudeM: 50, seed: 42, relayWing: 0, relayAirframe: X8, relayRadio,
+    });
+    s.time = 0;
+    const d = s.drones[0];
+    d.x = 3 * ctx.usableRangeM(SIK, 1); d.y = 0; // past the SiK fleet's 2.5x search span
+    s.net.fades.set('C2|' + d.id, { db: 40, lastUsed: 0 }); // a deep up-fade keeps it linked
+    const p = ctx.pathToC2(s, d.id);
+    return p && p.join('>');
+  };
+  assert.strictEqual(route(RFD), route(null));
+});
+
+// NET-04: a drone that never heard a broadcast order table produced no drop
+// anywhere, so broadcast C2 reported 0 % loss where unicast reported 50 % for
+// the same unreachable drone. Broadcast reach is now scored per addressed
+// drone when the next round supersedes it, and the control-plane loss ratio
+// leaves video fragments out.
+function orderRounds(broadcast, rounds) {
+  const s = mk(2);
+  const [near, far] = s.drones;
+  near.x = 100; near.y = 0;
+  far.x = 50000; far.y = 0; // 50 km: no route, never hears a table
+  // A broadcast round is scored when the next one supersedes it, so the
+  // broadcast run sends one extra round to close the last scored one.
+  const sends = broadcast ? rounds + 1 : rounds;
+  for (let r = 1; r <= sends; r++) {
+    s.time = r - 1;
+    if (broadcast) ctx.sendBroadcast(s, 'C2', { seq: r, orders: { [near.id]: {}, [far.id]: {} } }, 68);
+    else for (const d of s.drones) ctx.sendPacket(s, 'cmd', 'C2', d.id, {}, 64);
+    run(s, r - 1, r - 0.05, 0.05);
+  }
+  return s;
+}
+
+test('NET-04: an unreachable drone counts as lost in broadcast mode exactly as in unicast', () => {
+  const bc = orderRounds(true, 10), uc = orderRounds(false, 10);
+  assert.strictEqual(uc.net.dropped, 10, 'unicast: 10 orders to the far drone dropped');
+  assert.strictEqual(bc.net.dropped, 10, 'broadcast: 10 rounds the far drone never heard must count as lost');
+  assert.deepStrictEqual({ ...bc.net.byKind.bcast }, { delivered: 10, dropped: 10 });
+  assert.deepStrictEqual({ ...uc.net.byKind.cmd }, { delivered: 10, dropped: 10 });
+  assert.strictEqual(ctx.controlLossPct(bc), 50);
+  assert.strictEqual(ctx.controlLossPct(uc), 50, 'same geometry, same loss in both C2 modes');
+  // Video fragments are a different quantity (frame loss has its own metric).
+  uc.net.byKind.vid = { delivered: 0, dropped: 1000 };
+  assert.strictEqual(ctx.controlLossPct(uc), 50, 'video fragments leak into the control-plane loss');
+});
+
+// NET-07: the capture trace must agree with the counters, every packet event
+// must join a send, and the header must admit a truncated rolling window.
+const trace = (s, pid) => [...s.net.cap.filter(e => e.pid === pid).map(e => e.ev + (e.reason ? '(' + e.reason + ')' : ''))];
+
+test('NET-07: a receiver that dies before arrival leaves a dead-dst drop, not a bare deliver', () => {
+  const s = mk(1), d = s.drones[0];
+  d.x = 50; d.y = 0;
+  s.captureOn = true;
+  s.net.rng = () => 0.01;
+  s.time = 1.0;
+  assert.ok(ctx.sendPacket(s, 'cmd', 'C2', d.id, {}, 8000)); // 1 s of airtime
+  ctx.stepNet(s, 0);
+  s.time = 2.005; ctx.stepNet(s, 1.005); // last bit landed at 2.0, arrival due at 2.02
+  s.time = 2.01; ctx.killDrone(s, d);
+  s.time = 2.05; ctx.stepNet(s, 0.04);
+  assert.strictEqual(s.net.delivered, 0);
+  assert.strictEqual(s.net.dropped, 1);
+  assert.deepStrictEqual(trace(s, 'p0'), ['send', 'hop', 'drop(dead-dst)']);
+});
+
+test('NET-07: every video fragment event joins its frame send', () => {
+  const s = mk(1), d = s.drones[0];
+  d.x = 50; d.y = 0;
+  s.captureOn = true;
+  s.time = 0;
+  assert.ok(ctx.sendPacket(s, 'vid', d.id, 'C2', {}, 1000)); // 4 fragments
+  run(s, 0, 2, 0.05);
+  assert.strictEqual(s.net.vid.framesDelivered, 1);
+  const send = s.net.cap.find(e => e.ev === 'send');
+  assert.strictEqual(send.path, d.id + '>C2');
+  assert.strictEqual(send.hops, 1);
+  const sends = new Set(s.net.cap.filter(e => e.ev === 'send').map(e => e.pid));
+  const pktEvents = s.net.cap.filter(e => e.pid && e.ev !== 'send');
+  assert.strictEqual(pktEvents.length, 8, 'four hops and four deliveries');
+  for (const e of pktEvents) {
+    assert.ok(sends.has(e.pid) || sends.has(e.frameId), e.ev + ' ' + e.pid + ' cannot be joined to any send');
+  }
+});
+
+test('NET-07: a send whose first hop is already down is logged before its drop and reports failure', () => {
+  const s = mk(2);
+  const [relay, far] = s.drones;
+  relay.x = 300; far.x = 600;
+  s.captureOn = true;
+  ctx.killDrone(s, relay);
+  const orig = ctx.pathToC2;
+  ctx.pathToC2 = () => [far.id, relay.id, 'C2']; // a stale route through the dead relay
+  let sent;
+  try {
+    sent = ctx.sendPacket(s, 'cmd', 'C2', far.id, {});
+  } finally {
+    ctx.pathToC2 = orig;
+  }
+  assert.strictEqual(sent, false, 'nothing was queued');
+  assert.strictEqual(s.net.dropped, 1);
+  assert.deepStrictEqual(trace(s, 'p0'), ['send', 'drop(dead-dst)']);
+});
+
+test('NET-07: the capture header says when the rolling window discarded events', () => {
+  const s = mk(1);
+  s.captureOn = true;
+  let meta = JSON.parse(ctx.exportCaptureJSONL(s).split('\n')[0]);
+  assert.strictEqual(meta.truncated, false);
+  for (let i = 0; i < 5000; i++) ctx.capLog(s, { ev: 'hop', pid: 'x' });
+  meta = JSON.parse(ctx.exportCaptureJSONL(s).split('\n')[0]);
+  assert.strictEqual(meta.totalEvents, 5000);
+  assert.strictEqual(meta.firstSeq, 5000 - s.net.cap.length);
+  assert.strictEqual(meta.events, s.net.cap.length);
+  assert.strictEqual(meta.truncated, true);
+});
+
+// capture-schema-stale: the README points third-party consumers at the
+// schema at the top of net.js; it must name every event type and drop
+// reason the code can emit.
+test('capture schema: every event type and drop reason net.js emits is documented at its top', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'js', 'net.js'), 'utf8');
+  const doc = src.slice(0, src.indexOf('const NET = {'));
+  const emitted = new Set();
+  const patterns = [/\bev: '([a-z]+)'/g, /\breason: '([a-z-]+)'/g, /discardPacket\(s, p, '([a-z-]+)'\)/g,
+    /dropPacketBookkeeping\(s, p, '([a-z-]+)'/g, /interruptedReason = '([a-z-]+)'/g];
+  for (const re of patterns) for (const m of src.matchAll(re)) emitted.add(m[1]);
+  // ...and whatever a busy seeded mission actually writes (indirect reasons).
+  const s = ctx.makeSwarm({
+    count: 8, airframe: Q450, radio: SIK, envFactor: 1, targetX: 1500, targetY: 0,
+    altitudeM: 50, seed: 7, broadcastC2: true, videoOn: true, videoKbps: 400, shadowSigmaDb: 6,
+  });
+  s.captureOn = true;
+  while (s.time < 40) {
+    ctx.stepSwarm(s, 0.25);
+    if (Math.abs(s.time - 20) < 0.01) ctx.killDrone(s, s.drones[2]);
+  }
+  for (const e of s.net.cap) { emitted.add(e.ev); if (e.reason) emitted.add(e.reason); }
+  for (const name of ['send', 'hop', 'deliver', 'drop', 'bcast', 'meta']) assert.ok(emitted.has(name), name);
+  for (const name of emitted) {
+    assert.ok(new RegExp("(^|[^a-z-])" + name + "([^a-z-]|$)", 'm').test(doc), name + ' is emitted but not documented');
+  }
+});
+
+// NET-08: a drone's broadcast was dropped whenever its sender was dead at
+// PROCESSING time, even if the death came after the last bit landed later in
+// the same tick. Like unicast, the death time is compared with the airtime.
+// 60 bytes at 64 kbps = 7.5 ms of air.
+test('NET-08: a drone broadcast that finished airing is heard even if the sender dies later in the tick', () => {
+  // When B hears the table it re-sends it at t=0.05, so the channel is then
+  // busy until 0.0575.
+  for (const [busyUntil, deathAt, heard, chanFreeAt] of [
+    [0, 0.05, true, 0.0575],      // aired 0 .. 0.0075, died after
+    [0, 0.004, false, 0.004],     // died mid-air: cut off, channel freed at death
+    [0.01, 0.03, true, 0.0575],   // commit backdated to 0.01 within the tick, died after it aired
+    [0.01, 0.012, false, 0.012],  // backdated commit, died mid-air
+    [0.01, 0.005, false, 0.01],   // died before its slot: never keyed up
+  ]) {
+    const s = mk(2), [a, b] = s.drones;
+    a.x = 100; a.y = 0;
+    b.x = 150; b.y = 0;
+    s.net.rng = () => 0.01;
+    s.net.chanBusyUntil['sub1g'] = busyUntil;
+    s.time = 0;
+    ctx.sendBroadcast(s, a.id, { seq: 5, orders: {} }, 60);
+    ctx.stepNet(s, 0);
+    s.time = deathAt; ctx.killDrone(s, a);
+    s.time = 0.05; ctx.stepNet(s, 0.05);
+    const label = 'busy until ' + busyUntil + ', death at ' + deathAt;
+    assert.strictEqual(b.bcastSeen === 5, heard, label + ': reception');
+    assert.ok(Math.abs(s.net.chanBusyUntil['sub1g'] - chanFreeAt) < 1e-12,
+      label + ': channel busy until ' + s.net.chanBusyUntil['sub1g'] + ', expected ' + chanFreeAt);
+  }
 });
