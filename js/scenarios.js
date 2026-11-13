@@ -51,11 +51,15 @@ const SCENARIO_PACK = [
   {
     id: 'ddil-intermittent',
     title: 'I — Intermittent (urban canyons)',
-    blurb: 'Short-range telemetry radios at 45 m AGL over a dense district: street canyons shadow links, contact flickers, relays get pulled off the mission and failsafes fire. Raise the altitude slider mid-run and watch uptime recover — that contrast IS the lesson.',
+    blurb: 'Short-range SiK telemetry at 45 m AGL over a dense district: towers shadow hops, contact flickers, most of the fleet ends up holding the chain and failsafes fire. Try the altitude slider mid-run: with under 100 m of usable range, climbing lengthens the slant hop down to the 6 m ground mast as fast as it clears rooftops, so height is a trade here, not a cure.',
+    // env 'suburban', not 'urban': the district's buildings are modelled
+    // explicitly (line of sight), so the clutter factor covers only what they
+    // don't. The urban factor on top left SiK 42 m of usable range — 18
+    // relays for this span with 12 drones, so the objective was never reached.
     scenario: {
       version: 1,
       name: 'DDIL: intermittent urban link',
-      radio: 'sik-v3', env: 'urban', airframe: 'micro',
+      radio: 'sik-v3', env: 'suburban', airframe: 'micro',
       count: 12, altitudeM: 45, spacingPct: 70,
       terrain: 'urban', cityDensity: 65, cityHeight: 35, seed: 4103,
       base: { x: 0, y: 0 }, target: { x: 520, y: -130 },

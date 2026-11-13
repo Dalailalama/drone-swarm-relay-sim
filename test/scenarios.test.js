@@ -94,3 +94,42 @@ test('each scenario runs headlessly without throwing and plans a chain', () => {
     assert.ok(s.c2.chainPlan && s.c2.chainPlan.slots.length >= 0, p.id + ': C2 produced a plan');
   }
 });
+
+// audit swarm-onboard/SCN-01: ddil-intermittent's urban clutter factor left
+// SiK 42 m of usable range — 18 relays for its span with 12 drones — so no
+// drone ever reached the objective. Every bundled scenario and mission must
+// be flyable with the fleet it ships: the planner's relay count for the
+// span (chain radio, clutter factor, radio horizon, hop spacing) leaves at
+// least one drone for the mission; a relay wing also holds the tactical
+// hand-off slot at the objective.
+const { MISSION_LIBRARY } = require('../js/missions.js');
+const { runScenarioSeed } = require('../tools/compare.js');
+
+test('every bundled scenario and mission has enough drones for the relay chain its span needs', () => {
+  const C2_MAST_M = 6;
+  for (const { id, scenario: sc } of [...SCENARIO_PACK, ...MISSION_LIBRARY]) {
+    const env = R.ENVIRONMENTS.find(e => e.id === sc.env);
+    const chain = R.RADIOS.find(r => r.id === (sc.hetero ? sc.relayRadio : sc.radio));
+    const usable = Math.min(R.usableRangeM(chain, env.factor), R.radioHorizonM(C2_MAST_M, sc.altitudeM));
+    const D = Math.hypot(sc.target.x - sc.base.x, sc.target.y - sc.base.y);
+    const k = ctx.relaysRequired(D, usable * sc.spacingPct / 100);
+    if (sc.hetero) assert.ok(k + 1 <= sc.relayWing, `${id}: ${k} wing relays + the hand-off slot vs a wing of ${sc.relayWing}`);
+    else assert.ok(k < sc.count, `${id}: ${k} relays for ${D.toFixed(0)} m vs ${sc.count} drones`);
+  }
+});
+
+test('ddil-intermittent reaches its objective and the link flickers rather than holding or never forming', () => {
+  const p = SCENARIO_PACK.find(x => x.id === 'ddil-intermittent');
+  let S = null, drops = 0, was = false;
+  const wrapped = Object.create(ctx);
+  wrapped.stepSwarm = (s, dt) => {
+    S = s;
+    const st = ctx.stepSwarm(s, dt);
+    if (was && !st.connected) drops++;
+    was = st.connected;
+    return st;
+  };
+  runScenarioSeed(wrapped, p, p.scenario.seed, 300);
+  assert.ok(S.stats.connSec > 60, 'objective covered for ' + S.stats.connSec.toFixed(0) + ' s of 300');
+  assert.ok(drops >= 1, 'objective contact must drop at least once (the I in DDIL)');
+});
