@@ -66,3 +66,23 @@ test('C2-07: one decline benches once; the drone is electable again when the ben
   ctx.c2Step(s);
   assert.ok(!(s.c2.unfit[d.id] > s.time), 'an old decline re-benched the drone');
 });
+
+// A decline is about the pack it was made on. One the drone turned for home
+// before reporting (RTB stops telemetry) rode in its first report after the
+// crew's swap, and C2 benched a full-battery drone for "low reserves".
+test('a decline made on the old pack does not bench the drone once the crew has swapped it', () => {
+  const { ctx, s, d, order, deliver, telemetry } = setup();
+  deliver(order('relay', { slotPos: { x: 20000, y: 0 } })); // a slot it cannot close
+  assert.strictEqual(d.rejectSeq, 1, 'setup: the drone must decline the slot');
+  // Battery RTB before the next report carried it; landed at base for a swap.
+  d.mode = 'landed'; d.vx = d.vy = 0;
+  d.swapAt = s.time;
+  ctx.stepSwarm(s, 0.05);
+  assert.strictEqual(d.mode, 'ok', 'setup: the crew must relaunch it');
+  assert.ok(d.batteryPct > 99, 'setup: on a fresh pack');
+  s.c2.inbox.push({ src: d.id, payload: telemetry() });
+  s.c2.nextCmd = 0;
+  ctx.c2Step(s);
+  assert.ok(!(s.c2.unfit[d.id] > s.time), 'C2 benched ' + d.id + ' on a full pack for a decline made on the old one');
+  assert.ok(!s.events.some(e => e.msg.startsWith('C2: ' + d.id + ' declined')), 'logged a stale decline');
+});

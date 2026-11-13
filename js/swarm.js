@@ -2495,6 +2495,10 @@ function stepSwarm(s, dt) {
       d.swapAt = null;
       d.lastC2 = s.time;
       d.order = { role: 'mission', slot: -1, k: 0, upstream: 'C2', target: { x: s.target.x, y: s.target.y } };
+      // A decline spoke for the old pack: one not yet reported (RTB stops
+      // telemetry) must not bench the drone on its fresh one. rejectSeq keeps
+      // counting, so C2 just marks the old decline seen.
+      d.rejectedRole = null; d.rejectedSig = null;
       if (s.stats) s.stats.swaps = (s.stats.swaps || 0) + 1; // one completed swap, counted once
       logEvent(s, d.id + ' battery swapped — relaunching', 'info');
     }
