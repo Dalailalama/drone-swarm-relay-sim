@@ -33,6 +33,31 @@ test('mixed link budget is the worse direction, not an average', () => {
   assert.strictEqual(F.mixedLinkMarginDb(RFD, SIK, 1, 1000), Math.min(a2b, b2a));
 });
 
+// Audit rf-physics/per-radio-n-as-channel-physics: each direction used the
+// TRANSMITTER's fitted exponent, so one air path lost 51.6 dB more one way
+// than the other at 300 m (SiK<->RFD900x).
+test('a mixed link\'s path loss is reciprocal: one air path, one exponent', () => {
+  const pl = (tx, rx, d) => tx.txDbm + tx.antGainDbi + rx.antGainDbi - F.rssiDirectionalDb(tx, rx, 1, d);
+  let pairs = 0;
+  for (const ra of R.RADIOS) for (const rb of R.RADIOS) {
+    if (ra === rb || !F.bandCompatible(ra, rb)) continue;
+    pairs++;
+    for (const d of [100, 300, 3000]) {
+      assert.ok(Math.abs(pl(ra, rb, d) - pl(rb, ra, d)) < 1e-9,
+        ra.id + '<->' + rb.id + ' at ' + d + ' m: ' + pl(ra, rb, d).toFixed(1) + ' vs ' + pl(rb, ra, d).toFixed(1) + ' dB');
+    }
+  }
+  assert.ok(pairs >= 2, 'expected at least the SiK/RFD900x pair');
+  // The larger (conservative) exponent is the SiK's, so the binding SiK-TX
+  // direction — and the link margin — are unchanged to the bit.
+  for (const d of [100, 300, 3000]) {
+    const n = R.pathLossExponent(SIK);
+    assert.ok(n > R.pathLossExponent(RFD));
+    const sikTx = SIK.txDbm + SIK.antGainDbi + RFD.antGainDbi - (R.pl1m(SIK.freqMHz) + 10 * n * Math.log10(d)) - RFD.sensDbm;
+    assert.strictEqual(F.mixedLinkMarginDb(SIK, RFD, 1, d), sikTx);
+  }
+});
+
 test('radios in different bands cannot link at all', () => {
   assert.strictEqual(F.mixedLinkMarginDb(SIK, ESP, 1, 5), -Infinity);
   assert.strictEqual(F.bandCompatible(SIK, RFD), true, '915 vs 915 MHz is fine');
@@ -187,5 +212,27 @@ test('decline log reports battery % against the drone\'s own airframe, not the f
     const pct = Number(e.msg.match(/\((\d+)% battery\)/)[1]);
     assert.ok(pct <= 100, 'battery % above 100: ' + e.msg);
     assert.strictEqual(pct, Math.round(25 / A.usableWh(X8) * 100), e.msg);
+  }
+});
+
+// The page always passes the relay-radio selector (RFD900x by default), even
+// with the relay wing off. No drone carries that radio, yet the routing span
+// prefilter widened to its range and C2 sent a second broadcast on it when
+// it could not hear the tactical radio — so a page run and its capture replay
+// (which drops the unflown radio) diverged, and an ESP-NOW fleet lost half
+// its deliveries to a radio nobody flies.
+test('a relay radio that no drone flies (wing 0) changes nothing', () => {
+  const run = (radio, extra) => {
+    const s = ctx.makeSwarm(Object.assign({
+      count: 6, airframe: A.AIRFRAMES.find(a => a.id === 'q450'), radio,
+      envFactor: 0.2, shadowSigmaDb: 6.5, targetX: 420, targetY: -160, altitudeM: 60, seed: 77,
+      jammers: [{ x: 210, y: -60, erpDbm: 18, band: 'all', altM: 15, on: true }],
+    }, extra));
+    while (s.time < 90) ctx.stepSwarm(s, 0.05);
+    return s.net.delivered + ' ' + s.drones.map(d => d.x + ',' + d.y).join(';');
+  };
+  for (const radio of [SIK, ESP]) {
+    assert.strictEqual(run(radio, { relayWing: 0, relayAirframe: X8, relayRadio: RFD }), run(radio, {}),
+      radio.id + ' fleet diverged because of an unflown relay radio');
   }
 });

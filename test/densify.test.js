@@ -3,9 +3,10 @@
 // blocks the line, no midpoint ever clears it, so the bisection converged on
 // the building's edge and stacked slots there (city reproduction: 12 slots,
 // 9 of them within 20 m, every drone drafted as a relay, none left for the
-// mission). A single flyable 48 m building under a 50 m flight level is
+// mission). A single flyable 49.5 m building under a 50 m flight level is
 // enough: it is not an obstacle (A* flies straight over it), but with the
-// 5 m clearance it blocks every hop that crosses it.
+// 0.6 F1 Fresnel clearance (~2 m mid-span on a 150 m 915 MHz hop) it blocks
+// every hop that crosses it.
 
 const { test } = require('node:test');
 const assert = require('node:assert');
@@ -18,7 +19,7 @@ function planOver(buildingX) {
   const ctx = loadCore();
   const terrain = ctx.indexBuildings({
     seed: 1, groundAmpM: 0, groundScaleM: 1,
-    buildings: [{ x: buildingX, y: 0, w: 30, d: 30, heightM: 48 }],
+    buildings: [{ x: buildingX, y: 0, w: 30, d: 30, heightM: 49.5 }],
   });
   const s = ctx.makeSwarm({
     terrain, count: 10, seed: 7, altitudeM: 50, envFactor: 1,

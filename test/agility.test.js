@@ -103,3 +103,63 @@ test('uptime accounting: an agile swarm holds the link through jamming longer', 
   assert.ok(upOn >= upOff,
     'agility must never hurt uptime: on=' + upOn.toFixed(1) + '% off=' + upOff.toFixed(1) + '%');
 });
+
+// Audit rf-physics/lpi-cost-not-in-planning: liveMarginDb paid the 3 dB LPI
+// cost but hop planning did not, so a planned hop kept 3 dB less fade reserve
+// and a relay at its own slot sat in the tether's slow band.
+test('LPI cost is in hop planning: the planned hop keeps its full fade reserve', () => {
+  const spanOff = R.usableRangeM(DOODLE, 1) * 0.8;
+  for (const lpi of [false, true]) {
+    const cost = lpi ? AGILITY.lpiCostDb : 0;
+    const s = makeSw({ jammers: [], lpiMode: lpi, deployFrac: 0.8, targetX: spanOff * 2.95, targetY: 0 });
+    s.terrain = ctx.makeTerrain('flat');
+    const [a, b] = s.drones;
+    const hop = R.usableRangeM(DOODLE, 1, cost) * s.deployFrac;
+    a.x = 0; a.y = 0; a.altM = 60;
+    b.x = hop; b.y = 0; b.altM = 60;
+    s._marginCache = null;
+    const live = ctx.liveMarginDb(s, a.id, b.id);
+    assert.ok(Math.abs(live - ctx.plannedHopMarginDb(s, a)) < 1e-9,
+      'LPI ' + lpi + ': live margin ' + live.toFixed(2) + ' dB at the planned hop vs planned ' + ctx.plannedHopMarginDb(s, a).toFixed(2));
+    assert.ok(live >= R.FADE_MARGIN_DB, 'the planned hop must keep the fade reserve, got ' + live.toFixed(2));
+    // The planner spaces the chain on the same range.
+    const plan = ctx.planChain(s);
+    const nodes = [s.base, ...plan.slots, s.target];
+    for (let i = 0; i < nodes.length - 1; i++) {
+      const L = Math.hypot(nodes[i + 1].x - nodes[i].x, nodes[i + 1].y - nodes[i].y);
+      assert.ok(L <= hop + 1e-6, 'LPI ' + lpi + ': planned hop ' + L.toFixed(0) + ' m exceeds ' + hop.toFixed(0) + ' m');
+    }
+  }
+});
+
+// Audit ui-render/aar-ew-line-dangling-separator: agility on a radio that
+// cannot hop printed '**EW waveforms:**  · LPI/LPD ON', or an empty line.
+test('the after-action EW line says when the radio cannot hop, with no dangling separator', () => {
+  const SIK = R.RADIOS.find(r => r.id === 'sik-v3');
+  const ewLine = opts => ctx.afterActionReport(makeSw(Object.assign({ radio: SIK, jammers: [] }, opts)))
+    .split(/\r?\n/).find(l => l.includes('**EW waveforms:**'));
+  for (const lpiMode of [true, false]) {
+    const line = ewLine({ spectrumAgility: true, lpiMode });
+    assert.doesNotMatch(line, /\*\*EW waveforms:\*\*\s+·/, line);
+    assert.doesNotMatch(line, /\*\*EW waveforms:\*\*\s*$/, line);
+    assert.match(line, /no hopping/, line);
+  }
+  assert.match(ewLine({ spectrumAgility: true, lpiMode: true, radio: DOODLE }),
+    /\*\*EW waveforms:\*\* spectrum agility ON \(\+13 dB anti-jam\) · LPI\/LPD ON/);
+  assert.match(ewLine({ lpiMode: true }), /\*\*EW waveforms:\*\* LPI\/LPD ON/);
+});
+
+test('the hop-spacing readout pays the LPI cost: shorter hops, same nominal margin', () => {
+  const { loadUI } = require('./helpers/dom.js');
+  const ui = loadUI();
+  const read = () => {
+    const h = ui.el('spacingInfo').innerHTML;
+    const hop = h.match(/Hops of ([\d.]+) (k?m)/);
+    return { hopM: Number(hop[1]) * (hop[2] === 'km' ? 1000 : 1), marginDb: Number(h.match(/nominal margin <b>(-?[\d.]+) dB/)[1]) };
+  };
+  const off = read();
+  ui.el('lpiChk').checked = true; ui.fire('lpiChk', 'change');
+  const on = read();
+  assert.ok(on.hopM < off.hopM, 'LPI must shorten the planned hop: ' + off.hopM + ' -> ' + on.hopM + ' m');
+  assert.strictEqual(on.marginDb, off.marginDb, 'the shorter hop keeps the same nominal margin');
+});

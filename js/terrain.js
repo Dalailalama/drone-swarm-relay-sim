@@ -10,16 +10,18 @@
 // terrain-following missions. They can't follow a building — anything
 // built taller than their AGL is a no-fly box they steer around.
 
-const LOS_CLEARANCE_M = 5;      // Fresnel-ish breathing room over obstructions
-// LOS is sampled by distance, not a fixed count: spacing must stay below the
-// smallest obstacle or a ray can punch clean through a building that sits
-// between two samples. Buildings (~20 m footprints) need a fine step; open
-// terrain hills are hundreds of metres wide and tolerate a coarse one. A cap
-// bounds cost on very long links (which only occur in building-free terrain).
-const LOS_STEP_BUILDING_M = 8;
+const LOS_CLEARANCE_M = 5;      // flat clearance when no link frequency is given (else 0.6 F1)
+// Terrain LOS is sampled by distance, not a fixed count: spacing must stay
+// below the ground's finest relief or a ray passes under a crest between two
+// samples. The finest of the 4 FBM octaves has a lattice of groundScaleM / 8,
+// so the step is half that, never coarser than 40 m (which alone is only
+// fine once groundScaleM >= ~640 m). Buildings are tested exactly (segment vs
+// box), not sampled. The cap bounds cost on very long links, but never lets
+// the step grow past the finest lattice until the hard limit.
 const LOS_STEP_TERRAIN_M = 40;
 const LOS_SAMPLES_MIN = 12;
 const LOS_SAMPLES_MAX = 160;
+const LOS_SAMPLES_HARD_MAX = 600;
 
 // --- Seeded value noise -------------------------------------------------------
 function hash2(ix, iy, seed) {
@@ -135,17 +137,36 @@ function rayIntersectsAABB(ax, ay, bx, by, minX, maxX, minY, maxY) {
   return { tmin, tmax };
 }
 
+// 0.6 of the first Fresnel radius at fraction f along a span (spanM metres,
+// fMHz): F1 = 17.32 sqrt(d1 d2 / (f_GHz D)) with distances in km. Keeping
+// this much clear over an obstruction keeps the path at free-space loss.
+function fresnelClearM(f, spanM, fMHz) {
+  return 0.6 * 17.32 * Math.sqrt(Math.max(0, f * (1 - f)) * (spanM / 1000) / (fMHz / 1000));
+}
+
 // True if the ray from A (absolute altitude aAltM) to B clips ground or a
-// building anywhere along the way. The Fresnel clearance requirement tapers
-// to zero at the endpoints — a ray naturally grazes the ground right at its
-// own antenna, and demanding full clearance there would deafen any
-// ground-level station.
-function losBlocked(t, ax, ay, aAltM, bx, by, bAltM) {
+// building anywhere along the way. The clearance tapers to zero at the
+// endpoints — a ray naturally grazes the ground right at its own antenna,
+// and demanding full clearance there would deafen any ground-level station.
+// With the link frequency (fMHz) the clearance is 0.6 of the first Fresnel
+// zone; without it, a legacy flat 5 m trapezoid. The test stays binary: the
+// up-to-6 dB of diffraction loss of a partly cleared zone is not modelled.
+function losBlocked(t, ax, ay, aAltM, bx, by, bAltM, fMHz) {
   if (!t || (!t.groundAmpM && (!t.buildings || !t.buildings.length))) return false;
+
+  let clearAt, maxClear;
+  if (Number.isFinite(fMHz) && fMHz > 0) {
+    const spanM = Math.hypot(bx - ax, by - ay, bAltM - aAltM);
+    clearAt = f => fresnelClearM(f, spanM, fMHz);
+    maxClear = fresnelClearM(0.5, spanM, fMHz);
+  } else {
+    clearAt = f => LOS_CLEARANCE_M * Math.min(1, 6 * f, 6 * (1 - f));
+    maxClear = LOS_CLEARANCE_M;
+  }
 
   const minRayAlt = Math.min(aAltM, bAltM);
   // O5: If ray altitude at both endpoints is strictly above highest roof and highest ground, it cannot clip
-  if (t._maxRoofAlt != null && minRayAlt > t._maxRoofAlt + LOS_CLEARANCE_M && minRayAlt > (t.groundAmpM || 0) + LOS_CLEARANCE_M) {
+  if (t._maxRoofAlt != null && minRayAlt > t._maxRoofAlt + maxClear && minRayAlt > (t.groundAmpM || 0) + maxClear) {
     return false;
   }
 
@@ -190,7 +211,7 @@ function losBlocked(t, ax, ay, aAltM, bx, by, bAltM) {
         const bAlt = terrainGroundAt(t, b.x, b.y) + b.heightM;
         for (const f of fPoints) {
           const rayAlt = aAltM + (bAltM - aAltM) * f;
-          const clearance = LOS_CLEARANCE_M * Math.min(1, 6 * f, 6 * (1 - f));
+          const clearance = clearAt(f);
           if (bAlt + clearance >= rayAlt) return true;
         }
       }
@@ -200,14 +221,16 @@ function losBlocked(t, ax, ay, aAltM, bx, by, bAltM) {
   // Terrain heightfield sampling
   if (t.groundAmpM > 0) {
     const rayLen = Math.hypot(bx - ax, by - ay);
-    const stepM = LOS_STEP_TERRAIN_M;
-    const n = Math.max(LOS_SAMPLES_MIN, Math.min(LOS_SAMPLES_MAX, Math.ceil(rayLen / stepM)));
+    const lattice = t.groundScaleM / 8; // finest FBM octave
+    const stepM = Math.min(LOS_STEP_TERRAIN_M, lattice / 2);
+    const nCap = Math.min(LOS_SAMPLES_HARD_MAX, Math.max(LOS_SAMPLES_MAX, Math.ceil(rayLen / lattice)));
+    const n = Math.max(LOS_SAMPLES_MIN, Math.min(nCap, Math.ceil(rayLen / stepM)));
     for (let i = 1; i <= n; i++) {
       const f = i / (n + 1);
       const x = ax + (bx - ax) * f;
       const y = ay + (by - ay) * f;
       const rayAlt = aAltM + (bAltM - aAltM) * f;
-      const clearance = LOS_CLEARANCE_M * Math.min(1, 6 * f, 6 * (1 - f));
+      const clearance = clearAt(f);
       if (terrainGroundAt(t, x, y) + clearance >= rayAlt) return true;
     }
   }
@@ -362,6 +385,6 @@ function makeTerrain(name, opts) {
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     terrainGroundAt, terrainHeightAt, buildingAt, buildingsNear, losBlocked, makeTerrain,
-    indexBuildings, fbm, valueNoise, LOS_CLEARANCE_M,
+    indexBuildings, fbm, valueNoise, LOS_CLEARANCE_M, fresnelClearM,
   };
 }

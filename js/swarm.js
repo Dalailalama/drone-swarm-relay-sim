@@ -81,8 +81,13 @@ function plannedHopMarginDb(s, d) {
   // Per-drone: a heterogeneous fleet plans each unit's hop against the radio
   // THAT UNIT flies — the tactical edge is shorter-legged than the wing.
   const r = (d && droneRadio(d)) || s.radio;
-  return linkMarginDb(r, s.envFactor, usableRangeM(r, s.envFactor) * s.deployFrac);
+  const extra = planLossDb(s);
+  return linkMarginDb(r, s.envFactor, usableRangeM(r, s.envFactor, extra) * s.deployFrac) - extra;
 }
+
+// Fixed budget cost every live link pays right now (liveMarginDb): the LPI
+// waveform's. Hop planning spaces relays against the same budget.
+function planLossDb(s) { return s.lpiMode ? AGILITY.lpiCostDb : 0; }
 
 const COVERAGE = {
   deadLogIntervalSec: 5,  // while disconnected, log a dead-zone sample this often
@@ -185,6 +190,7 @@ function makeDrone(x, y, target, rng, airframe, radio, cls) {
 
 function makeSwarm(opts) {
   droneSeq = 0;
+  const wingOn = !!(opts.relayWing > 0 && opts.relayAirframe && opts.relayRadio);
   const s = {
     base: {
       x: (opts.base && opts.base.x != null) ? opts.base.x : (opts.baseX != null ? opts.baseX : 0),
@@ -207,10 +213,11 @@ function makeSwarm(opts) {
     shadowSigmaDb: opts.shadowSigmaDb || 0,
     // Heterogeneous fleet (js/fleet.js): relayWing drones carry the heavy
     // radio + endurance airframe and hold the chain; the rest fly tactical.
-    relayAirframe: opts.relayAirframe || null,
-    relayRadio: opts.relayRadio || null,
-    relayIdx: (opts.relayWing > 0 && opts.relayAirframe && opts.relayRadio)
-      ? relayClassIndices(opts.count, opts.relayWing) : [],
+    // Only a flown wing has them: the page passes its selectors even with the
+    // wing off, and an unflown radio must not widen routing or draw airtime.
+    relayAirframe: wingOn ? opts.relayAirframe : null,
+    relayRadio: wingOn ? opts.relayRadio : null,
+    relayIdx: wingOn ? relayClassIndices(opts.count, opts.relayWing) : [],
     terrain: opts.terrain || makeTerrain('flat'),
     jammers: opts.jammers ? opts.jammers.map(j => ({ ...j })) : [],
     gpsZones: opts.gpsZones ? opts.gpsZones.map(z => ({ ...z })) : [],
@@ -466,7 +473,7 @@ function planChain(s) {
   const worldKey = planWorldKey(s);
   if (cached && !cached.feasible && cached.worldKey === worldKey && s.time - cached.at < PLAN.failedHoldSec) return cached;
 
-  const usable = Math.min(usableRangeM(chainRadio(s), s.envFactor), radioHorizonM(C2_ANTENNA_M, s.altitudeM));
+  const usable = Math.min(usableRangeM(chainRadio(s), s.envFactor, planLossDb(s)), radioHorizonM(C2_ANTENNA_M, s.altitudeM));
   const span = usable * s.deployFrac;
   // The search box must be wide enough to route AROUND the widest denial zone,
   // otherwise A* can't find a detour and the chain fails through it.
@@ -635,7 +642,7 @@ function planChain(s) {
   // Without this the chain "closes" on paper over wing-radio hops and then
   // can't hand off to short-range mission drones at all.
   if (s.relayIdx && s.relayIdx.length) {
-    const tactReach = usableRangeM(s.radio, s.envFactor) * s.deployFrac * 0.9;
+    const tactReach = usableRangeM(s.radio, s.envFactor, planLossDb(s)) * s.deployFrac * 0.9;
     if (pathLen > tactReach) {
       const arcs = [];
       const nEven = kSlots + 1;
@@ -668,7 +675,7 @@ function planChain(s) {
       // than by its length never clears, and splitting it again and again
       // stacked slots at the building's edge (#15).
       if (dist2d(a, b) < 4 * DRONE.separationM) continue;
-      if (losBlocked(s.terrain, a.x, a.y, altOf(a, i === 0), b.x, b.y, altOf(b, false))) {
+      if (losBlocked(s.terrain, a.x, a.y, altOf(a, i === 0), b.x, b.y, altOf(b, false), chainRadio(s).freqMHz)) {
         const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
         slots.splice(i === 0 ? 0 : i, 0, mid); // insert between a and b
         inserted = true;
@@ -825,6 +832,10 @@ function clampStepToBuildings(s, d, dt) {
 // demodulates below the interference, so its requirement is negative.
 const JAM_SNR_OFFSET_DB = 10;
 function jamSirDb(r) { return r && r.jamSirDb != null ? r.jamSirDb : JAM_SNR_OFFSET_DB; }
+// A source's `erpDbm` is ERP (referenced to a half-wave dipole); path loss
+// here is isotropic, so convert to EIRP first. The receiver then hears it
+// through its own antenna, exactly like a signal (txDbm + G_tx + G_rx - PL).
+const ERP_TO_EIRP_DB = 2.15;
 
 // One band representation everywhere (review finding #20): a jammer's band
 // may arrive as a number (MHz), a numeric string, 'all', or a legacy name.
@@ -870,11 +881,14 @@ function agilityGainDb(s, radio) {
 // Elevated noise floor (dBm, in sensitivity-equivalent terms) that all active
 // interference sources impose on a receiver at rxPos/rxAlt. -Infinity if none.
 // rxRadio carries the receiver's anti-jam capability (spectrum agility).
-function interferenceFloorDbm(s, rxPos, rxAlt, rxRadio) {
+// nOverride is a link's shared exponent (channelExponent), so on a mixed link
+// the jammer and the partner's signal cross the air by one law; without it
+// the receiver's own fit applies (the per-position spectrum survey).
+function interferenceFloorDbm(s, rxPos, rxAlt, rxRadio, nOverride) {
   const jams = s.jammers;
   if (!jams || !jams.length) return -Infinity;
   const rad = rxRadio || s.radio;
-  const n = pathLossExponent(rad);
+  const n = nOverride != null ? nOverride : pathLossExponent(rad);
   const pl1 = refLossDb(rad); // calibrated presets: the measured channel, not free space
   const gainDb = agilityGainDb(s, rad);
   let lin = 0;
@@ -884,10 +898,10 @@ function interferenceFloorDbm(s, rxPos, rxAlt, rxRadio) {
     if (Number.isNaN(jf) || (jf != null && Math.abs(jf - rad.freqMHz) > 150)) continue; // out of band
     const ground = Math.hypot(rxPos.x - j.x, rxPos.y - j.y);
     const jAlt = terrainGroundAt(s.terrain, j.x, j.y) + (j.altM || 15);
-    if (losBlocked(s.terrain, j.x, j.y, jAlt, rxPos.x, rxPos.y, rxAlt)) continue; // terrain shadows it
+    if (losBlocked(s.terrain, j.x, j.y, jAlt, rxPos.x, rxPos.y, rxAlt, rad.freqMHz)) continue; // terrain shadows it
     const slant = Math.hypot(ground, jAlt - rxAlt);
     const pl = pl1 + 10 * n * Math.log10(Math.max(1, slant / s.envFactor));
-    lin += Math.pow(10, (j.erpDbm - gainDb - pl) / 10);
+    lin += Math.pow(10, (j.erpDbm + ERP_TO_EIRP_DB + rad.antGainDbi - gainDb - pl) / 10);
   }
   return lin > 0 ? 10 * Math.log10(lin) + jamSirDb(rad) : -Infinity;
 }
@@ -895,23 +909,32 @@ function interferenceFloorDbm(s, rxPos, rxAlt, rxRadio) {
 // How much interference degrades this link, in dB (>=0). Each end's floor is
 // compared against THAT end's own sensitivity; the worst end wins. Radios ra
 // and rb are the transmit-side radios of each node (their receivers share the
-// hardware), or null for swarm-wide defaults.
+// hardware), or null for swarm-wide defaults. Evaluated per link (the link's
+// shared exponent), not as a per-position field.
 function interferencePenaltyDb(s, aPos, aAlt, bPos, bAlt, ra, rb) {
   if (!s.jammers || !s.jammers.length) return 0;
   const rA = ra || s.radio, rB = rb || s.radio;
-  const fa = interferenceFloorDbm(s, aPos, aAlt, rA);
-  const fb = interferenceFloorDbm(s, bPos, bAlt, rB);
-  return Math.max(0,
-    isNaN(fa) ? -Infinity : fa - rA.sensDbm,
-    isNaN(fb) ? -Infinity : fb - rB.sensDbm);
+  const n = channelExponent(rA, rB);
+  const fa = interferenceFloorDbm(s, aPos, aAlt, rA, n);
+  const fb = interferenceFloorDbm(s, bPos, bAlt, rB, n);
+  return Math.max(floorPenaltyDb(fa, rA), floorPenaltyDb(fb, rB));
 }
 
-// The same penalty for one receiver: its floor against its own sensitivity.
-function endPenaltyDb(s, pos, alt, radio) {
+// The same penalty for one receiver: its floor against its own sensitivity
+// (n: the link's shared exponent, when the receiver is one end of a link).
+function endPenaltyDb(s, pos, alt, radio, n) {
   if (!s.jammers || !s.jammers.length) return 0;
   const r = radio || s.radio;
-  const f = interferenceFloorDbm(s, pos, alt, r);
-  return Math.max(0, isNaN(f) ? -Infinity : f - r.sensDbm);
+  return floorPenaltyDb(interferenceFloorDbm(s, pos, alt, r, n), r);
+}
+
+// Noise and interference add in power: the effective sensitivity is
+// 10log10(10^(S/10) + 10^(F/10)), so the penalty is 10log10(1 + 10^((F-S)/10)):
+// 3.01 dB where the floor equals sensitivity (the drawn red-zone edge), and
+// never exactly 0 while a source is heard. No floor (or NaN) costs nothing.
+function floorPenaltyDb(f, r) {
+  if (!(f > -Infinity)) return 0;
+  return 10 * Math.log10(1 + Math.pow(10, (f - r.sensDbm) / 10));
 }
 
 // Is a position inside a denial zone — i.e. would a relay's receiver there be
@@ -936,7 +959,8 @@ function maxDenialRadiusM(s) {
 }
 
 // Radius at which a single source raises the floor to the radio's sensitivity
-// (flat-ground estimate) — the visible "denied zone" for the current radio,
+// (a 3 dB link penalty, as in inDenialZone; flat-ground estimate) — the
+// visible "denied zone" for the current radio,
 // shrunk by whatever anti-jam rejection that radio enjoys right now.
 function jammerDenialRadiusM(s, j) {
   if (j.on === false) return 0;
@@ -947,7 +971,7 @@ function jammerDenialRadiusM(s, j) {
   const jf = jammerFreqMHz(j);
   if (Number.isNaN(jf) || (jf != null && Math.abs(jf - r.freqMHz) > 150)) return 0;
   const n = pathLossExponent(r);
-  const eff = j.erpDbm - agilityGainDb(s, r);
+  const eff = j.erpDbm + ERP_TO_EIRP_DB + r.antGainDbi - agilityGainDb(s, r);
   const exp = (eff - refLossDb(r) + jamSirDb(r) - r.sensDbm) / (10 * n);
   return s.envFactor * Math.pow(10, exp);
 }
@@ -982,16 +1006,17 @@ function liveMarginDb(s, aId, bId) {
     if (s && s._marginCache) s._marginCache.set(cacheKey, -Infinity);
     return -Infinity;
   }
-  if (losBlocked(s.terrain, a.x, a.y, altA, b.x, b.y, altB)) {
-    if (s && s._marginCache) s._marginCache.set(cacheKey, -Infinity);
-    return -Infinity;
-  }
-  // Mixed fleets: each end transmits with its own radio's power, antenna and
-  // calibrated path-loss curve; the link carries the worse direction (js/fleet.js).
+  // Mixed fleets: each end transmits with its own radio's power and antenna
+  // over the link's shared exponent; the link carries the worse direction (js/fleet.js).
   // C2 pairs with the far end's radio (the ground station flies a matched
   // companion unit for every type in the field).
   const ra = (aId === 'C2' ? droneRadio(b) : droneRadio(a)) || s.radio;
   const rb = (bId === 'C2' ? droneRadio(a) : droneRadio(b)) || s.radio;
+  // Fresnel clearance at the lower frequency: the larger, conservative zone.
+  if (losBlocked(s.terrain, a.x, a.y, altA, b.x, b.y, altB, Math.min(ra.freqMHz, rb.freqMHz))) {
+    if (s && s._marginCache) s._marginCache.set(cacheKey, -Infinity);
+    return -Infinity;
+  }
   const slant = Math.hypot(ground, altA - altB);
   // LPI/LPD waveform: pay a fixed link-budget cost for the spread spectrum.
   const lpiCost = s.lpiMode ? AGILITY.lpiCostDb : 0;
@@ -1002,7 +1027,8 @@ function liveMarginDb(s, aId, bId) {
   let res;
   if (!bandCompatible(ra, rb)) res = -Infinity;
   else {
-    const pa = endPenaltyDb(s, a, altA, ra), pb = endPenaltyDb(s, b, altB, rb);
+    const nCh = channelExponent(ra, rb); // the jammer crosses the same air as the partner
+    const pa = endPenaltyDb(s, a, altA, ra, nCh), pb = endPenaltyDb(s, b, altB, rb, nCh);
     res = Math.min(
       rssiDirectionalDb(ra, rb, s.envFactor, slant) - rb.sensDbm + fade - lpiCost - pb,
       rssiDirectionalDb(rb, ra, s.envFactor, slant) - ra.sensDbm + fade - lpiCost - pa);
@@ -1020,7 +1046,7 @@ function liveMarginDb(s, aId, bId) {
 // god-view needed.
 function corridorGoal(s, d, g) {
   if (!s.corridorRouting) return g;
-  const hop = usableRangeM(droneRadio(d) || s.radio, s.envFactor) * 0.8;
+  const hop = usableRangeM(droneRadio(d) || s.radio, s.envFactor, planLossDb(s)) * 0.8;
   if (dist2d(d, g) <= hop) return g;                    // final hop: go direct
   const B = s.base, T = d.order.target;
   const L = dist2d(B, T);
@@ -1201,7 +1227,7 @@ function c2Step(s) {
   // distance. Hop span stays capped by the radio horizon at altitude, and is
   // sized to whatever radio holds the slots (relay wing in a mixed fleet).
   const usable = Math.min(
-    usableRangeM(chainRadio(s), s.envFactor),
+    usableRangeM(chainRadio(s), s.envFactor, planLossDb(s)),
     radioHorizonM(C2_ANTENNA_M, s.altitudeM));
   const plan = planChain(s);
   const k = s.c2.relays.length;
@@ -2199,7 +2225,7 @@ function stepAdversaries(s, dt) {
           const dist = dist2d(j, p);
           const maxDetectRange = j.detectRangeM || Math.max(4000, usableRangeM(rad, s.envFactor) * 2.5);
           if (bandOk && dist <= maxDetectRange &&
-              !losBlocked(s.terrain, j.x, j.y, jAlt, p.x, p.y, nodeAltAbsM(s, id, p))) {
+              !losBlocked(s.terrain, j.x, j.y, jAlt, p.x, p.y, nodeAltAbsM(s, id, p), rad.freqMHz)) {
             const bearing = Math.atan2(p.y - j.y, p.x - j.x) + gaussian(s.net.rng) * 0.03; // ~1.7° error
             fix = { x: j.x + dist * Math.cos(bearing), y: j.y + dist * Math.sin(bearing), age: t };
           }
@@ -2332,10 +2358,13 @@ function afterActionReport(s) {
   L.push('- **Interference sources:** ' + activeJam + (activeJam ? ' active (RF denial in play)' : ' (clean spectrum)'));
   if (s.spectrumAgility || s.lpiMode) {
     const r = chainRadio(s);
-    L.push('- **EW waveforms:** ' +
-      (s.spectrumAgility && r.hopGainDb ? 'spectrum agility ON (+' + r.hopGainDb + ' dB anti-jam)' : '') +
-      (s.spectrumAgility && s.lpiMode ? ' · ' : '') +
-      (s.lpiMode ? 'LPI/LPD ON (\u2212' + AGILITY.lpiCostDb + ' dB budget, +' + AGILITY.lpiDenyReductionDb + ' dB denial rejection)' : ''));
+    const ew = [];
+    if (s.spectrumAgility) {
+      ew.push(r.hopGainDb ? 'spectrum agility ON (+' + r.hopGainDb + ' dB anti-jam)'
+        : 'spectrum agility requested, but ' + r.name + ' has no hopping capability');
+    }
+    if (s.lpiMode) ew.push('LPI/LPD ON (\u2212' + AGILITY.lpiCostDb + ' dB budget, +' + AGILITY.lpiDenyReductionDb + ' dB denial rejection)');
+    L.push('- **EW waveforms:** ' + ew.join(' · '));
   }
   const gpsZ = (s.gpsZones || []).filter(z => z.on !== false).length;
   if (gpsZ) {

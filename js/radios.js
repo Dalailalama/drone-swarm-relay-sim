@@ -16,7 +16,7 @@ const RADIOS = [
     antGainDbi: 2,        // stock duck antenna, each end
     airRateKbps: 64,
     rangeLosM: 300,       // Holybro spec: ~300 m with stock antennas
-    note: 'The default MAVLink telemetry radio. Cheap (~$40/pair), 300 m stock — antenna upgrades stretch it to a few km.',
+    note: 'The default MAVLink telemetry radio. Cheap (~$60/pair, Holybro list price), 300 m stock — antenna upgrades stretch it to a few km.',
     source: 'https://docs.holybro.com/radio/sik-telemetry-radio-v3',
   },
   {
@@ -41,7 +41,7 @@ const RADIOS = [
     sensDbm: -98,         // at 1 Mbps
     antGainDbi: 2,
     airRateKbps: 1000,
-    rangeLosM: 300,       // community open-field tests: ~200-480 m
+    rangeLosM: 300,       // community open-field tests: ~200-480 m (Espressif: 200 m)
     note: 'Hobby-swarm favorite: a $5 chip on every drone, connectionless broadcast, trivially meshes. Short legs though.',
     source: 'https://www.espressif.com/en/solutions/low-power-solutions/esp-now',
   },
@@ -51,10 +51,10 @@ const RADIOS = [
     freqMHz: 2400,
     air: 'elrs',
     txDbm: 20,
-    sensDbm: -108,        // SX1280 LoRa mode, 150 Hz packet rate
+    sensDbm: -108,        // SX1280 LoRa mode, 250 Hz packet rate (150 Hz: -112 dBm)
     antGainDbi: 2,
-    airRateKbps: 5,       // usable MAVLink telemetry throughput, not RF rate
-    rangeLosM: 10000,     // routinely proven 10+ km at 100 mW / 150 Hz
+    airRateKbps: 7,       // MAVLink at 250 Hz: ~590 B/s down + ~300 B/s up, not RF rate
+    rangeLosM: 10000,     // routinely proven 10+ km at 100 mW / 250 Hz
     hopGainDb: 12,        // estimate: FHSS across the band — inherent jam resistance
     note: 'RC-control link repurposed for C2. Astonishing range per milliwatt, frequency-hopping by design, but only a few kbps of telemetry fits through.',
     source: 'https://www.expresslrs.org/info/signal-health/',
@@ -80,7 +80,7 @@ const RADIOS = [
   {
     id: 'xbee900',
     name: 'XBee-PRO 900HP',
-    freqMHz: 900,
+    freqMHz: 915,         // 902-928 MHz band centre
     air: 'digimesh',
     txDbm: 24,            // 250 mW
     sensDbm: -101,        // at 200 kbps
@@ -192,15 +192,17 @@ function linkMarginDb(radio, envFactor, dMetres) {
 
 // Usable planning range: where margin hits the fade reserve (default 6 dB —
 // you never plan a link at 0 dB margin; multipath fading will drop it).
+// extraLossDb is any fixed budget cost the live link also pays (the LPI
+// waveform's), so planned hops keep the full reserve.
 const FADE_MARGIN_DB = 6;
 
-function usableRangeM(radio, envFactor) {
+function usableRangeM(radio, envFactor, extraLossDb = 0) {
   const n = pathLossExponent(radio);
   if (radio.refPowerDbm != null) {
-    const d = Math.pow(10, (radio.refPowerDbm - radio.sensDbm - FADE_MARGIN_DB) / (10 * n));
+    const d = Math.pow(10, (radio.refPowerDbm - radio.sensDbm - FADE_MARGIN_DB - extraLossDb) / (10 * n));
     return d * envFactor;
   }
-  const budget = radio.txDbm + 2 * radio.antGainDbi - radio.sensDbm - FADE_MARGIN_DB;
+  const budget = radio.txDbm + 2 * radio.antGainDbi - radio.sensDbm - FADE_MARGIN_DB - extraLossDb;
   const d = Math.pow(10, (budget - pl1m(radio.freqMHz)) / (10 * n));
   return d * envFactor;
 }
@@ -220,7 +222,9 @@ function radioHorizonM(h1M, h2M) {
 
 // Probability a single packet transmission succeeds, given the link's mean
 // margin above sensitivity. Logistic curve: ~16% at 0 dB, 50% at 2 dB,
-// ~95% at 6 dB — the reason nobody plans a link at 0 dB margin.
+// ~97% at 6 dB — the reason nobody plans a link at 0 dB margin. Datasheet
+// sensitivity is quoted at a low error rate, so this is pessimistic at 0 dB:
+// the rated range (margin 0) is the model's ~84%-loss edge (RADIOS.md).
 function pktSuccessProb(marginDb) {
   return 1 / (1 + Math.exp(-(marginDb - 2) / 1.2));
 }
