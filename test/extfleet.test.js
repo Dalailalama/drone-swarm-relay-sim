@@ -122,3 +122,36 @@ test('land-not-resent-browser-stuck: a landing the bridge reports failed is surf
   assert.notStrictEqual(lands[1].requestId, land.requestId, 'a retry needs a fresh request id');
   assert.strictEqual(ui.ctx.ExternalMode.services[d.id].phase, 'landing');
 });
+
+test('reinit-adopts-swapped-vehicle: a vehicle the bridge kept parked already swapped is grounded in the rebuilt swarm and relaunched', () => {
+  // PROTOCOL.md §3.1 init: the browser picks a parked service up (phases
+  // landing to swapped) and finishes it. One parked in 'swapped' (the swap
+  // was completed, only the relaunch was left) stayed 'ok' in the sim, was
+  // never grounded, and so its relaunch was never requested.
+  const ui = loadUI();
+  const s = ui.ctx.sim.swarm;
+  const ws = connect(ui);
+  const d = s.drones[0];
+  let seq = 0;
+  const frame = (over) => ws.onmessage({ data: JSON.stringify({ type: 'telemetry', t: s.time, vehicles: [{
+    id: d.id, x: 0, y: 0, alt: 0, connected: true, armed: false, landed: true, landedAge: 0, heartbeatAge: 0,
+    positionAge: 0, ready: false, serviceId: '9', ...over, positionSeq: ++seq, landedSeq: seq }] }) });
+  frame({ state: 'swapped', servicePhase: 'swapped' });
+  ui.ctx.stepSwarm(s, 0.25);
+  assert.strictEqual(ui.ctx.ExternalMode.services[d.id].phase, 'swapped');
+  assert.strictEqual(d.mode, 'landed', 'a vehicle parked on the pad is not flying in the sim');
+  for (let i = 0; i < (ui.ctx.BATTERY.swapSec + 5) * 4 && !services(ws, 'relaunch').length; i++) {
+    ui.ctx.__clock.ms += 250;
+    frame({ state: 'swapped', servicePhase: 'swapped' });
+    ui.ctx.stepSwarm(s, 0.25);
+  }
+  const relaunch = services(ws, 'relaunch');
+  assert.strictEqual(relaunch.length, 1, 'relaunch not requested');
+  assert.strictEqual(relaunch[0].requestId, '9', 'the handshake continues under the bridge\'s request id');
+  assert.strictEqual(services(ws, 'complete').length, 0, 'the swap the bridge already completed is not repeated');
+  ws.onmessage({ data: JSON.stringify({ type: 'service_ack', id: d.id, requestId: '9', action: 'relaunch', accepted: true }) });
+  frame({ alt: 60, armed: true, landed: false, ready: true, state: 'ready', servicePhase: null });
+  ui.ctx.stepSwarm(s, 0.25);
+  assert.strictEqual(ui.ctx.ExternalMode.services[d.id], undefined);
+  assert.strictEqual(d.mode, 'ok', 'the relaunched vehicle is back in the fleet');
+});

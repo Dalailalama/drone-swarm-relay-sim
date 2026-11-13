@@ -169,9 +169,12 @@
     return false;
   }
 
+  // Parked for battery service: swapping, or swapped and waiting for the
+  // relaunch — where a rebuilt swarm can pick a vehicle up, and must ground
+  // it too, or the relaunch that ends the swap is never asked for.
   function externalServiceGrounded(id) {
     const svc = ExternalMode.services[id], t = ExternalMode.telem[id];
-    return svc && t && svc.id === t.serviceId && t.state === 'swapping' && grounded(id);
+    return svc && t && svc.id === t.serviceId && (t.state === 'swapping' || t.state === 'swapped') && grounded(id);
   }
 
   function externalServiceComplete(s, d) {
