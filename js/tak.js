@@ -154,7 +154,7 @@ function buildCotFromSwarm(s, anchor, nowSec, uidPrefix) {
     const r = jammerDenialRadiusM(s, j);
     if (!(r > 0)) continue;
     put(pre + j.id, TAK_TYPES.hazard, j.x, j.y,
-      haeOf(groundAt(j.x, j.y) + (j.altM || 0)), 'RF DENIAL ' + j.id.replace('JX-', ''),
+      haeOf(groundAt(j.x, j.y) + (j.altM ?? JAMMER_DEFAULT_ALT_M)), 'RF DENIAL ' + j.id.replace('JX-', ''),
       { radiusM: r, remarks: 'denial ~' + Math.round(r) + ' m @ ' + j.erpDbm + ' dBm', staleSec: 60 });
   }
   for (const z of (s.gpsZones || [])) {

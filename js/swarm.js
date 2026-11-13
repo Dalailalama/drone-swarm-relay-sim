@@ -896,6 +896,11 @@ function jamSirDb(r) { return r && r.jamSirDb != null ? r.jamSirDb : JAM_SNR_OFF
 // here is isotropic, so convert to EIRP first. The receiver then hears it
 // through its own antenna, exactly like a signal (txDbm + G_tx + G_rx - PL).
 const ERP_TO_EIRP_DB = 2.15;
+// Antenna height (m above ground) of a source that names no altM: the mast
+// makeJammer gives an operator-placed source. The interference floor, a
+// red-team hunter's DF receiver and the TAK hazard mark all read this one
+// default (they used 15, 2 and 0 m), and an explicit altM of 0 stays 0.
+const JAMMER_DEFAULT_ALT_M = 15;
 
 // One band representation everywhere (review finding #20): a jammer's band
 // may arrive as a number (MHz), a numeric string, 'all', or a legacy name.
@@ -958,7 +963,7 @@ function interferenceFloorDbm(s, rxPos, rxAlt, rxRadio, nOverride, jamList) {
     const jf = jammerFreqMHz(j);
     if (Number.isNaN(jf) || (jf != null && Math.abs(jf - rad.freqMHz) > 150)) continue; // out of band
     const ground = Math.hypot(rxPos.x - j.x, rxPos.y - j.y);
-    const jAlt = terrainGroundAt(s.terrain, j.x, j.y) + (j.altM || 15);
+    const jAlt = terrainGroundAt(s.terrain, j.x, j.y) + (j.altM ?? JAMMER_DEFAULT_ALT_M);
     if (losBlocked(s.terrain, j.x, j.y, jAlt, rxPos.x, rxPos.y, rxAlt, rad.freqMHz)) continue; // terrain shadows it
     const slant = Math.hypot(ground, jAlt - rxAlt);
     const pl = pl1 + 10 * n * Math.log10(Math.max(1, slant / s.envFactor));
@@ -1063,7 +1068,7 @@ function jammerDenialRadiusM(s, j) {
 let jammerSeq = 0;
 function makeJammer(x, y, erpDbm) {
   jammerSeq += 1;
-  return { id: 'JX-' + jammerSeq, x, y, erpDbm: erpDbm != null ? erpDbm : 10, band: 'all', altM: 15, on: true };
+  return { id: 'JX-' + jammerSeq, x, y, erpDbm: erpDbm != null ? erpDbm : 10, band: 'all', altM: JAMMER_DEFAULT_ALT_M, on: true };
 }
 
 function liveMarginDb(s, aId, bId) {
@@ -2413,7 +2418,7 @@ function stepAdversaries(s, dt) {
   for (const j of s.jammers) {
     if (j.on === false) continue;
     const contacts = [];
-    const jAlt = terrainGroundAt(s.terrain, j.x, j.y) + (j.altM != null ? j.altM : 2);
+    const jAlt = terrainGroundAt(s.terrain, j.x, j.y) + (j.altM ?? JAMMER_DEFAULT_ALT_M);
     // A DF fix is a MEASUREMENT: taken once, at the emission, and kept as
     // taken (finding #20). Re-deriving bearings from the emitter's live
     // position every tick let a hunter track targets that had gone silent.
