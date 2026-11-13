@@ -3,6 +3,9 @@
 //      rebuilt every bridge vehicle and armed one parked mid battery swap.
 //      The bridge now keeps it parked; the rebuilt swarm, whose service
 //      records were wiped, must pick the bridge's service up and finish it.
+//  cli-count-ghost-drones: `bridge.py --count 3` under a 10-drone swarm left
+//      7 drones with no vehicle alive at the base, planned as relays, while
+//      the status said every vehicle was ready.
 const { test } = require('node:test');
 const assert = require('node:assert');
 const { loadUI } = require('./helpers/dom.js');
@@ -55,4 +58,27 @@ test('reinit-rearms-parked-vehicle: a vehicle the bridge kept parked mid-swap th
   assert.strictEqual(ui.ctx.ExternalMode.services[d.id], undefined);
   assert.strictEqual(d.mode, 'ok', 'the relaunched vehicle is back in the fleet');
   assert.ok(ui.ctx.ExternalMode.serviceSeq >= 7, 'later request ids must not reuse the adopted one');
+});
+
+test('cli-count-ghost-drones: drones the bridge has no vehicle for go down, are never relays, and readiness reads 3/N', () => {
+  const ui = loadUI();
+  const s = ui.ctx.sim.swarm;
+  const n = s.drones.length;
+  assert.ok(n > 3, 'needs more drones than the bridge has vehicles');
+  const real = ['DR-1', 'DR-2', 'DR-3'];
+  const ws = connect(ui, real);
+  for (let i = 1; i <= 120; i++) { // 12 s of telemetry for the three real vehicles only
+    ws.onmessage({ data: JSON.stringify({ type: 'telemetry', t: i / 10, vehicles: real.map((id, k) => ({
+      id, x: 30 * (k + 1), y: 0, alt: 60, connected: true, armed: true, ready: true, state: 'ready',
+      positionSeq: i, positionAge: 0.05, heartbeatAge: 0.05 })) }) });
+    ui.ctx.__raf.pump(100);
+  }
+  const ghosts = s.drones.filter(d => !real.includes(d.id));
+  const up = ghosts.filter(d => d.mode !== 'dead').map(d => d.id);
+  assert.strictEqual(up.length, 0, 'drones with no vehicle on the bridge still in the fleet: ' + up);
+  assert.ok(s.events.some(e => e.msg === ghosts[0].id + ' has no vehicle on the bridge — marking down'));
+  const relays = s.drones.filter(d => ui.ctx.alive(d) && d.order && d.order.role === 'relay').map(d => d.id);
+  assert.ok(relays.every(id => real.includes(id)), 'relay roles held by drones with no vehicle: ' + relays);
+  assert.ok(real.every(id => ui.ctx.alive(s.drones.find(d => d.id === id))), 'the real vehicles stay up');
+  assert.ok(ui.ctx.ExternalMode.status.includes('(3/' + n + ' confirmed ready)'), ui.ctx.ExternalMode.status);
 });

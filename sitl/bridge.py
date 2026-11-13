@@ -1228,6 +1228,11 @@ async def handle_init(websocket, msg: dict, cli_count: Optional[int], base_port:
         count = max(0, min(requested, MAX_VEHICLES))
         if requested > MAX_VEHICLES:
             await send_status(websocket, f"bridge: requested {requested} vehicles exceeds limit {MAX_VEHICLES}; clamping")
+        asked = msg.get("count")
+        if cli_count is not None and isinstance(asked, int) and not isinstance(asked, bool) and asked != count:
+            # Say so: the sim's drones beyond the bridge's fleet have no vehicle.
+            await send_status(websocket, f"bridge: --count {cli_count} overrides the {asked} vehicles this init "
+                                         f"asked for; only {count} exist")
         alt = float(msg.get("alt", 50))
         supplied_origin = msg.get("origin", {"frame": "common-local-origin", "x": 0.0, "y": 0.0, "groundM": 0.0})
         if not isinstance(supplied_origin, dict) or supplied_origin.get("frame") != "common-local-origin":

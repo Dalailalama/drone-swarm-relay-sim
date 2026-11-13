@@ -438,10 +438,11 @@ class Harness:
         bridge.client_connected(ws)
         return ws
 
-    def init(self, ws: FakeWebsocket, count: int, alt: float, base_port: int = 14550) -> asyncio.Task:
+    def init(self, ws: FakeWebsocket, count: int, alt: float, base_port: int = 14550,
+             cli_count: int = None) -> asyncio.Task:
         """Send an "init" through the real message dispatcher, concurrently."""
         raw = json.dumps({"type": "init", "count": count, "alt": alt})
-        return asyncio.create_task(bridge.handle_message(ws, raw, None, base_port))
+        return asyncio.create_task(bridge.handle_message(ws, raw, cli_count, base_port))
 
     async def close(self) -> None:
         self.stop.set()
@@ -2187,7 +2188,21 @@ async def scenario_shrinking_init_lands_dropped_vehicle():
     await h.close()
 
 
+async def scenario_cli_count_override_reported():
+    """`bridge.py --count 3` under a 10-drone sim: the bridge says its --count
+    overrides the init's 10, so the operator knows 7 drones have no vehicle."""
+    h = Harness()
+    ws = h.client("browser-1")
+    for port in (14550, 14560, 14570):
+        h.autopilot(port)
+    reply = await ready_reply(ws, h.init(ws, count=10, alt=30.0, cli_count=3))
+    assert reply["ids"] == ["DR-1", "DR-2", "DR-3"], reply
+    assert ws.said("--count 3 overrides the 10 vehicles this init asked for"), ws.statuses()
+    await h.close()
+
+
 SCENARIOS = [
+    ("--count overriding the init's count is reported in a status line", scenario_cli_count_override_reported),
     ("an init that drops an airborne vehicle lands it and watches it down", scenario_shrinking_init_lands_dropped_vehicle),
     ("re-init keeps a vehicle parked mid-swap parked; only the handshake relaunches it", scenario_reinit_keeps_parked_vehicle),
     ("re-init keeps positionSeq increasing, also for an id that leaves and returns", scenario_reinit_keeps_position_seq),

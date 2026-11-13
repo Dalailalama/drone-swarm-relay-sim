@@ -226,7 +226,9 @@
       const s = getSwarm();
       if (m.type === 'ready') {
         ExternalMode.ids = Array.isArray(m.ids) ? m.ids.filter(validVehicleId) : [];
-        ExternalMode.expectedCount = ExternalMode.ids.length;
+        // Readiness counts against what the sim asked for: a bridge started
+        // with --count 3 under a 10-drone swarm is 3/10, not "all ready".
+        ExternalMode.expectedCount = Math.max(ExternalMode.expectedCount, ExternalMode.ids.length);
         for (const v of vehicleList(m.vehicles)) {
           if (!ExternalMode.telem[v.id]) ExternalMode.vehicleStates[v.id] = { ready: v.ready === true, state: v.state };
         }
@@ -373,6 +375,25 @@
     return ExternalMode.controlMode === 'external';
   }
 
+  // The link-loss ladder: a frozen vehicle is declared down after
+  // EXT_LOST_DEAD_SEC of sustained loss, or at once when the bridge has no
+  // vehicle for it (`absent`). Either way the death is the ladder's own and
+  // is undone if the vehicle's telemetry turns up.
+  function extLinkLost(s, d, absent) {
+    if (d.extLostSince == null) {
+      d.extLostSince = s.time;
+      if (!absent) return;
+    }
+    if (alive(d) && (absent || s.time - d.extLostSince > EXT_LOST_DEAD_SEC)) {
+      d.mode = 'dead';
+      d.extLinkDown = true; // this ladder's own verdict — the only recoverable death
+      d.endpointDeadAt = s.time;
+      if (typeof interruptEndpointAttempts === 'function') interruptEndpointAttempts(s, d.id);
+      logEvent(s, absent ? d.id + ' has no vehicle on the bridge — marking down'
+        : d.id + ' vehicle link lost >' + EXT_LOST_DEAD_SEC + 's — marking down', 'error');
+    }
+  }
+
   // Called at the TOP of each swarm tick when active: pull real positions into
   // the sim's drones so all downstream logic sees ground truth from the
   // vehicles. Velocity is estimated from consecutive telemetry so heading
@@ -390,6 +411,11 @@
       if (!t) {
         d.vx = 0;
         d.vy = 0;
+        // Once the bridge has answered 'ready', a drone with no telemetry at
+        // all has no vehicle behind it. One the bridge did not list (its
+        // --count is below the sim's) goes down at once, so C2 never plans a
+        // relay chain through it; a listed one goes down the ladder below.
+        if (ExternalMode.ids) extLinkLost(s, d, !ExternalMode.ids.includes(d.id));
         continue;
       }
       if (!positionFresh(t)) {
@@ -400,14 +426,7 @@
         // permanently kill a drone that's still flying. Only a SUSTAINED
         // loss escalates to 'dead'.
         d.vx = d.vy = 0;
-        if (d.extLostSince == null) d.extLostSince = s.time;
-        else if (alive(d) && s.time - d.extLostSince > EXT_LOST_DEAD_SEC) {
-          d.mode = 'dead';
-          d.extLinkDown = true; // this ladder's own verdict — the only recoverable death
-          d.endpointDeadAt = s.time;
-          if (typeof interruptEndpointAttempts === 'function') interruptEndpointAttempts(s, d.id);
-          logEvent(s, d.id + ' vehicle link lost >' + EXT_LOST_DEAD_SEC + 's — marking down', 'error');
-        }
+        extLinkLost(s, d, false);
         continue;
       }
       if (d.extLostSince != null) {

@@ -114,6 +114,7 @@ Sent in response to `"init"`. The bridge waits (bounded) for each vehicle's firs
   ]
 }
 ```
+- `ids` is the fleet that exists. When it is shorter than the `init` count (the bridge was started with `--count`, which overrides the message's count and says so in a `status` line), the browser marks every drone not in `ids` down at once and reports readiness against the count it asked for (e.g. `3/10`). A listed vehicle that never sends telemetry goes down after `EXT_LOST_DEAD_SEC`.
 
 #### `telemetry`
 Broadcast periodically (10 Hz) with the live state of all vehicles. `t` is server-monotonic seconds since start.
