@@ -1620,10 +1620,14 @@
     // O7: assign innerHTML only when the rendered string actually changed —
     // re-parsing identical panels at 5 Hz was pure layout churn (a 100-row
     // fleet list is the panel path's dominant cost).
-    const hopsHtml = status.hops.map((h, i) =>
-      '<tr class="' + escHtml(h.state) + '"><td>' + escHtml(h.a.label) + ' → ' + escHtml(h.b.label) + '</td><td>' + fmtDist(h.distM) +
-      '</td><td>' + h.marginDb.toFixed(0) + ' dB</td><td>' + (h.lossPct < 1 ? '<1' : h.lossPct.toFixed(0)) + '%</td></tr>'
-    ).join('') || '<tr><td colspan="4" class="dim">no links</td></tr>';
+    // Loss follows the delivery gate (net.js commitPacket): at an instantaneous
+    // margin of 0 dB or less no packet gets through, whatever the smoothed
+    // label shows, so the row reads 100% rather than the logistic 84-99%.
+    const hopsHtml = status.hops.map((h, i) => {
+      const loss = h.rawMarginDb > 0 ? h.lossPct : 100;
+      return '<tr class="' + escHtml(h.state) + '"><td>' + escHtml(h.a.label) + ' → ' + escHtml(h.b.label) + '</td><td>' + fmtDist(h.distM) +
+        '</td><td>' + h.marginDb.toFixed(0) + ' dB</td><td>' + (loss < 1 ? '<1' : loss.toFixed(0)) + '%</td></tr>';
+    }).join('') || '<tr><td colspan="4" class="dim">no links</td></tr>';
     if (hopsHtml !== lastHopsHtml) { hopsBody.innerHTML = hopsHtml; lastHopsHtml = hopsHtml; }
 
     // O7: Keyed incremental DOM row updates for fleet list (Item 7)
