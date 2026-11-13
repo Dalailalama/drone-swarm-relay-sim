@@ -423,6 +423,8 @@ class State:
     # Serializes "init" handling so two inits can't interleave fleet teardown
     # and setup. Created here, bound to a loop on first use.
     init_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    # The latest init's pending "ready" reply (see _reply_ready).
+    init_reply: object = None
     # id -> (position_seq, landed_seq) of a vehicle an init dropped, so the id
     # resumes its counters if a later init brings it back: a watcher tab only
     # takes a fix as new when its seq beats the largest it has seen.
@@ -1203,7 +1205,7 @@ async def _stop_all_vehicles() -> None:
     STATE.retiring = {}
 
 
-async def handle_init(websocket, msg: dict, cli_count: Optional[int], base_port: int) -> None:
+async def handle_init(websocket, msg: dict, cli_count: Optional[int], base_port: int) -> Optional[asyncio.Task]:
     """Fit the fleet to DR-1..DR-count, start a task per new vehicle, report
     per-vehicle readiness.
 
@@ -1211,7 +1213,8 @@ async def handle_init(websocket, msg: dict, cli_count: Optional[int], base_port:
     task, flight and service state (see _keep_vehicle), so a reset, selector
     change or reconnect never re-arms a vehicle parked mid battery swap.
 
-    Reply: {"type":"ready","ids":[...],"vehicles":[{id, ready, state}, ...]}
+    Reply (from the returned task, so the caller's message loop keeps
+    running): {"type":"ready","ids":[...],"vehicles":[{id, ready, state}, ...]}
     `ids` is kept flat for the browser client; `vehicles` carries the truth
     about what was actually confirmed (finding #12). A vehicle that isn't
     ready is still listed -- it exists, it just isn't flying yet (or is
@@ -1272,23 +1275,39 @@ async def handle_init(websocket, msg: dict, cli_count: Optional[int], base_port:
             vehicles.append(v)
         STATE.vehicles = {v.id: v for v in vehicles}
 
-        # Wait for each vehicle's FIRST-PASS outcome independently. The
-        # deadline covers the worst honest case (heartbeat wait + the three
-        # confirmation steps); vehicles that finish early don't wait for it.
-        deadline = HEARTBEAT_WAIT_TIMEOUT_S + INIT_EXTRA_WAIT_S
-        waiters = [asyncio.create_task(v.first_pass_done.wait()) for v in vehicles]
-        if waiters:
-            _done, pending = await asyncio.wait(waiters, timeout=deadline)
-            for w in pending:
-                w.cancel()
+        # The reply waits in a task of its own: awaited here it held this
+        # socket's message loop for up to HEARTBEAT_WAIT_TIMEOUT_S +
+        # INIT_EXTRA_WAIT_S, so the controller's goals and services queued
+        # behind it and websockets' keepalive closed the socket (1011). A
+        # newer init supersedes a reply that is still waiting.
+        if STATE.init_reply is not None:
+            STATE.init_reply.cancel()
+        STATE.init_reply = asyncio.create_task(_reply_ready(websocket, ids, vehicles, count))
+        return STATE.init_reply
 
-        if not _owns_control(websocket):
-            return
-        n_ready = sum(1 for v in vehicles if v.ready)
-        detail = ", ".join(f"{v.id}={v.init_state}" for v in vehicles) or "no vehicles"
-        await send_status(websocket, f"bridge: {n_ready}/{count} vehicles confirmed ready ({detail})")
-        if not _owns_control(websocket):
-            return
+
+async def _reply_ready(websocket, ids: list, vehicles: list, count: int) -> None:
+    """Send an init's "ready" reply once every vehicle's first pass is decided."""
+    # Wait for each vehicle's FIRST-PASS outcome independently. The
+    # deadline covers the worst honest case (heartbeat wait + the three
+    # confirmation steps); vehicles that finish early don't wait for it.
+    deadline = HEARTBEAT_WAIT_TIMEOUT_S + INIT_EXTRA_WAIT_S
+    waiters = [asyncio.create_task(v.first_pass_done.wait()) for v in vehicles]
+    try:
+        if waiters:
+            await asyncio.wait(waiters, timeout=deadline)
+    finally:
+        for w in waiters:
+            w.cancel()
+
+    if not _owns_control(websocket):
+        return
+    n_ready = sum(1 for v in vehicles if v.ready)
+    detail = ", ".join(f"{v.id}={v.init_state}" for v in vehicles) or "no vehicles"
+    await send_status(websocket, f"bridge: {n_ready}/{count} vehicles confirmed ready ({detail})")
+    if not _owns_control(websocket):
+        return
+    try:
         await websocket.send(
             json.dumps(
                 {
@@ -1298,6 +1317,8 @@ async def handle_init(websocket, msg: dict, cli_count: Optional[int], base_port:
                 }
             )
         )
+    except ConnectionClosed:
+        pass
 
 
 def handle_goals(msg: dict) -> None:
@@ -1516,7 +1537,8 @@ async def handle_service(websocket, msg: dict) -> None:
     await record_and_ack(False, error=f"unknown action {action}", code="UNKNOWN_ACTION", retryable=False)
 
 
-async def handle_message(websocket, raw: str, cli_count: Optional[int], base_port: int) -> None:
+async def handle_message(websocket, raw: str, cli_count: Optional[int], base_port: int):
+    """Dispatch one client message; an init returns its pending reply task."""
     try:
         msg = json.loads(raw)
     except json.JSONDecodeError:
@@ -1525,7 +1547,7 @@ async def handle_message(websocket, raw: str, cli_count: Optional[int], base_por
 
     mtype = msg.get("type")
     if mtype == "init":
-        await handle_init(websocket, msg, cli_count, base_port)
+        return await handle_init(websocket, msg, cli_count, base_port)
     elif mtype == "service":
         await handle_service(websocket, msg)
     elif mtype == "goals":
@@ -1596,6 +1618,8 @@ async def run(args: argparse.Namespace) -> None:
             await asyncio.get_running_loop().create_future()  # run forever
     finally:
         telem_task.cancel()
+        if STATE.init_reply is not None:
+            STATE.init_reply.cancel()
         for task in STATE.vehicle_tasks:
             task.cancel()
         try:

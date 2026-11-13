@@ -440,12 +440,21 @@ class Harness:
 
     def init(self, ws: FakeWebsocket, count: int, alt: float, base_port: int = 14550,
              cli_count: int = None) -> asyncio.Task:
-        """Send an "init" through the real message dispatcher, concurrently."""
+        """Send an "init" through the real message dispatcher, concurrently.
+        The task ends once the init's "ready" reply (sent from a task of its
+        own, see bridge._reply_ready) is out or abandoned."""
         raw = json.dumps({"type": "init", "count": count, "alt": alt})
-        return asyncio.create_task(bridge.handle_message(ws, raw, cli_count, base_port))
+
+        async def run():
+            reply = await bridge.handle_message(ws, raw, cli_count, base_port)
+            if reply is not None:
+                await asyncio.gather(reply, return_exceptions=True)
+        return asyncio.create_task(run())
 
     async def close(self) -> None:
         self.stop.set()
+        if bridge.STATE.init_reply is not None:
+            self.tasks.append(bridge.STATE.init_reply)
         for task in self.tasks:
             task.cancel()
         await asyncio.gather(*self.tasks, return_exceptions=True)
@@ -2000,6 +2009,7 @@ async def scenario_malformed_messages_keep_connection() -> None:
         async def __aiter__(self):
             for raw in self.raws:
                 yield raw
+            await wait_until(lambda: self.of_type("ready"), timeout=1.0)  # stay connected for the reply
 
     bad = ["[]", "42", '{"type":"goals","goals":[1]}', '{"type":"goals","goals":null}',
            '{"type":"init","count":"three"}', '{"type":"service","id":["DR-1"],"requestId":"r","action":"land"}']
@@ -2009,6 +2019,42 @@ async def scenario_malformed_messages_keep_connection() -> None:
         assert ws.of_type("ready"), f"the init after the malformed messages was never handled: {ws.messages}"
     finally:
         await h.close()
+
+
+async def scenario_init_does_not_block_controller() -> None:
+    """handle_init used to hold the controller's message loop until every
+    vehicle's first pass was decided (up to 35 s): its services and 2 Hz goals
+    queued behind it and websockets' keepalive closed the socket (1011). A
+    service sent while the init waits is now answered at once."""
+    h = Harness()
+
+    class StreamWebsocket(FakeWebsocket):
+        def __init__(self, name, raws):
+            super().__init__(name)
+            self.raws = raws
+
+        async def __aiter__(self):
+            for raw in self.raws:
+                yield raw
+                await asyncio.sleep(0.02)
+            await wait_until(lambda: self.of_type("service_ack"), timeout=1.0)
+
+    ws = StreamWebsocket("browser-1", [
+        json.dumps({"type": "init", "count": 1, "alt": 30.0}),
+        json.dumps({"type": "service", "id": "DR-1", "requestId": "svc-1", "action": "land"}),
+    ])
+    with patch.object(bridge, "HEARTBEAT_WAIT_TIMEOUT_S", 60.0):  # DR-1 never boots: its first pass stays open
+        handler = asyncio.create_task(bridge.make_handler(None, 14550)(ws))
+        try:
+            assert await wait_until(lambda: ws.of_type("service_ack"), timeout=1.0), \
+                f"the service request waited behind the init: {ws.statuses()}"
+            ack = ws.of_type("service_ack")[0]
+            assert ack["accepted"] is False and ack["code"] == "VEHICLE_NOT_READY", ack
+            assert not ws.of_type("ready"), "the ready reply must still wait for DR-1's first pass"
+        finally:
+            handler.cancel()
+            await asyncio.gather(handler, return_exceptions=True)
+            await h.close()
 
 
 async def scenario_gcs_heartbeat_sent() -> None:
@@ -2295,6 +2341,7 @@ SCENARIOS = [
     ("init: a huge vehicle count is clamped", scenario_init_count_bounded),
     ("malformed messages are skipped without dropping the connection", scenario_malformed_messages_keep_connection),
     ("the bridge sends a GCS HEARTBEAT once it hears the vehicle", scenario_gcs_heartbeat_sent),
+    ("an init waiting on first passes does not block the controller's messages", scenario_init_does_not_block_controller),
     ("MAVLink from a GCS or another system id is ignored", scenario_foreign_mavlink_source_ignored),
 ]
 

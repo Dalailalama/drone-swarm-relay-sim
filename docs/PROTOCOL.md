@@ -103,7 +103,7 @@ Commands lifecycle and service transitions (landing, battery swap, relaunch, abo
 ### 3.2 Server to Client Messages
 
 #### `ready`
-Sent in response to `"init"`. The bridge waits (bounded) for each vehicle's first-pass outcome before replying; the mock replies at once with every vehicle in `wait-heartbeat`. Later per-vehicle progress arrives in telemetry.
+Sent in response to `"init"`. The bridge waits (bounded) for each vehicle's first-pass outcome before replying, and keeps answering the client's `goals` and `service` messages meanwhile (a newer `init` supersedes a reply still waiting); the mock replies at once with every vehicle in `wait-heartbeat`. Later per-vehicle progress arrives in telemetry.
 ```json
 {
   "type": "ready",
