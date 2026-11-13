@@ -11,15 +11,17 @@
 // built taller than their AGL is a no-fly box they steer around.
 
 const LOS_CLEARANCE_M = 5;      // Fresnel-ish breathing room over obstructions
-// LOS is sampled by distance, not a fixed count: spacing must stay below the
-// smallest obstacle or a ray can punch clean through a building that sits
-// between two samples. Buildings (~20 m footprints) need a fine step; open
-// terrain hills are hundreds of metres wide and tolerate a coarse one. A cap
-// bounds cost on very long links (which only occur in building-free terrain).
-const LOS_STEP_BUILDING_M = 8;
+// Terrain LOS is sampled by distance, not a fixed count: spacing must stay
+// below the ground's finest relief or a ray passes under a crest between two
+// samples. The finest of the 4 FBM octaves has a lattice of groundScaleM / 8,
+// so the step is half that, never coarser than 40 m (which alone is only
+// fine once groundScaleM >= ~640 m). Buildings are tested exactly (segment vs
+// box), not sampled. The cap bounds cost on very long links, but never lets
+// the step grow past the finest lattice until the hard limit.
 const LOS_STEP_TERRAIN_M = 40;
 const LOS_SAMPLES_MIN = 12;
 const LOS_SAMPLES_MAX = 160;
+const LOS_SAMPLES_HARD_MAX = 600;
 
 // --- Seeded value noise -------------------------------------------------------
 function hash2(ix, iy, seed) {
@@ -200,8 +202,10 @@ function losBlocked(t, ax, ay, aAltM, bx, by, bAltM) {
   // Terrain heightfield sampling
   if (t.groundAmpM > 0) {
     const rayLen = Math.hypot(bx - ax, by - ay);
-    const stepM = LOS_STEP_TERRAIN_M;
-    const n = Math.max(LOS_SAMPLES_MIN, Math.min(LOS_SAMPLES_MAX, Math.ceil(rayLen / stepM)));
+    const lattice = t.groundScaleM / 8; // finest FBM octave
+    const stepM = Math.min(LOS_STEP_TERRAIN_M, lattice / 2);
+    const nCap = Math.min(LOS_SAMPLES_HARD_MAX, Math.max(LOS_SAMPLES_MAX, Math.ceil(rayLen / lattice)));
+    const n = Math.max(LOS_SAMPLES_MIN, Math.min(nCap, Math.ceil(rayLen / stepM)));
     for (let i = 1; i <= n; i++) {
       const f = i / (n + 1);
       const x = ax + (bx - ax) * f;

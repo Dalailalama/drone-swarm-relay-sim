@@ -120,3 +120,34 @@ test('city keep-out honors footprint + jitter, not just grid center (regression 
     }
   }
 });
+
+// Audit rf-physics/los-terrain-undersampled-short-missions: the 40 m terrain
+// step is coarser than the finest FBM octave on short missions (lattice
+// groundScaleM / 8 = 8.8 m at distM 200), so rays passed up to 23 m under a
+// ridge between two samples and were judged clear.
+test('LOS terrain sampling follows the map\'s finest relief on short missions', () => {
+  const t = T.makeTerrain('rolling', { distM: 200, altM: 50, seed: 7, targetX: 200, targetY: 0 });
+  assert.strictEqual(T.losBlocked(t, 18.6, 59.4, 68.7, -433.3, 105.3, 47.7), true,
+    'the pinned ray passes ~23 m under a crest between two 40 m samples');
+  // Seeded sweep: 60-460 m links, 30 m AGL ends; a 1 m walk is ground truth.
+  let a = 12345;
+  const rnd = () => { a = (a * 1103515245 + 12345) % 2147483648; return a / 2147483648; };
+  let under = 0;
+  for (let k = 0; k < 300; k++) {
+    const ax = (rnd() - 0.5) * 900, ay = (rnd() - 0.5) * 900;
+    const L = 60 + rnd() * 400, th = rnd() * 2 * Math.PI;
+    const bx = ax + L * Math.cos(th), by = ay + L * Math.sin(th);
+    const aAlt = T.terrainGroundAt(t, ax, ay) + 30, bAlt = T.terrainGroundAt(t, bx, by) + 30;
+    let walkBlocked = false;
+    const steps = Math.ceil(L);
+    for (let i = 1; i < steps && !walkBlocked; i++) {
+      const f = i / steps;
+      if (T.terrainGroundAt(t, ax + (bx - ax) * f, ay + (by - ay) * f) > aAlt + (bAlt - aAlt) * f) walkBlocked = true;
+    }
+    if (!walkBlocked) continue;
+    under++;
+    assert.ok(T.losBlocked(t, ax, ay, aAlt, bx, by, bAlt),
+      'ray (' + ax.toFixed(1) + ',' + ay.toFixed(1) + ')-(' + bx.toFixed(1) + ',' + by.toFixed(1) + ') goes under the ground but reads clear');
+  }
+  assert.ok(under > 20, 'the sweep must include rays that hit the ground, got ' + under);
+});
