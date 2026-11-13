@@ -169,9 +169,12 @@
     return false;
   }
 
+  // Parked for battery service: swapping, or swapped and waiting for the
+  // relaunch — where a rebuilt swarm can pick a vehicle up, and must ground
+  // it too, or the relaunch that ends the swap is never asked for.
   function externalServiceGrounded(id) {
     const svc = ExternalMode.services[id], t = ExternalMode.telem[id];
-    return svc && t && svc.id === t.serviceId && t.state === 'swapping' && grounded(id);
+    return svc && t && svc.id === t.serviceId && (t.state === 'swapping' || t.state === 'swapped') && grounded(id);
   }
 
   function externalServiceComplete(s, d) {
@@ -234,6 +237,12 @@
         // Readiness counts against what the sim asked for: a bridge started
         // with --count 3 under a 10-drone swarm is 3/10, not "all ready".
         ExternalMode.expectedCount = Math.max(ExternalMode.expectedCount, ExternalMode.ids.length);
+        // The fleet is what 'ready' lists: a telemetry frame sent before the
+        // bridge handled the init can still carry a vehicle it dropped, and
+        // that one must not stay counted against the fleet.
+        for (const id of Object.keys(ExternalMode.vehicleStates)) {
+          if (!ExternalMode.ids.includes(id)) { delete ExternalMode.vehicleStates[id]; delete ExternalMode.telem[id]; }
+        }
         for (const v of vehicleList(m.vehicles)) {
           if (!ExternalMode.telem[v.id]) ExternalMode.vehicleStates[v.id] = { ready: v.ready === true, state: v.state };
         }
@@ -513,9 +522,17 @@
       const overPad = (d.mode === 'rtb' || d.mode === 'rtl') && dist2d(d, s.base) < DRONE.landThresholdM;
       const origin = ExternalMode.origin;
       const t = ExternalMode.telem[d.id];
-      if (svc && svc.landFailedAt != null && overPad && wallSec() - svc.landFailedAt >= LAND_RETRY_SEC &&
-          positionFresh(t) && t.armed === true && t.servicePhase === 'failed') {
+      const landFailed = svc && overPad && positionFresh(t) && t.armed === true && t.servicePhase === 'failed';
+      if (landFailed && svc.landFailedAt != null && wallSec() - svc.landFailedAt >= LAND_RETRY_SEC) {
         ExternalMode.services[d.id] = { id: String(++ExternalMode.serviceSeq), phase: 'landing', landAttempt: (svc.landAttempt || 1) + 1 };
+        dispatchServiceAction(s, d.id, 'land', { groundAlt: terrainGroundAt(s.terrain, d.x, d.y) - origin.groundM });
+        continue;
+      }
+      // A retry the bridge has not taken up yet (a retryable rejection, or a
+      // lost ack) goes out again under its own id — the vehicle is not
+      // 'ready', so the dispatch below never reaches it. The dispatcher
+      // throttles it and fails it once its retry budget is spent.
+      if (landFailed && svc.landAttempt > 1 && svc.phase === 'landing' && svc.lastAction === 'land' && t.serviceId !== svc.id) {
         dispatchServiceAction(s, d.id, 'land', { groundAlt: terrainGroundAt(s.terrain, d.x, d.y) - origin.groundM });
         continue;
       }
