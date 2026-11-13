@@ -91,12 +91,53 @@ test('micro preset is the DJI Mini 4 Pro on its real disc and pack, and hovers f
     'micro full-pack hover ' + fullPackHoverMin.toFixed(1) + ' min, DJI spec is 30 min');
 });
 
-test('forward flight power: equals hover at 0, rises toward max speed', () => {
+test('forward flight power: equals hover at 0, rises again toward max speed', () => {
   for (const af of A.AIRFRAMES) {
     const h = A.hoverPowerW(af);
     assert.ok(Math.abs(A.flightPowerW(af, 0) - h) < 1e-9);
-    assert.ok(A.flightPowerW(af, af.maxSpeedMs) > h * 1.2, 'max-speed flight should cost >20% over hover');
+    assert.ok(A.flightPowerW(af, af.maxSpeedMs) > A.flightPowerW(af, 0.5 * af.maxSpeedMs) * 1.05,
+      af.id + ': parasite drag should make max-speed flight dearer than mid-speed cruise');
   }
+});
+
+test('forward-flight power is level-flight momentum theory: a translational-lift dip, then the parasite rise (audit EN-3)', () => {
+  // Independent reference: Glauert's inflow quartic vi^4 + V^2 vi^2 = vh^4
+  // solved by bisection (not the closed form), thrust tilted to carry
+  // parasite drag, induced share = the rotor figure of merit, profile share
+  // held at hover, parasite D·V through the motor/ESC part of the efficiency.
+  const rho = A.AIR_RHO, g = 9.81, fm = A.ROTOR_FM;
+  function reference(af, V) {
+    const W = af.massKg * g, D = 0.5 * rho * af.dragAreaM2 * V * V, T = Math.hypot(W, D);
+    const vh = Math.sqrt(T / (2 * rho * A.discAreaM2(af)));
+    let lo = 0, hi = vh;
+    for (let i = 0; i < 200; i++) {
+      const vi = (lo + hi) / 2;
+      if (vi * vi * vi * vi + V * V * vi * vi < vh * vh * vh * vh) lo = vi; else hi = vi;
+    }
+    const vh0 = Math.sqrt(W / (2 * rho * A.discAreaM2(af)));
+    const h = A.hoverPowerW(af);
+    return h * (fm * (T * lo) / (W * vh0) + (1 - fm)) + fm * D * V / (af.powertrainEff || A.POWERTRAIN_EFF);
+  }
+  assert.ok(fm >= 0.5 && fm <= 0.75, 'rotor figure of merit ' + fm + ' outside the small-prop range');
+  for (const af of A.AIRFRAMES) {
+    assert.ok(af.dragAreaM2 > 0.003 && af.dragAreaM2 < 0.1, af.id + ': CdA ' + af.dragAreaM2 + ' m2 implausible');
+    const h = A.hoverPowerW(af);
+    let minR = Infinity, minU = 0;
+    for (let i = 0; i <= 100; i++) {
+      const u = i / 100, p = A.flightPowerW(af, u * af.maxSpeedMs);
+      if (p / h < minR) { minR = p / h; minU = u; }
+      const ref = reference(af, u * af.maxSpeedMs);
+      assert.ok(Math.abs(p - ref) <= ref * 1e-6, af.id + ' at u=' + u + ': ' + p.toFixed(3) + ' W vs reference ' + ref.toFixed(3) + ' W');
+    }
+    assert.ok(minU >= 0.4 && minU <= 0.8, af.id + ': minimum-power speed at ' + minU + ' x vmax');
+    assert.ok(minR <= 0.9, af.id + ': minimum power only ' + ((1 - minR) * 100).toFixed(1) + '% below hover');
+  }
+  // https://www.dji.com/mini-4-pro/specs: "Max Flight Time: 34 minutes",
+  // flown at a constant 21.6 kph (6 m/s), against 30 min hovering. The micro's
+  // drag area is fitted to that one cited point of its power curve.
+  const micro = A.AIRFRAMES.find(a => a.id === 'micro');
+  const cruiseMin = micro.batteryWh / A.flightPowerW(micro, 21.6 / 3.6) * 60;
+  assert.ok(Math.abs(cruiseMin - 34) <= 1, 'micro full-pack time at 21.6 km/h ' + cruiseMin.toFixed(1) + ' min, DJI spec is 34 min');
 });
 
 test('coaxial presets share one disc per stack and pay the coaxial interference loss (audit EN-1)', () => {
