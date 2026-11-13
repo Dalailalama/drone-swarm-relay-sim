@@ -591,6 +591,25 @@ async def test_token_required_at_handshake():
             pass
 
 
+async def test_failed_landing_can_be_retried():
+    """Same as bridge.py: a landing that failed while the vehicle is still up
+    and armed may be retried under a new request id (it was SERVICE_BUSY)."""
+    w = World()
+    w.reset(1, alt=30.0)
+    v = w.vehicles["DR-1"]
+    for _ in range(300):
+        w.physics_tick(0.05)
+        if v.ready:
+            break
+    assert v.ready
+    assert v.service("svc-1", "land", {"groundAlt": 0.0})[0]
+    w.physics_tick(0.05)
+    v._fail("land", CLOCK())  # e.g. no descent progress
+    v.service_phase = "failed"
+    acc, err, code, _ = v.service("svc-2", "land", {"groundAlt": 0.0})
+    assert acc and v.service_phase == "landing" and v.service_id == "svc-2", (err, code)
+
+
 async def test_init_count_is_bounded():
     """An init's vehicle count comes off the network: a huge one is clamped
     instead of building millions of vehicles inside the event loop."""
@@ -669,6 +688,7 @@ SCENARIOS = [
     ("Mock: foreign web Origin rejected at the handshake", test_foreign_origin_rejected_at_handshake),
     ("Mock: --token required at the handshake", test_token_required_at_handshake),
     ("Mock: init vehicle count is bounded", test_init_count_is_bounded),
+    ("Mock: a failed landing can be retried under a new request id", test_failed_landing_can_be_retried),
     ("Mock: malformed messages are skipped without dropping the connection", test_malformed_messages_keep_connection),
 ]
 

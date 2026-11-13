@@ -233,6 +233,8 @@ stateDiagram-v2
     confirm_mode --> ready: Complete climb to target altitude
 ```
 
+The bridge re-sends `MAV_CMD_NAV_LAND` every `STEP_RESEND_DT` until the autopilot ACKs it. A landing that fails anyway (rejected, or no descent progress for `INIT_STEP_TIMEOUT_S`: `state` `failed:land`, `servicePhase` `failed`) may be retried with a fresh `land` under a new `requestId` while the vehicle is still armed and reporting; both servers accept it. The browser reports the failure and retries after 3 s, up to 3 attempts in all.
+
 Touchdown is decided differently by the two servers:
 - **bridge**: the autopilot reports `EXTENDED_SYS_STATE.landed_state == MAV_LANDED_STATE_ON_GROUND` and a disarmed heartbeat. `groundAlt` is not used.
 - **mock**: `|alt - groundAlt| <= 0.05` m, which also disarms the simulated vehicle.

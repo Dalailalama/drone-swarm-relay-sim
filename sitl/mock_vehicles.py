@@ -390,11 +390,14 @@ class Vehicle:
     def service(self, request_id: str, action: str, msg: dict) -> tuple[bool, Optional[str], Optional[str], bool]:
         """Explicit browser-driven lifecycle handshake; returns (accepted, error, code, retryable)."""
         if action == "land":
-            if self.service_phase not in (None, "complete"):
+            # Same as bridge.py: a failed landing may be retried under a new
+            # request id while the vehicle is still up and armed.
+            retry = self.service_phase == "failed" and self.init_state == FAILED_PREFIX + "land"
+            if self.service_phase not in (None, "complete") and not retry:
                 if self.service_id == request_id and self.service_phase == "landing":
                     return True, None, None, False
                 return False, f"service busy in phase {self.service_phase}", "SERVICE_BUSY", True
-            if not (self.ready and self.init_state == INIT_READY and self.connected
+            if not ((retry or (self.ready and self.init_state == INIT_READY)) and self.connected
                     and self.position_fresh and self.armed):
                 return False, "vehicle not ready to land", "VEHICLE_NOT_READY", True
             self.service_history.add(request_id)

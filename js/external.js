@@ -40,6 +40,11 @@
   // Bridge service phases a rebuilt swarm takes over (see the telemetry
   // handler): the grounded part of the swap handshake, which it can finish.
   const ADOPTABLE_SERVICE_PHASES = ['landing', 'landed', 'swapping', 'swapped'];
+  // A landing the bridge reports failed (rejected, or no descent progress) is
+  // retried under a new request id after this many wall seconds, while the
+  // vehicle still hovers armed over the pad, up to LAND_MAX_ATTEMPTS in all.
+  const LAND_RETRY_SEC = 3;
+  const LAND_MAX_ATTEMPTS = 3;
 
   function wallSec() {
     return (typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now()) / 1000;
@@ -309,6 +314,18 @@
             const n = Number(v.serviceId);
             if (Number.isSafeInteger(n) && n > ExternalMode.serviceSeq) ExternalMode.serviceSeq = n;
           }
+          if (svc && svc.id === v.serviceId && svc.phase === 'landing' && v.servicePhase === 'failed') {
+            // The bridge gave up on this landing. Say so (it used to leave
+            // the drone silently hovering over the pad, never commanded
+            // again); externalPushGoals retries it after LAND_RETRY_SEC.
+            const attempt = svc.landAttempt || 1;
+            svc.phase = 'failed';
+            svc.pendingAction = null;
+            svc.failureReason = String(v.state);
+            svc.landFailedAt = attempt < LAND_MAX_ATTEMPTS ? wallSec() : null;
+            setStatus(s, v.id + ' landing failed on the bridge (' + v.state + ')' +
+              (attempt < LAND_MAX_ATTEMPTS ? ' — retrying' : ' after ' + attempt + ' attempts — vehicle left holding'));
+          }
           if (svc && svc.id === v.serviceId && svc.phase !== 'failed') {
             if (v.state === 'landing' || v.servicePhase === 'landing') {
               if (svc.pendingAction === 'land') { svc.pendingAction = null; svc.lastAction = null; svc.retries = 0; }
@@ -492,10 +509,17 @@
     const goals = [];
     for (const d of s.drones) {
       if (!alive(d) || d.goalX == null) continue;
-      if (!vehicleReady(d.id)) continue;
       const svc = ExternalMode.services[d.id];
       const overPad = (d.mode === 'rtb' || d.mode === 'rtl') && dist2d(d, s.base) < DRONE.landThresholdM;
       const origin = ExternalMode.origin;
+      const t = ExternalMode.telem[d.id];
+      if (svc && svc.landFailedAt != null && overPad && wallSec() - svc.landFailedAt >= LAND_RETRY_SEC &&
+          positionFresh(t) && t.armed === true && t.servicePhase === 'failed') {
+        ExternalMode.services[d.id] = { id: String(++ExternalMode.serviceSeq), phase: 'landing', landAttempt: (svc.landAttempt || 1) + 1 };
+        dispatchServiceAction(s, d.id, 'land', { groundAlt: terrainGroundAt(s.terrain, d.x, d.y) - origin.groundM });
+        continue;
+      }
+      if (!vehicleReady(d.id)) continue;
       if (svc) {
         if (overPad && svc.phase === 'landing' && svc.phase !== 'failed') {
           dispatchServiceAction(s, d.id, 'land', { groundAlt: terrainGroundAt(s.terrain, d.x, d.y) - origin.groundM });

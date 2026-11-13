@@ -864,6 +864,12 @@ async def _advance_init(vehicle: Vehicle) -> None:
             await _fail(vehicle, "land", f"vehicle {vehicle.id}: landing command REJECTED - COMMAND_ACK {_result_name(land_ack)}", now)
             vehicle.service_phase = "failed"
             return
+        if land_ack is None and now - vehicle.step_sent_at >= STEP_RESEND_DT:
+            # NAV_LAND travels over UDP: re-send it until the autopilot
+            # answers, like every init step, or one lost datagram fails the
+            # landing and leaves the vehicle hovering over the pad.
+            _send_land(vehicle)
+            vehicle.step_sent_at = now
         if vehicle.position_fresh:
             if vehicle.alt <= vehicle.descent_ref_alt - 0.5:
                 vehicle.descent_ref_alt = vehicle.alt
@@ -1406,6 +1412,12 @@ def _begin_landing(v: Vehicle, request_id: str) -> None:
     v.ready = False
     # Clear any stale MAV_CMD_NAV_LAND ack from previous landing attempts
     v.acks.pop(21, None)
+    v.step_sent_at = _now()
+    _send_land(v)
+
+
+def _send_land(v: Vehicle) -> None:
+    """MAV_CMD_NAV_LAND at the current position (all params 0)."""
     v.conn.mav.command_long_send(v.conn.target_system, v.conn.target_component,
                                  21, 0, 0, 0, 0, 0, 0, 0, 0)
 
@@ -1436,13 +1448,16 @@ async def handle_service(websocket, msg: dict) -> None:
         await _send_service_ack(websocket, request_id, v.id, action, accepted, error=error, code=code, retryable=retryable)
 
     if action == "land":
-        if v.service_phase not in (None, "complete"):
+        # A landing that failed (rejected, or no descent) may be retried
+        # under a new request id while the vehicle is still up and armed.
+        retry = v.service_phase == "failed" and v.init_state == FAILED_PREFIX + "land"
+        if v.service_phase not in (None, "complete") and not retry:
             if v.service_id == request_id and v.service_phase == "landing":
                 await record_and_ack(True)
                 return
             await record_and_ack(False, error=f"service busy in phase {v.service_phase}", code="SERVICE_BUSY", retryable=True)
             return
-        if not (v.ready and v.init_state == INIT_READY and v.connected and v.position_fresh and v.armed):
+        if not ((retry or (v.ready and v.init_state == INIT_READY)) and v.connected and v.position_fresh and v.armed):
             await record_and_ack(False, error="vehicle not ready to land", code="VEHICLE_NOT_READY", retryable=True)
             return
         _begin_landing(v, request_id)

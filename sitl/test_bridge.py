@@ -334,8 +334,10 @@ class FakeAutopilot:
         north: float = 0.0,
         east: float = 0.0,
         target_alt: float = None,
+        drop_lands: int = 0,  # this many NAV_LANDs are "lost on UDP": no ACK, no descent
     ):
         self.conn = conn
+        self.drop_lands = drop_lands
         self.gate = gate
         self.heartbeats = heartbeats
         self.accept_mode = accept_mode
@@ -377,6 +379,9 @@ class FakeAutopilot:
                     self.climbing = True
                     self.commanded_alt = self.alt + float(detail)
             elif kind == "land":
+                if self.drop_lands > 0:
+                    self.drop_lands -= 1
+                    continue
                 self.conn.push(ack_msg(MAV_CMD_NAV_LAND))
                 self.landing, self.climbing = True, False
         target = self.commanded_alt if self.cap_alt is None else min(self.commanded_alt, self.cap_alt)
@@ -2300,7 +2305,53 @@ async def scenario_cli_count_override_reported():
     await h.close()
 
 
+async def scenario_land_resent_until_acked():
+    """NAV_LAND used to be sent once: a lost datagram left the landing to time
+    out (failed:land) with the vehicle hovering over the pad. It is re-sent
+    every STEP_RESEND_DT until the autopilot ACKs it."""
+    h = Harness()
+    ws = h.client("browser-1")
+    h.autopilot(14550, drop_lands=1)
+    await ready_reply(ws, h.init(ws, count=1, alt=30.0))
+    v, conn = vehicle("DR-1"), conn_for(14550)
+    await _service(ws, "land")
+    assert await wait_until(lambda: conn.count("land") >= 2, timeout=2 * bridge.STEP_RESEND_DT + 0.2), \
+        (conn.kinds()[-6:], v.init_state)
+    assert await wait_until(lambda: v.service_phase == "landed", timeout=5.0), (v.service_phase, v.init_state)
+    assert conn.count("land") == 2, "NAV_LAND kept being re-sent after the ACK"
+    await h.close()
+
+
+async def scenario_failed_landing_can_be_retried():
+    """A landing the autopilot rejected leaves the vehicle hovering in service
+    phase 'failed': a land under a new request id is accepted (it used to be
+    SERVICE_BUSY forever), while a grounded or disarmed vehicle is not."""
+    h = Harness()
+    ws = h.client("controller")
+    await h.init(ws, count=0, alt=30.0)
+    clock = Clock()
+    with patch.object(bridge, "_now", clock):
+        v = current_vehicle()
+        conn = v.conn
+        await _service(ws, "land", "svc-1")
+        conn.push(ack_msg(MAV_CMD_NAV_LAND, MAV_RESULT_DENIED))
+        bridge._drain_messages(v)
+        await bridge._advance_init(v)
+        assert v.service_phase == "failed" and v.init_state == "failed:land", (v.service_phase, v.init_state)
+        clock.now += 0.1
+        conn.push(hb_msg(armed=True, custom_mode=GUIDED_MODE_ID))
+        conn.push(pos_msg(-8.0, 12.0, -30.0))
+        bridge._drain_messages(v)
+        await _service(ws, "land", "svc-2")
+        ack = ws.of_type("service_ack")[-1]
+        assert ack["accepted"] is True and ack["requestId"] == "svc-2", ack
+        assert v.service_phase == "landing" and v.service_id == "svc-2" and conn.count("land") == 2
+    await h.close()
+
+
 SCENARIOS = [
+    ("NAV_LAND is re-sent until the autopilot ACKs it", scenario_land_resent_until_acked),
+    ("a failed landing can be retried under a new request id", scenario_failed_landing_can_be_retried),
     ("--count overriding the init's count is reported in a status line", scenario_cli_count_override_reported),
     ("an init that drops an airborne vehicle lands it and watches it down", scenario_shrinking_init_lands_dropped_vehicle),
     ("re-init keeps a vehicle parked mid-swap parked; only the handshake relaunches it", scenario_reinit_keeps_parked_vehicle),

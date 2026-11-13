@@ -6,6 +6,9 @@
 //  cli-count-ghost-drones: `bridge.py --count 3` under a 10-drone swarm left
 //      7 drones with no vehicle alive at the base, planned as relays, while
 //      the status said every vehicle was ready.
+//  land-not-resent-browser-stuck: a landing the bridge gave up on (state
+//      failed:land) left the drone hovering over the pad with no goals and no
+//      further service attempt, and nothing said so.
 const { test } = require('node:test');
 const assert = require('node:assert');
 const { loadUI } = require('./helpers/dom.js');
@@ -81,4 +84,37 @@ test('cli-count-ghost-drones: drones the bridge has no vehicle for go down, are 
   assert.ok(relays.every(id => real.includes(id)), 'relay roles held by drones with no vehicle: ' + relays);
   assert.ok(real.every(id => ui.ctx.alive(s.drones.find(d => d.id === id))), 'the real vehicles stay up');
   assert.ok(ui.ctx.ExternalMode.status.includes('(3/' + n + ' confirmed ready)'), ui.ctx.ExternalMode.status);
+});
+
+test('land-not-resent-browser-stuck: a landing the bridge reports failed is surfaced and retried under a new request id', () => {
+  const ui = loadUI();
+  const s = ui.ctx.sim.swarm;
+  const ws = connect(ui);
+  const d = s.drones[0];
+  let seq = 0;
+  const frame = (over) => ws.onmessage({ data: JSON.stringify({ type: 'telemetry', t: s.time, vehicles: [{
+    id: d.id, x: 2, y: 0, alt: 20, connected: true, armed: true, heartbeatAge: 0, positionAge: 0,
+    ready: true, state: 'ready', ...over, positionSeq: ++seq }] }) });
+  frame({});
+  d.mode = 'rtb';
+  s.time += 1;
+  ui.ctx.externalPushGoals(s);
+  for (let i = 0; i < 4; i++) ui.ctx.stepSwarm(s, 0.25);
+  const land = services(ws, 'land')[0];
+  assert.ok(land, 'the drone over the pad asks to land');
+  ws.onmessage({ data: JSON.stringify({ type: 'service_ack', id: d.id, requestId: land.requestId, action: 'land', accepted: true }) });
+  const failed = { ready: false, state: 'failed:land', servicePhase: 'failed', serviceId: land.requestId };
+  frame({ ready: false, state: 'landing', servicePhase: 'landing', serviceId: land.requestId });
+  frame(failed);
+  const svc = ui.ctx.ExternalMode.services[d.id];
+  assert.strictEqual(svc.phase, 'failed', 'the bridge-side failure is not reflected');
+  assert.ok(s.events.some(e => e.msg === 'External: DR-1 landing failed on the bridge (failed:land) — retrying'),
+    'the failure is not surfaced');
+
+  ui.ctx.__clock.ms += 3500;
+  for (let i = 0; i < 4; i++) { frame(failed); ui.ctx.stepSwarm(s, 0.25); }
+  const lands = services(ws, 'land');
+  assert.strictEqual(lands.length, 2, 'the failed landing is never tried again');
+  assert.notStrictEqual(lands[1].requestId, land.requestId, 'a retry needs a fresh request id');
+  assert.strictEqual(ui.ctx.ExternalMode.services[d.id].phase, 'landing');
 });
