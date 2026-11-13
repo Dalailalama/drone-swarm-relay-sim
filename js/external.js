@@ -37,6 +37,9 @@
   const EXT_JUMP_SLACK_M = 50;     // jitter / back-to-back fixes allowance on top of the speed bound
   const EXT_MAX_COORD_M = 1e6;
   const EXT_MAX_ALT_M = 1e5;
+  // Bridge service phases a rebuilt swarm takes over (see the telemetry
+  // handler): the grounded part of the swap handshake, which it can finish.
+  const ADOPTABLE_SERVICE_PHASES = ['landing', 'landed', 'swapping', 'swapped'];
 
   function wallSec() {
     return (typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now()) / 1000;
@@ -293,7 +296,17 @@
           }
           ExternalMode.telem[v.id] = t;
           ExternalMode.vehicleStates[v.id] = { ready: v.ready === true, state: v.state };
-          const svc = ExternalMode.services[v.id];
+          let svc = ExternalMode.services[v.id];
+          // The bridge keeps a vehicle parked mid-swap through a re-init or a
+          // page reload. Pick its service up where it stands, so the swap
+          // finishes and it relaunches through the handshake instead of
+          // sitting on the pad unseen by the rebuilt swarm.
+          if (!svc && typeof v.serviceId === 'string' && v.serviceId.length <= 64 &&
+              ADOPTABLE_SERVICE_PHASES.includes(v.servicePhase)) {
+            svc = ExternalMode.services[v.id] = { id: v.serviceId, phase: v.servicePhase };
+            const n = Number(v.serviceId);
+            if (Number.isSafeInteger(n) && n > ExternalMode.serviceSeq) ExternalMode.serviceSeq = n;
+          }
           if (svc && svc.id === v.serviceId && svc.phase !== 'failed') {
             if (v.state === 'landing' || v.servicePhase === 'landing') {
               if (svc.pendingAction === 'land') { svc.pendingAction = null; svc.lastAction = null; svc.retries = 0; }

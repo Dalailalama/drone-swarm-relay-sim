@@ -506,24 +506,46 @@ class World:
     """Holds all vehicle state and the connected browser clients.
 
     This is deliberately module-global-ish state (one World per process):
-    vehicle state survives a browser disconnect/reconnect, and only gets
-    reset when a fresh "init" message arrives (from any client).
+    vehicle state survives a browser disconnect/reconnect, and an "init"
+    only adds or drops vehicles (see reset).
     """
 
     vehicles: dict[str, Vehicle] = field(default_factory=dict)
     clients: set = field(default_factory=set)
     sim_time: float = 0.0  # seconds, advanced by the physics task's own dt
     controller: object = None
+    # id -> (position_seq, landed_seq) of a dropped vehicle, resumed if the id
+    # returns (same as bridge.py's STATE.seq_floor).
+    seq_floor: dict = field(default_factory=dict)
 
     def reset(self, count: int, alt: float, origin: dict | None = None) -> list[str]:
-        """Handle an "init": (re)create N vehicles at the origin."""
+        """Handle an "init": fit the fleet to DR-1..DR-N.
+
+        Same as bridge.py, an init is not a teardown: a vehicle that is still
+        listed keeps its position, flight and service state (a parked one is
+        never re-armed), new ids start at the origin and climb, and dropped
+        ids are removed (the mock has no aircraft to land first).
+        """
         count = max(0, min(int(count), MAX_VEHICLES))
+        old = self.vehicles
         self.vehicles = {}
         ids = []
         for i in range(1, count + 1):
             vid = f"DR-{i}"
             ids.append(vid)
-            v = Vehicle(id=vid, x=0.0, y=0.0, alt=0.0)
+            v = old.pop(vid, None)
+            if v is None:
+                position_seq, landed_seq = self.seq_floor.pop(vid, (0, 0))
+                v = Vehicle(id=vid, x=0.0, y=0.0, alt=0.0, position_seq=position_seq, landed_seq=landed_seq)
+                v.takeoff_alt = alt
+                # Start climbing immediately: goal x/y stays at the origin,
+                # goal alt is the requested cruise altitude.
+                v.set_goal(0.0, 0.0, alt)
+            elif v.service_phase is None:
+                # A new session: an earlier one's request ids must not replay.
+                v.service_id = None
+                v.service_history.clear()
+                v.service_action_history.clear()
             if isinstance(origin, dict):
                 v.origin = {
                     "frame": "common-local-origin",
@@ -531,11 +553,9 @@ class World:
                     "y": float(origin.get("y", 0.0)),
                     "groundM": float(origin.get("groundM", 0.0)),
                 }
-            v.takeoff_alt = alt
-            # Start climbing immediately: goal x/y stays at the origin,
-            # goal alt is the requested cruise altitude.
-            v.set_goal(0.0, 0.0, alt)
             self.vehicles[vid] = v
+        for v in old.values():
+            self.seq_floor[v.id] = (v.position_seq, v.landed_seq)
         return ids
 
     def apply_goals(self, goals: list[dict]) -> None:
@@ -741,8 +761,8 @@ async def handler(websocket) -> None:
             WORLD.controller = None
         log.info("client disconnected: %s", peer)
         # Note: vehicle state in WORLD is intentionally left untouched here
-        # so a reconnecting browser can resume mid-flight; only a fresh
-        # "init" message resets vehicle state.
+        # so a reconnecting browser can resume mid-flight; its next "init"
+        # keeps every vehicle it still lists as it is.
 
 
 async def run(host: str, port: int, allow_origin=()) -> None:

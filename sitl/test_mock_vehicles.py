@@ -579,7 +579,45 @@ async def test_malformed_messages_keep_connection():
         "the init after the malformed messages was never handled"
 
 
+async def test_reinit_keeps_vehicles():
+    """An init keeps every vehicle it still lists as it is, like bridge.py: a
+    vehicle parked mid-swap is not re-armed, a flying one is not teleported
+    back to the origin, and positionSeq keeps increasing (also for an id that
+    leaves and comes back), so a watcher tab never freezes."""
+    w = World()
+    w.reset(2, alt=30.0)
+    v1, v2 = w.vehicles["DR-1"], w.vehicles["DR-2"]
+    for _ in range(400):
+        w.physics_tick(0.05)
+        if v1.ready and v2.ready:
+            break
+    assert v1.ready and v2.ready
+    w.apply_goals([{"id": "DR-2", "x": 40.0, "y": -10.0, "alt": 30.0}])
+    acc, *_ = v1.service("svc-1", "land", {"groundAlt": 0.0})
+    assert acc
+    for _ in range(600):
+        w.physics_tick(0.05)
+        if v1.service_phase == "landed":
+            break
+    assert v1.service("svc-1", "authorize", {})[0] and v1.service_phase == "swapping"
+    seq1, seq2 = v1.position_seq, v2.position_seq
+
+    w.reset(2, alt=30.0)
+    for _ in range(100):
+        w.physics_tick(0.05)
+    assert w.vehicles["DR-1"] is v1 and v1.service_phase == "swapping", (v1.service_phase, v1.init_state)
+    assert not v1.armed and v1.alt == 0.0, "the re-init re-armed a vehicle parked mid-swap"
+    assert w.vehicles["DR-2"] is v2 and v2.ready and abs(v2.x - 40.0) < 0.5 and abs(v2.y + 10.0) < 0.5, (v2.x, v2.y)
+    assert v1.position_seq > seq1 and v2.position_seq > seq2
+
+    w.reset(1, alt=30.0)
+    seq2 = v2.position_seq
+    w.reset(2, alt=30.0)
+    assert w.vehicles["DR-2"].position_seq >= seq2, (w.vehicles["DR-2"].position_seq, seq2)
+
+
 SCENARIOS = [
+    ("Mock: re-init keeps listed vehicles (parked stays parked, no teleport, seq continues)", test_reinit_keeps_vehicles),
     ("Mock: startup, physics tick, and telemetry schema", test_startup_physics_telemetry),
     ("Mock: origin coordinates not double-offset in apply_goals", test_origin_coordinates_not_double_offset),
     ("Mock: elevated and sunken landing, touchdown, and relaunch datum conversion", test_elevated_and_sunken_landing_and_relaunch),

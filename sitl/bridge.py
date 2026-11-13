@@ -422,6 +422,10 @@ class State:
     # Serializes "init" handling so two inits can't interleave fleet teardown
     # and setup. Created here, bound to a loop on first use.
     init_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    # id -> (position_seq, landed_seq) of a vehicle an init dropped, so the id
+    # resumes its counters if a later init brings it back: a watcher tab only
+    # takes a fix as new when its seq beats the largest it has seen.
+    seq_floor: dict = field(default_factory=dict)
 
 
 STATE = State()
@@ -1105,8 +1109,48 @@ async def _may_control(websocket, *, acquire: bool = False) -> bool:
     return True
 
 
+async def _close_vehicle(v: Vehicle) -> None:
+    """Stop one vehicle's task and close its MAVLink socket; its sequence
+    counters are kept so the id resumes them if an init brings it back."""
+    if v.task is not None:
+        v.task.cancel()
+        await asyncio.gather(v.task, return_exceptions=True)
+        STATE.vehicle_tasks = [t for t in STATE.vehicle_tasks if t is not v.task]
+    if v.conn is not None:
+        try:
+            v.conn.close()
+        except Exception:  # pragma: no cover - best-effort cleanup
+            pass
+    STATE.seq_floor[v.id] = (v.position_seq, v.landed_seq)
+
+
+async def _retire_vehicles(keep: set) -> None:
+    """Drop the vehicles an init no longer lists (or whose socket never bound,
+    so a fresh vehicle can retry the bind)."""
+    for vid in list(STATE.vehicles):
+        v = STATE.vehicles[vid]
+        if vid not in keep or (v.task is not None and v.task.done()):
+            del STATE.vehicles[vid]
+            await _close_vehicle(v)
+
+
+def _keep_vehicle(v: Vehicle, websocket, origin: dict) -> None:
+    """An init that still lists a vehicle leaves it exactly as it is: a flying
+    vehicle keeps flying and one parked in a service phase (landed, swapping,
+    ...) stays parked, since only the service handshake may arm it again.
+    Only who hears its status and the echoed origin change."""
+    v.status_ws = websocket
+    v.origin = dict(origin)
+    if v.service_phase is None:
+        # A new session: request ids from an earlier one (a reloaded page
+        # numbers from 1 again) must not replay as duplicates of old acks.
+        v.service_id = None
+        v.service_history.clear()
+        v.service_action_history.clear()
+
+
 async def _stop_all_vehicles() -> None:
-    """Cancel vehicle tasks and close MAVLink sockets before a re-init."""
+    """Cancel every vehicle task and close every MAVLink socket (shutdown)."""
     tasks = [t for t in STATE.vehicle_tasks if t is not None]
     for task in tasks:
         task.cancel()
@@ -1125,13 +1169,19 @@ async def _stop_all_vehicles() -> None:
 
 
 async def handle_init(websocket, msg: dict, cli_count: Optional[int], base_port: int) -> None:
-    """Build the fleet, start one task per vehicle, report per-vehicle readiness.
+    """Fit the fleet to DR-1..DR-count, start a task per new vehicle, report
+    per-vehicle readiness.
+
+    An init is not a teardown: a vehicle it still lists keeps its socket,
+    task, flight and service state (see _keep_vehicle), so a reset, selector
+    change or reconnect never re-arms a vehicle parked mid battery swap.
 
     Reply: {"type":"ready","ids":[...],"vehicles":[{id, ready, state}, ...]}
     `ids` is kept flat for the browser client; `vehicles` carries the truth
     about what was actually confirmed (finding #12). A vehicle that isn't
-    ready is still listed -- it exists, it just isn't flying yet, and its
-    task keeps trying.
+    ready is still listed -- it exists, it just isn't flying yet (or is
+    parked in a service phase, which its state names), and its task keeps
+    trying.
     """
     async with STATE.init_lock:
         # Re-check ownership inside the lock: another client may have claimed
@@ -1156,26 +1206,28 @@ async def handle_init(websocket, msg: dict, cli_count: Optional[int], base_port:
         if not _owns_control(websocket):
             return
 
-        await _stop_all_vehicles()
+        ids = [f"DR-{i + 1}" for i in range(count)]
+        await _retire_vehicles(set(ids))
         if not _owns_control(websocket):
             return
 
-        ids = []
         vehicles = []
-        for i in range(count):
-            vid = f"DR-{i + 1}"
-            ids.append(vid)
-            v = Vehicle(id=vid, index=i, port=base_port + 10 * i, takeoff_alt=alt, status_ws=websocket, origin=dict(origin))
-            STATE.vehicles[vid] = v
+        for i, vid in enumerate(ids):
+            v = STATE.vehicles.get(vid)
+            if v is not None:
+                _keep_vehicle(v, websocket, origin)
+            else:
+                position_seq, landed_seq = STATE.seq_floor.pop(vid, (0, 0))
+                v = Vehicle(id=vid, index=i, port=base_port + 10 * i, takeoff_alt=alt, status_ws=websocket,
+                            origin=dict(origin), position_seq=position_seq, landed_seq=landed_seq)
+                # Start the new vehicle's task NOW, before waiting on
+                # anything: each one drains its own socket from its first
+                # tick, so a healthy vehicle's telemetry is live while a slow
+                # neighbour is still looking for its first heartbeat (#13b).
+                v.task = asyncio.create_task(vehicle_task(v))
+                STATE.vehicle_tasks.append(v.task)
             vehicles.append(v)
-
-        # Start every vehicle's task NOW, before waiting on anything: each
-        # one drains its own socket from its first tick, so a healthy
-        # vehicle's telemetry is live while a slow neighbour is still looking
-        # for its first heartbeat (finding #13b).
-        for v in vehicles:
-            v.task = asyncio.create_task(vehicle_task(v))
-            STATE.vehicle_tasks.append(v.task)
+        STATE.vehicles = {v.id: v for v in vehicles}
 
         # Wait for each vehicle's FIRST-PASS outcome independently. The
         # deadline covers the worst honest case (heartbeat wait + the three

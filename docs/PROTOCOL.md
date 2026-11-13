@@ -66,6 +66,7 @@ Requests initialization and allocation of vehicles, and fixes the common local o
 - `count` (integer $\ge 0$): Number of vehicles to initialize (`DR-1` through `DR-N`).
 - `alt` (float): Takeoff altitude in metres above each vehicle's launch point.
 - `origin` (object): The browser always sends it. When it is absent both servers use the zero origin; the bridge ignores an `init` whose `origin` is malformed (wrong `frame`, or non-finite `x`/`y`/`groundM`).
+- An `init` is not a teardown. A vehicle it still lists keeps its link, flight and service state: a flying vehicle keeps flying, and one parked in a service phase stays parked (its `ready` entry and telemetry `state` name the phase); only the §5.2 handshake arms it again. The browser picks a parked vehicle's service up from telemetry (`serviceId`, phases `landing` to `swapped`) and finishes it. `positionSeq` and `landedSeq` never restart for an id, also for one that leaves the fleet and comes back.
 
 #### `goals`
 Commands waypoint setpoints for active vehicles. The browser sends them at about 2 Hz (at most once per 0.5 s of sim time).

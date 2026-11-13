@@ -354,6 +354,7 @@ class FakeAutopilot:
         self.mode = 0
         self.alt = 0.0
         self.climbing = False
+        self.landing = False  # NAV_LAND accepted: descend, disarm on the ground
         self.ticks = 0
         self._seen = 0
 
@@ -369,17 +370,27 @@ class FakeAutopilot:
                 self.conn.push(ack_msg(MAV_CMD_COMPONENT_ARM_DISARM, self.arm_result))
                 if self.arm_result == MAV_RESULT_ACCEPTED:
                     self.armed = True
+                    self.landing = False
             elif kind == "takeoff":
                 self.conn.push(ack_msg(MAV_CMD_NAV_TAKEOFF, self.takeoff_result))
                 if self.takeoff_result == MAV_RESULT_ACCEPTED and self.climbs:
                     self.climbing = True
                     self.commanded_alt = self.alt + float(detail)
+            elif kind == "land":
+                self.conn.push(ack_msg(MAV_CMD_NAV_LAND))
+                self.landing, self.climbing = True, False
         target = self.commanded_alt if self.cap_alt is None else min(self.commanded_alt, self.cap_alt)
         if self.climbing and self.alt < target:
             self.alt = min(target, self.alt + self.climb_per_tick)
+        if self.landing:
+            self.alt = max(0.0, self.alt - self.climb_per_tick)
+            if self.alt == 0.0:
+                self.armed = False
         if self.heartbeats:
             self.conn.push(hb_msg(armed=self.armed, custom_mode=self.mode))
         self.conn.push(pos_msg(self.north, self.east, -self.alt))
+        if self.landing and not self.armed:
+            self.conn.push(ext_state_msg(1))
 
     async def run(self, stop: asyncio.Event) -> None:
         if self.gate is not None:
@@ -705,8 +716,10 @@ async def scenario_second_client_blocked() -> None:
     assert reply2["ids"] == ["DR-1", "DR-2"], reply2
     assert ready_entry(reply2, "DR-1")["ready"] is True, reply2
     assert ready_entry(reply2, "DR-2")["ready"] is True, reply2
-    assert bridge.STATE.vehicles["DR-1"] is not v1_before, "takeover must rebuild the fleet"
-    assert bridge.STATE.vehicles["DR-1"].takeoff_alt == 15.0
+    # A takeover is not a teardown: the flying DR-1 is kept as it is, never
+    # re-armed or re-commanded to take off (python-sitl/reinit-rearms-parked-vehicle).
+    assert bridge.STATE.vehicles["DR-1"] is v1_before, "takeover rebuilt a flying vehicle"
+    assert v1_before.takeoff_alt == 40.0 and conn_for(14550).count("takeoff") == 1, conn_for(14550).kinds()
 
     await h.close()
 
@@ -930,7 +943,7 @@ async def scenario_init_disconnect_races():
         entered = asyncio.Event()
         release = asyncio.Event()
         original_send = ws.send
-        original_stop = bridge._stop_all_vehicles
+        original_retire = bridge._retire_vehicles
 
         async def send(raw):
             msg = json.loads(raw)
@@ -942,14 +955,14 @@ async def scenario_init_disconnect_races():
                 await release.wait()
             await original_send(raw)
 
-        async def stop():
-            await original_stop()
+        async def retire(keep):
+            await original_retire(keep)
             if phase == "stop":
                 entered.set()
                 await release.wait()
 
         ws.send = send
-        with patch.object(bridge, "_stop_all_vehicles", stop):
+        with patch.object(bridge, "_retire_vehicles", retire):
             if phase == "lock":
                 await bridge.STATE.init_lock.acquire()
             task = h.init(ws, count=1 if phase == "first-pass" else 0, alt=30.0)
@@ -2091,7 +2104,68 @@ async def scenario_reinit_airborne_no_takeoff():
     await h.close()
 
 
+async def _service(ws, action: str, request_id: str = "svc-1", vid: str = "DR-1", **extra) -> None:
+    await bridge.handle_message(ws, json.dumps({
+        "type": "service", "id": vid, "requestId": request_id, "action": action, **extra,
+    }), None, 14550)
+
+
+async def scenario_reinit_keeps_parked_vehicle():
+    """An init (reset button, selector change, reconnect) must not arm a
+    vehicle parked mid battery swap: it stays parked, its state is named in
+    the ready reply, and only the service handshake relaunches it."""
+    h = Harness()
+    ws = h.client("browser-1")
+    h.telemetry()
+    ap = h.autopilot(14550)
+    conn = conn_for(14550)
+    reply = await ready_reply(ws, h.init(ws, count=1, alt=30.0))
+    assert ready_entry(reply, "DR-1")["ready"] is True, reply
+    v = vehicle("DR-1")
+    await _service(ws, "land")
+    assert await wait_until(lambda: v.service_phase == "landed", timeout=5.0), (v.service_phase, v.init_state)
+    await _service(ws, "authorize")
+    assert v.service_phase == "swapping" and not ap.armed, v.service_phase
+    arms, takeoffs = conn.count("arm"), conn.count("takeoff")
+
+    reply = await ready_reply(ws, h.init(ws, count=1, alt=30.0))
+    await asyncio.sleep(0.3)  # a rebuilt vehicle would be through GUIDED and arming by now
+    assert conn.count("arm") == arms and conn.count("takeoff") == takeoffs, conn.kinds()[-12:]
+    assert bridge.STATE.vehicles["DR-1"] is v and v.service_phase == "swapping", (v.service_phase, v.init_state)
+    assert not ap.armed and ap.alt == 0.0
+    assert ready_entry(reply, "DR-1") == {"id": "DR-1", "ready": False, "state": "swapping"}, reply
+
+    # The handshake itself still finishes the swap and relaunches it.
+    await _service(ws, "complete")
+    await _service(ws, "relaunch", alt=20.0)
+    assert await wait_until(lambda: v.ready, timeout=5.0), (v.service_phase, v.init_state)
+    assert v.service_phase is None and conn.count("arm") == arms + 1
+    await h.close()
+
+
+async def scenario_reinit_keeps_position_seq():
+    """positionSeq never restarts on an init: a watcher tab only takes a fix as
+    new when its seq beats the largest it has seen, so a restart froze it."""
+    h = Harness()
+    ws = h.client("browser-1")
+    h.autopilot(14550)
+    h.autopilot(14560)
+    await ready_reply(ws, h.init(ws, count=2, alt=30.0))
+    v1, v2 = vehicle("DR-1"), vehicle("DR-2")
+    seq1 = v1.position_seq
+    assert seq1 > 0
+    await ready_reply(ws, h.init(ws, count=2, alt=30.0))
+    assert vehicle("DR-1") is v1 and v1.position_seq >= seq1, (v1.position_seq, seq1)
+    await ready_reply(ws, h.init(ws, count=1, alt=30.0))  # DR-2 leaves the fleet...
+    seq2 = v2.position_seq
+    await ready_reply(ws, h.init(ws, count=2, alt=30.0))  # ...and comes back
+    assert vehicle("DR-2").position_seq >= seq2 > 0, (vehicle("DR-2").position_seq, seq2)
+    await h.close()
+
+
 SCENARIOS = [
+    ("re-init keeps a vehicle parked mid-swap parked; only the handshake relaunches it", scenario_reinit_keeps_parked_vehicle),
+    ("re-init keeps positionSeq increasing, also for an id that leaves and returns", scenario_reinit_keeps_position_seq),
     ("A2: init of an airborne vehicle at altitude is READY without NAV_TAKEOFF", scenario_reinit_airborne_no_takeoff),
     ("A2: a failed relaunch stays parked and is never re-armed by the bridge", scenario_relaunch_failure_stays_parked),
     ("A2: a PX4 vehicle is reported unsupported, not failed:mode, and never retried", scenario_px4_reported_unsupported),

@@ -334,6 +334,7 @@ async def test_ready_means_takeoff_altitude() -> None:
         assert_conform(bv.at_takeoff_alt, "Bridge: 29.5 m of a 30 m takeoff not accepted")
 
     with patch.object(mv, "_now", lambda: clock[0]):
+        mv.WORLD = mv.World()  # an init keeps a listed vehicle: start from an empty fleet
         mv.WORLD.reset(1, 30.0)
         m = mv.WORLD.vehicles["DR-1"]
         m.armed = True
