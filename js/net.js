@@ -81,8 +81,11 @@ function makeNet(seed) {
     byKind: {},
     // shared-channel accounting: ACTUAL on-air seconds, billed per channel at
     // the moment of transmission (never at enqueue — see stepNet), plus an
-    // estimate of queued-but-unsent air per channel for latency decisions
-    airAccumByChan: {}, airIntervals: [], chanPendingSec: {}, utilSince: 0, utilization: 0,
+    // estimate of queued-but-unsent air per channel for latency decisions.
+    // The video share is kept apart so the UI can tell payload from C2
+    // overhead: utilization is all air, ctl/vidUtilization its two parts.
+    airAccumByChan: {}, vidAirAccumByChan: {}, airIntervals: [], chanPendingSec: {}, utilSince: 0,
+    utilization: 0, ctlUtilization: 0, vidUtilization: 0,
     // rolling capture log (like a Wireshark trace): last CAP_MAX events
     cap: [], capSeq: 0,
     // packet id counter — always advances, independent of capture being on,
@@ -206,8 +209,8 @@ function channelKeyOf(radio) {
 // reservation to unwind (findings #3/#4/#5/#16). `chanPendingSec` tracks
 // queued-but-unsent air per channel as an estimate for latency decisions
 // (video's freshness guard), not as a reservation.
-function billAir(s, chan, start, end) {
-  const interval = { chan, start, end };
+function billAir(s, chan, start, end, vid) {
+  const interval = { chan, start, end, vid: !!vid };
   s.net.airIntervals.push(interval);
   return interval;
 }
@@ -218,6 +221,7 @@ function accountAir(s, until) {
     const end = Math.min(until, air.end);
     const secs = Math.max(0, end - air.start);
     s.net.airAccumByChan[air.chan] = (s.net.airAccumByChan[air.chan] || 0) + secs;
+    if (air.vid) s.net.vidAirAccumByChan[air.chan] = (s.net.vidAirAccumByChan[air.chan] || 0) + secs;
     air.start = Math.max(air.start, end);
     if (air.end > until) s.net.airIntervals[write++] = air;
   }
@@ -483,7 +487,7 @@ function commitPacket(s, p, eStart) {
   s.net.nodeTxUntil[p.res.txKey] = end;
   const dc = p.res.rad && p.res.rad.dutyCycle;
   if (dc && dc < 1) s.net.nodeDutyUntil[p.res.txKey] = end + p.res.singleTx * (1 - dc) / dc;
-  p.attempt = { start: eStart, end, success, air: billAir(s, p.res.chan, eStart, end), interruptedAt: null, interruptedReason: null };
+  p.attempt = { start: eStart, end, success, air: billAir(s, p.res.chan, eStart, end, p.kind === 'vid'), interruptedAt: null, interruptedReason: null };
   p.marginDb = +margin.toFixed(1);
   s.net.txAt[from] = eStart;
   p.fired = true;
@@ -1054,14 +1058,24 @@ function stepNet(s, dt) {
 
   // Sliding utilization estimate from ACTUAL on-air seconds, per channel —
   // independent bands are independent air, so report the busiest one rather
-  // than summing unrelated spectrum into a number that can exceed 1.
+  // than summing unrelated spectrum into a number that can exceed 1. The
+  // control and video parts are each their busiest channel's share, so on
+  // one channel they add up to the total.
   while (s.time - s.net.utilSince >= 5) {
     const end = s.net.utilSince + 5;
     accountAir(s, end);
-    let peak = 0;
-    for (const k in s.net.airAccumByChan) peak = Math.max(peak, s.net.airAccumByChan[k] / 5);
+    let peak = 0, ctlPeak = 0, vidPeak = 0;
+    for (const k in s.net.airAccumByChan) {
+      const all = s.net.airAccumByChan[k], vid = s.net.vidAirAccumByChan[k] || 0;
+      peak = Math.max(peak, all / 5);
+      ctlPeak = Math.max(ctlPeak, (all - vid) / 5);
+      vidPeak = Math.max(vidPeak, vid / 5);
+    }
     s.net.utilization = Math.min(1, peak);
+    s.net.ctlUtilization = Math.min(1, ctlPeak);
+    s.net.vidUtilization = Math.min(1, vidPeak);
     s.net.airAccumByChan = {};
+    s.net.vidAirAccumByChan = {};
     s.net.utilSince = end;
   }
   accountAir(s, s.time);

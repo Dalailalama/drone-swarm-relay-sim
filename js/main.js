@@ -686,7 +686,7 @@
     const r = radio.hopGainDb;
     agilityOut.textContent = agilityChk.checked
       ? (r ? '+' + r + ' dB anti-jam on ' + radio.name.split(' ')[0] : 'no hopping capability on this radio')
-      : 'frequency-hopping anti-jam';
+      : 'anti-jam spectrum agility';
   }
   function applyLpi() {
     if (!swarm) return;
@@ -696,7 +696,7 @@
   }
   agilityChk.addEventListener('change', () => {
     applyAgility();
-    if (swarm) logEvent(swarm, 'Spectrum agility ' + (swarm.spectrumAgility ? 'ON — frequency hopping active' : 'off'), 'info');
+    if (swarm) logEvent(swarm, 'Spectrum agility ' + (swarm.spectrumAgility ? 'ON — anti-jam waveform active' : 'off'), 'info');
   });
   lpiChk.addEventListener('change', () => {
     applyLpi();
@@ -1260,7 +1260,8 @@
     // A loaded real area pins the exact geographic anchor; otherwise the
     // operator-entered origin converts local metres to lat/lon. The origin
     // HAE is the vertical datum for every exported altitude (finding #26) —
-    // left blank, exports omit hae rather than invent one.
+    // left blank, exports send TAK's unknown hae (9999999, js/tak.js) rather
+    // than invent one.
     const hae = takHae ? parseFloat(takHae.value) : NaN;
     const haeM = isNaN(hae) ? null : hae;
     const geo = swarm && swarm.terrain && swarm.terrain.geoAnchor;
@@ -1582,13 +1583,18 @@
     kpiContact.textContent = status.freshCount + '/' + status.aliveCount;
     kpiPackets.textContent = swarm.net.delivered.toLocaleString();
     // Payload capacity: hop-divided air rate, minus what C2 traffic is already
-    // burning, capped by any legal duty cycle.
-    const effKbps = chainCapacityKbps(status.hops) * Math.max(0, 1 - swarm.net.utilization);
+    // burning, capped by any legal duty cycle. Video is the payload, so its
+    // own airtime is not subtracted from it.
+    const net = swarm.net;
+    const effKbps = chainCapacityKbps(status.hops) * Math.max(0, 1 - net.ctlUtilization);
     kpiThroughput.textContent = status.fleetConnected
       ? (effKbps >= 1000 ? (effKbps / 1000).toFixed(1) + ' Mbps'
         : effKbps.toFixed(effKbps < 10 ? 1 : 0) + ' kbps')
       : '—';
-    chanLine.textContent = 'Channel busy ' + (swarm.net.utilization * 100).toFixed(1) + '% with C2 traffic'
+    chanLine.textContent = 'Channel busy ' + (net.utilization * 100).toFixed(1) + '%'
+      + (swarm.videoOn || net.vidUtilization > 0
+        ? ' · C2 ' + (net.ctlUtilization * 100).toFixed(1) + '% · video ' + (net.vidUtilization * 100).toFixed(1) + '%'
+        : ' with C2 traffic')
       + (radio.dutyCycle ? ' · ' + (radio.dutyCycle * 100) + '% legal duty cycle' : '');
     kpiClock.textContent = fmtSimClock(swarm.time)
       + (!paused && achievedRate && Math.abs(achievedRate - rateScale) > 0.05 * rateScale ? ' · ' + Math.round(achievedRate) + '×' : '');
@@ -1615,10 +1621,14 @@
     // O7: assign innerHTML only when the rendered string actually changed —
     // re-parsing identical panels at 5 Hz was pure layout churn (a 100-row
     // fleet list is the panel path's dominant cost).
-    const hopsHtml = status.hops.map((h, i) =>
-      '<tr class="' + escHtml(h.state) + '"><td>' + escHtml(h.a.label) + ' → ' + escHtml(h.b.label) + '</td><td>' + fmtDist(h.distM) +
-      '</td><td>' + h.marginDb.toFixed(0) + ' dB</td><td>' + (h.lossPct < 1 ? '<1' : h.lossPct.toFixed(0)) + '%</td></tr>'
-    ).join('') || '<tr><td colspan="4" class="dim">no links</td></tr>';
+    // Loss follows the delivery gate (net.js commitPacket): at an instantaneous
+    // margin of 0 dB or less no packet gets through, whatever the smoothed
+    // label shows, so the row reads 100% rather than the logistic 84-99%.
+    const hopsHtml = status.hops.map((h, i) => {
+      const loss = h.rawMarginDb > 0 ? h.lossPct : 100;
+      return '<tr class="' + escHtml(h.state) + '"><td>' + escHtml(h.a.label) + ' → ' + escHtml(h.b.label) + '</td><td>' + fmtDist(h.distM) +
+        '</td><td>' + h.marginDb.toFixed(0) + ' dB</td><td>' + (loss < 1 ? '<1' : loss.toFixed(0)) + '%</td></tr>';
+    }).join('') || '<tr><td colspan="4" class="dim">no links</td></tr>';
     if (hopsHtml !== lastHopsHtml) { hopsBody.innerHTML = hopsHtml; lastHopsHtml = hopsHtml; }
 
     // O7: Keyed incremental DOM row updates for fleet list (Item 7)

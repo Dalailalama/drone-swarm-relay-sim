@@ -31,7 +31,7 @@ const SCENARIO_PACK = [
   {
     id: 'ddil-disrupted',
     title: 'D — Disrupted (jamming, agile chain)',
-    blurb: 'A frequency-hopping MANET chain runs into two emitters blocking the direct corridor. Spectrum agility sheds part of the denial; A* bends the chain around what remains. Toggle agility off mid-run to see the difference in link uptime.',
+    blurb: 'A frequency-agile MANET chain runs into two emitters blocking the direct corridor. Spectrum agility sheds part of the denial; A* bends the chain around what remains. Toggle agility off mid-run to see the difference in link uptime.',
     scenario: {
       version: 1,
       name: 'DDIL: disrupted corridor',
