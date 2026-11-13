@@ -1756,6 +1756,11 @@ function droneComms(s, d) {
     const changed = sig !== (d.order.role + '/' + Math.round(cg.x) + ',' + Math.round(cg.y));
     if (changed && !orderFeasible(s, d, o) &&
         (orderFeasible(s, d, d.order) || orderEnergyWh(s, d, o) > orderEnergyWh(s, d, d.order))) {
+      // Already flying home on RTB: the order is not taken, but there is
+      // nothing to decline — no log line per order on the way home, no latch.
+      // RTB stops telemetry and a relaunch clears the latch, so C2 never
+      // heard of these declines anyway.
+      if (d.mode === 'rtb') continue;
       d.rejectedRole = o.role;
       if (d.rejectedSig !== sig) {
         d.rejectedSig = sig;
