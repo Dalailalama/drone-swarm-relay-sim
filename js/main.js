@@ -686,7 +686,7 @@
     const r = radio.hopGainDb;
     agilityOut.textContent = agilityChk.checked
       ? (r ? '+' + r + ' dB anti-jam on ' + radio.name.split(' ')[0] : 'no hopping capability on this radio')
-      : 'frequency-hopping anti-jam';
+      : 'anti-jam spectrum agility';
   }
   function applyLpi() {
     if (!swarm) return;
@@ -696,7 +696,7 @@
   }
   agilityChk.addEventListener('change', () => {
     applyAgility();
-    if (swarm) logEvent(swarm, 'Spectrum agility ' + (swarm.spectrumAgility ? 'ON — frequency hopping active' : 'off'), 'info');
+    if (swarm) logEvent(swarm, 'Spectrum agility ' + (swarm.spectrumAgility ? 'ON — anti-jam waveform active' : 'off'), 'info');
   });
   lpiChk.addEventListener('change', () => {
     applyLpi();
