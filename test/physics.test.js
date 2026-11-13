@@ -109,3 +109,24 @@ test('every radio preset cites a datasheet source', () => {
   assert.strictEqual(src('rfd900x'), 'https://rfdesign.com.au/wp-content/uploads/x-Series-Datasheet-V2.0.pdf');
   assert.strictEqual(src('rajant-es1'), 'https://secure.rajant.com/publicFiles/1479');
 });
+
+// A link's shadow fade started at exactly 0 dB and only grew to the stated
+// sigma over a few tau (43 % of it after 1 s), so every link at t=0 and every
+// link re-formed after a prune was systematically less faded than documented.
+test('a fresh link\'s shadow fade is drawn from the stationary distribution', () => {
+  const { loadCore } = require('./helpers/sim.js');
+  const ctx = loadCore();
+  const s = { time: 0, shadowSigmaDb: 4.5, net: null };
+  const first = seed => { s.net = ctx.makeNet(seed); return ctx.fadeDb(s, 'C2', 'DR-1'); };
+  const xs = [];
+  for (let seed = 1; seed <= 2000; seed++) xs.push(first(seed));
+  const mean = xs.reduce((a, x) => a + x, 0) / xs.length;
+  const sd = Math.sqrt(xs.reduce((a, x) => a + (x - mean) ** 2, 0) / (xs.length - 1));
+  assert.ok(Math.abs(sd - 4.5) < 0.05 * 4.5, 'first-fade std ' + sd.toFixed(2) + ' dB vs environment sigma 4.5 dB');
+  assert.ok(Math.abs(mean) < 0.25, 'first-fade mean ' + mean.toFixed(2) + ' dB');
+  assert.strictEqual(first(77), first(77), 'same seed, same first fade');
+  // No shadowing: no fade, and no draw — sigma-0 runs keep their RNG stream.
+  s.shadowSigmaDb = 0;
+  assert.strictEqual(first(77), 0);
+  assert.strictEqual(s.net.rng(), ctx.makeNet(77).rng());
+});

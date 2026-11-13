@@ -584,12 +584,20 @@ function stepBcasts(s) {
 // Each link carries a slowly-wandering dB offset (Ornstein-Uhlenbeck process):
 // terrain and obstruction effects that persist for seconds as drones move,
 // on top of deterministic path loss. Stationary std dev = environment sigma.
+// Each fade starts IN that stationary distribution, so a link that appears
+// at t=0, or re-forms after being pruned, carries the full sigma from birth
+// instead of growing out of 0 dB over a few tau. (No shadowing, no draw:
+// sigma-0 runs keep their RNG stream.)
 const FADE = { tauSec: 10, pruneSec: 30 };
 
 function fadeDb(s, aId, bId) {
   const key = aId < bId ? aId + '|' + bId : bId + '|' + aId;
   let f = s.net.fades.get(key);
-  if (!f) { f = { db: 0, lastUsed: s.time }; s.net.fades.set(key, f); }
+  if (!f) {
+    const sigma = s.shadowSigmaDb || 0;
+    f = { db: sigma ? sigma * gaussian(s.net.rng) : 0, lastUsed: s.time };
+    s.net.fades.set(key, f);
+  }
   f.lastUsed = s.time;
   return f.db;
 }
