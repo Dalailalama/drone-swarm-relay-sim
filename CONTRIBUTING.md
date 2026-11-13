@@ -76,3 +76,16 @@ Changes under `sitl/` need the Python suites green (Python 3.11 or 3.12);
 `test_bridge.py`, the conformance suite and the failure scenarios run with
 nothing installed, the mock and TAK bridge suites and the acceptance run need
 `websockets`.
+
+One optional check is not in the default suites: `test/test_integration_mock.py`
+drives the real page in headless Chromium against the mock (connect, land,
+battery swap, relaunch). It needs Playwright and a browser download, so it
+runs on demand only, locally or in CI (Actions, "Browser E2E (opt-in)", Run
+workflow; see `.github/workflows/e2e.yml`, which uploads the trace and
+screenshots from `test-results/`):
+
+```
+pip install -r test/requirements-e2e.txt         # playwright, websockets
+python -m playwright install chromium
+python -B test/test_integration_mock.py
+```

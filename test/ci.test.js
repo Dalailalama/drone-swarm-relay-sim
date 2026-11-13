@@ -93,3 +93,25 @@ test('.gitignore covers batch reports and local Python venvs', () => {
   const lines = fs.readFileSync(path.join(ROOT, '.gitignore'), 'utf8').split(/\r?\n/).map(l => l.trim());
   for (const p of ['out/', '.venv/', 'venv/']) assert.ok(lines.includes(p), '.gitignore should list ' + p);
 });
+
+// playwright-e2e-unrun-and-weak: the only browser <-> mock test imported an
+// undeclared dependency, ran nowhere, printed success from `finally`, and its
+// last wait also passed when the relaunch FAILED ('retries exhausted').
+test('the Playwright e2e is opt-in, declared, and ends on positive evidence', () => {
+  const read = (p) => fs.readFileSync(path.join(ROOT, p), 'utf8').replace(/\r\n/g, '\n');
+  const wf = read('.github/workflows/e2e.yml');
+  assert.match(wf, /^on:\n  workflow_dispatch:\n\n/m, 'the e2e workflow must run on demand only');
+  assert.match(wf, /pip install -r test\/requirements-e2e\.txt/);
+  assert.match(wf, /playwright install --with-deps chromium/);
+  assert.match(wf, /run: python -B test\/test_integration_mock\.py/);
+  assert.ok(!/test_integration_mock|playwright/.test(CI), 'the default CI must not need Playwright');
+  assert.match(read('test/requirements-e2e.txt'), /^playwright==\d+\.\d+\.\d+$/m, 'pin playwright');
+  const e2e = read('test/test_integration_mock.py');
+  assert.match(e2e, /msg\.action === 'relaunch' && msg\.id === 'DR-1'/, 'require that a relaunch was sent');
+  assert.match(e2e, /d\.servicePhase === 'none' && d\.state === 'ready'/, 'require DR-1 back READY with no service');
+  assert.match(e2e, /!d\.failureReason/);
+  const fin = e2e.slice(e2e.indexOf('        finally:'));
+  assert.ok(!/completed successfully/.test(fin.slice(0, fin.indexOf('\n    print('))),
+    'success must not be printed from finally (it showed on failures too)');
+  assert.match(read('CONTRIBUTING.md'), /test\/requirements-e2e\.txt/);
+});

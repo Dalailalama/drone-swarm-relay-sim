@@ -61,6 +61,10 @@ test('reinit-rearms-parked-vehicle: a vehicle the bridge kept parked mid-swap th
   assert.strictEqual(ui.ctx.ExternalMode.services[d.id], undefined);
   assert.strictEqual(d.mode, 'ok', 'the relaunched vehicle is back in the fleet');
   assert.ok(ui.ctx.ExternalMode.serviceSeq >= 7, 'later request ids must not reuse the adopted one');
+  // The Playwright e2e (test/test_integration_mock.py) ends on exactly this.
+  const diag = ui.ctx.getExternalDiagnostics().find(v => v.id === d.id);
+  assert.ok(diag.servicePhase === 'none' && diag.state === 'ready' && diag.ready === true && !diag.failureReason,
+    JSON.stringify(diag));
 });
 
 test('cli-count-ghost-drones: drones the bridge has no vehicle for go down, are never relays, and readiness reads 3/N', () => {
