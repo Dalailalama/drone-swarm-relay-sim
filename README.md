@@ -38,8 +38,12 @@ lets you design and stress-test that — against real radio hardware specs,
 real terrain, and real interference — before spending a cent on drones.
 
 No build step, no dependencies. Open `index.html` from any static server.
-(UI typeface — IBM Plex Mono — loads from Google Fonts and degrades
-gracefully to your system monospace offline.)
+Nothing is fetched from a third party on load: the UI uses your system
+monospace font (IBM Plex only if it is installed locally), and basemap tiles
+and OpenStreetMap lookups happen only when you use those features. The page
+carries a Content-Security-Policy `<meta>` (if your server also sends a CSP
+header, the browser applies both); WebSockets may go to any `ws:`/`wss:`
+host so remote SITL and TAK bridges work.
 
 ```
 python -m http.server 8000
@@ -403,12 +407,18 @@ contributors (ODbL).
 
 ```
 js/radios.js     radio presets (datasheet values + sources) & link physics
+js/terrain.js    fractal heightfield, procedural city, LOS / Fresnel test
+js/osm.js        OpenStreetMap building import + the shared WGS-84 projection
+js/tiles.js      OpenStreetMap raster basemap under the 2D map
 js/airframes.js  airframe presets & momentum-theory energy model
 js/fleet.js      heterogeneous fleets: mixed-band per-direction link budgets
 js/gpsnav.js     GPS-denied dead-reckoning belief model
 js/net.js        packet network: routing, per-hop airtime, fading, retries
 js/swarm.js      C2 planner, drone onboard logic, failsafes, motion
+js/replay.js     replays a packet capture from seed + settings + user actions
 js/render.js     canvas map: links, packets, range rings, wind, scale bar
+js/view3d.js     hand-rolled 3D perspective view (no WebGL)
+js/external.js   external vehicle mode: browser side of the SITL bridge
 js/scenarios.js  DDIL scenario pack (bundled one-click demos)
 js/missions.js   vertical mission library (SAR/wildfire/pipeline/convoy/perimeter)
 js/adversary.js  red-team mode: DF-hunting interference sources
@@ -416,20 +426,28 @@ js/tak.js        ATAK/TAK Cursor-on-Target export + import
 js/calibrate.js  sim-to-real loop: CSV ingest, path-loss fit, validation
 js/batchstats.js Monte Carlo aggregation (distributions per cell)
 js/main.js       UI wiring, sim loop, camera
-sitl/            MAVLink bridge, mock vehicles, TAK multicast bridge
-tools/           batch engine CLI (batch.js) + REST API server (server.js)
+sitl/            MAVLink bridge, mock vehicles, TAK multicast bridge (tak_bridge.py)
+tools/           batch engine CLI (batch.js), REST API server (server.js),
+                 scenario comparison dashboard (compare.js)
 bench/           scale benchmark suite + committed BASELINE.md
-test/            physics + integration tests (node --test)
+test/            physics + integration tests (npm test)
 ```
 
-Plain ES5-ish JavaScript, zero dependencies, deterministic under a seeded
-RNG (same seed → bit-identical run, which is what makes the tests possible).
+Modern JavaScript (ES2020: `??`, arrow functions, object spread) with no
+transpiler, so it needs a current browser (roughly Chrome 80, Firefox 72 or
+Safari 13.1 and later). Zero dependencies, deterministic under a seeded RNG
+(same seed → bit-identical run, which is what makes the tests possible).
 
 ## Tests
 
 ```
-node --test
+npm test
 ```
+
+`npm test` runs `node --test "test/*.test.js"` and needs Node 22 or later
+(CI runs 22.x and 24.x). A bare `node --test` also picks up the helpers in
+`test/helpers/` and reports two extra tests. [CONTRIBUTING.md](CONTRIBUTING.md)
+lists the Python suites and the other pre-PR checks.
 
 ## Interference / RF denial
 
@@ -492,9 +510,12 @@ motion is externalized. See [sitl/README.md](sitl/README.md).
   relaunch verification with `python sitl/run_acceptance.py`.
 - **Real ArduPilot SITL**: Real SITL flight requires a Linux ArduPilot
   environment (`./run_ardupilot_sitl.sh` and `python sitl/bridge.py`).
-- **CI**: every push runs the JavaScript suite plus the Python bridge,
-  executable-mock, protocol-conformance and failure-scenario suites. These are
-  mock-level checks; real SITL flight is not part of CI.
+- **CI**: every push to `main` and every pull request to `main` runs the
+  JavaScript suite plus the Python bridge, executable-mock,
+  protocol-conformance, failure-scenario and TAK-bridge suites and the mock
+  acceptance run. These are mock-level checks; real SITL flight is not part
+  of CI. A Playwright browser-to-mock end-to-end test is opt-in (the manual
+  "Browser E2E" workflow; see [CONTRIBUTING.md](CONTRIBUTING.md)).
 
 ## Where this is going
 
