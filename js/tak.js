@@ -157,7 +157,11 @@ function buildCotFromSwarm(s, anchor, nowSec) {
 // under Node, no dependencies allowed).
 function parseCoTFile(text) {
   const marks = [];
-  const evRe = /<event\b[^>]*>/g;
+  // Every scan stays inside ONE atom: import runs on the UI thread, and a
+  // search that ran to the end of the file per atom made a crafted file of
+  // unclosed atoms O(n²) (seconds at 16k atoms). `<` can't appear raw in an
+  // XML attribute, so a tag that never closes stops at the next `<`.
+  const evRe = /<event\b[^<>]*>/g;
   // Quotes match their OPENING delimiter via backreference (finding #27):
   // the old ["']...["'] class let either quote end either style, truncating
   // callsign="O'Brien" to "O". The opposite quote inside is data. The name
@@ -170,22 +174,25 @@ function parseCoTFile(text) {
     const v = attrRaw(tag, name);
     return v == null ? null : unesc(v);
   };
+  const starts = [];
   let m;
-  while ((m = evRe.exec(text)) !== null) {
-    const tag = m[0];
+  while ((m = evRe.exec(text)) !== null) starts.push(m);
+  for (let i = 0; i < starts.length; i++) {
+    const tag = starts[i][0];
     const uid = attr(tag, 'uid');
     const type = attr(tag, 'type') || 'a-u-?';
-    // point may follow anywhere after <event> up to </event> or next event
-    const end = text.indexOf('</event>', m.index);
-    const scope = text.slice(m.index, end === -1 ? m.index + 2000 : end);
-    const pm = scope.match(/<point\b[^>]*\/?>/);
+    // An atom runs to its </event>, or to the next <event> if it never closes.
+    let scope = text.slice(starts[i].index, i + 1 < starts.length ? starts[i + 1].index : text.length);
+    const close = scope.indexOf('</event>');
+    if (close !== -1) scope = scope.slice(0, close);
+    const pm = scope.match(/<point\b[^<>]*\/?>/);
     if (!pm) continue;
     const lat = parseFloat(attrRaw(pm[0], 'lat'));
     const lon = parseFloat(attrRaw(pm[0], 'lon'));
     const hae = parseFloat(attrRaw(pm[0], 'hae'));
     if (!isFinite(lat) || !isFinite(lon)) continue;
     // The mark's own name is on <contact>, not <link parent_callsign=...>.
-    const cm = scope.match(/<contact\b[^>]*>/);
+    const cm = scope.match(/<contact\b[^<>]*>/);
     const cs = cm ? attrRaw(cm[0], 'callsign') : null;
     marks.push({
       uid: uid || 'cot-' + marks.length,

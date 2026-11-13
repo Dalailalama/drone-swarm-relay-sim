@@ -92,3 +92,47 @@ test('parser handles messy third-party CoT files', () => {
   assert.strictEqual(marks[0].callsign, 'ICP');
   assert.strictEqual(marks[1].callsign, 'Medevac-2');
 });
+
+// Import runs on the UI thread with no size limit: every scan must stay
+// inside one atom, or a crafted file of unclosed atoms costs O(n²) and
+// freezes the tab (3-12 s at 16k atoms before the fix; ~100 ms after).
+const COT_BUDGET_MS = 1500;
+const timed = fn => { const t0 = Date.now(); const r = fn(); return { r, ms: Date.now() - t0 }; };
+const openAtom = i => '<event uid="U' + i + '" type="a-f-G"><point lat="1" lon="2" hae="0"/>' +
+  '<detail><contact callsign="C' + i + '"/></detail>';
+
+test('unclosed atoms with one trailing </event> import in linear time', () => {
+  let text = '';
+  for (let i = 0; i < 16000; i++) text += openAtom(i);
+  const { r, ms } = timed(() => T.parseCoTFile(text + '</event>'));
+  assert.ok(ms < COT_BUDGET_MS, 'took ' + ms + ' ms');
+  assert.strictEqual(r.length, 16000);
+  assert.strictEqual(r[0].callsign, 'C0');
+  assert.strictEqual(r[15999].callsign, 'C15999');
+});
+
+test('unclosed atoms with no </event> at all import in linear time', () => {
+  let text = '';
+  for (let i = 0; i < 16000; i++) text += openAtom(i);
+  const { r, ms } = timed(() => T.parseCoTFile(text));
+  assert.ok(ms < COT_BUDGET_MS, 'took ' + ms + ' ms');
+  assert.strictEqual(r.length, 16000);
+});
+
+test('an <event> or <point> tag that never closes cannot stall the parser', () => {
+  const tags = timed(() => T.parseCoTFile('<event uid="x" '.repeat(40000)));
+  assert.ok(tags.ms < COT_BUDGET_MS, 'unterminated <event> tags took ' + tags.ms + ' ms');
+  assert.strictEqual(tags.r.length, 0);
+  const pts = timed(() => T.parseCoTFile('<event uid="p">' + '<point lat="1" '.repeat(40000) + '</event>'));
+  assert.ok(pts.ms < COT_BUDGET_MS, 'unterminated <point> tags took ' + pts.ms + ' ms');
+  assert.strictEqual(pts.r.length, 0);
+  const cts = timed(() => T.parseCoTFile('<event uid="c"><point lat="1" lon="2"/>' + '<contact '.repeat(40000) + '</event>'));
+  assert.ok(cts.ms < COT_BUDGET_MS, 'unterminated <contact> tags took ' + cts.ms + ' ms');
+  assert.deepStrictEqual(cts.r.map(m => m.callsign), ['c'], 'no contact parsed: the uid names it');
+});
+
+test('an unclosed point-less atom does not borrow the next atom\'s point', () => {
+  const marks = T.parseCoTFile('<event uid="NOPOINT"><detail><contact callsign="none"/></detail>' +
+    openAtom(1) + '</event>');
+  assert.deepStrictEqual(marks.map(m => m.uid + '/' + m.callsign), ['U1/C1']);
+});
