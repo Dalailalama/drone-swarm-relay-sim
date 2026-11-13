@@ -1464,6 +1464,22 @@
     return 'T+' + String(m).padStart(2, '0') + ':' + String(sec).padStart(2, '0');
   }
 
+  // Each hop runs at its own transmitter's rate (txRadioOf: a mixed fleet's
+  // wing hops fly the wing radio, not the tactical one) and duty cycle.
+  // Store-and-forward hops sharing a channel split its airtime (1/Σ 1/rate);
+  // separate channels run in parallel, so the slowest channel bounds the
+  // chain. One radio throughout reduces to air rate / hops · duty
+  // (audit ui-render/kpi-throughput-ignores-hop-radios).
+  function chainCapacityKbps(hops) {
+    if (!hops.length) return chainThroughputKbps(radio, 0) * (radio.dutyCycle ?? 1);
+    const inv = {};
+    for (const h of hops) {
+      const r = txRadioOf(swarm, h.a.id, h.b.id), k = channelKeyOf(r);
+      inv[k] = (inv[k] || 0) + 1 / (r.airRateKbps * (r.dutyCycle ?? 1));
+    }
+    return Math.min(...Object.values(inv).map(x => 1 / x));
+  }
+
   function updatePanels(status) {
     kpiRelays.textContent = status.relayCount;
     kpiMission.textContent = status.missionCount;
@@ -1471,8 +1487,7 @@
     kpiPackets.textContent = swarm.net.delivered.toLocaleString();
     // Payload capacity: hop-divided air rate, minus what C2 traffic is already
     // burning, capped by any legal duty cycle.
-    const effKbps = chainThroughputKbps(radio, status.hops.length)
-      * Math.max(0, 1 - swarm.net.utilization) * (radio.dutyCycle ?? 1);
+    const effKbps = chainCapacityKbps(status.hops) * Math.max(0, 1 - swarm.net.utilization);
     kpiThroughput.textContent = status.fleetConnected
       ? (effKbps >= 1000 ? (effKbps / 1000).toFixed(1) + ' Mbps'
         : effKbps.toFixed(effKbps < 10 ? 1 : 0) + ' kbps')
