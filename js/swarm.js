@@ -2387,10 +2387,13 @@ function afterActionReport(s) {
   L.push('- **Interference sources:** ' + activeJam + (activeJam ? ' active (RF denial in play)' : ' (clean spectrum)'));
   if (s.spectrumAgility || s.lpiMode) {
     const r = chainRadio(s);
-    L.push('- **EW waveforms:** ' +
-      (s.spectrumAgility && r.hopGainDb ? 'spectrum agility ON (+' + r.hopGainDb + ' dB anti-jam)' : '') +
-      (s.spectrumAgility && s.lpiMode ? ' · ' : '') +
-      (s.lpiMode ? 'LPI/LPD ON (\u2212' + AGILITY.lpiCostDb + ' dB budget, +' + AGILITY.lpiDenyReductionDb + ' dB denial rejection)' : ''));
+    const ew = [];
+    if (s.spectrumAgility) {
+      ew.push(r.hopGainDb ? 'spectrum agility ON (+' + r.hopGainDb + ' dB anti-jam)'
+        : 'spectrum agility requested, but ' + r.name + ' has no hopping capability');
+    }
+    if (s.lpiMode) ew.push('LPI/LPD ON (\u2212' + AGILITY.lpiCostDb + ' dB budget, +' + AGILITY.lpiDenyReductionDb + ' dB denial rejection)');
+    L.push('- **EW waveforms:** ' + ew.join(' · '));
   }
   const gpsZ = (s.gpsZones || []).filter(z => z.on !== false).length;
   if (gpsZ) {

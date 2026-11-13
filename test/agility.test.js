@@ -132,6 +132,23 @@ test('LPI cost is in hop planning: the planned hop keeps its full fade reserve',
   }
 });
 
+// Audit ui-render/aar-ew-line-dangling-separator: agility on a radio that
+// cannot hop printed '**EW waveforms:**  · LPI/LPD ON', or an empty line.
+test('the after-action EW line says when the radio cannot hop, with no dangling separator', () => {
+  const SIK = R.RADIOS.find(r => r.id === 'sik-v3');
+  const ewLine = opts => ctx.afterActionReport(makeSw(Object.assign({ radio: SIK, jammers: [] }, opts)))
+    .split(/\r?\n/).find(l => l.includes('**EW waveforms:**'));
+  for (const lpiMode of [true, false]) {
+    const line = ewLine({ spectrumAgility: true, lpiMode });
+    assert.doesNotMatch(line, /\*\*EW waveforms:\*\*\s+·/, line);
+    assert.doesNotMatch(line, /\*\*EW waveforms:\*\*\s*$/, line);
+    assert.match(line, /no hopping/, line);
+  }
+  assert.match(ewLine({ spectrumAgility: true, lpiMode: true, radio: DOODLE }),
+    /\*\*EW waveforms:\*\* spectrum agility ON \(\+13 dB anti-jam\) · LPI\/LPD ON/);
+  assert.match(ewLine({ lpiMode: true }), /\*\*EW waveforms:\*\* LPI\/LPD ON/);
+});
+
 test('the hop-spacing readout pays the LPI cost: shorter hops, same nominal margin', () => {
   const { loadUI } = require('./helpers/dom.js');
   const ui = loadUI();
