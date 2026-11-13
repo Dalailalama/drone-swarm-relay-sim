@@ -140,6 +140,17 @@
       t.landed === true && sampleAge(t, 'landed') >= 0 && sampleAge(t, 'landed') < EXT_STALE_SEC;
   }
 
+  // The ground crew is wherever the base TRULY is, as stepDrone rules: a
+  // vehicle that set down at a stale last-known home has nobody to swap it.
+  function crewAt(s, t) {
+    return Math.hypot(t.x + ExternalMode.origin.x - s.base.x, t.y + ExternalMode.origin.y - s.base.y) < DRONE.landThresholdM;
+  }
+
+  function landedWithoutCrew(s, id) {
+    const svc = ExternalMode.services[id], t = ExternalMode.telem[id];
+    return Boolean(svc && t && svc.id === t.serviceId && t.state === 'landed' && grounded(id) && !crewAt(s, t));
+  }
+
   function serviceSend(id, action, extra) {
     const svc = ExternalMode.services[id];
     if (!svc || !ExternalMode.connected) return;
@@ -379,7 +390,7 @@
             }
             if (v.state === 'landed' && grounded(v.id) && (svc.phase === 'landing' || svc.phase === 'landed')) {
               if (svc.pendingAction === 'land') { svc.pendingAction = null; svc.lastAction = null; svc.retries = 0; }
-              if (svc.phase !== 'swapping') {
+              if (svc.phase !== 'swapping' && crewAt(s, ExternalMode.telem[v.id])) {
                 dispatchServiceAction(s, v.id, 'authorize');
               }
             }
@@ -511,14 +522,22 @@
         }
         d.extLinkDown = false;
       }
-      if (externalServiceGrounded(d.id) && d.mode !== 'landed' && d.mode !== 'dead') {
+      const parked = externalServiceGrounded(d.id);
+      if ((parked || landedWithoutCrew(s, d.id)) && d.mode !== 'landed' && d.mode !== 'dead') {
         d.mode = 'landed';
         d.vx = 0;
         d.vy = 0;
         d.endpointDeadAt = s.time;
         if (typeof interruptEndpointAttempts === 'function') interruptEndpointAttempts(s, d.id);
-        d.swapAt = s.time + (typeof BATTERY !== 'undefined' && BATTERY.swapSec ? BATTERY.swapSec : 90);
-        logEvent(s, d.id + ' grounded for battery service', 'info');
+        if (parked) {
+          d.swapAt = s.time + (typeof BATTERY !== 'undefined' && BATTERY.swapSec ? BATTERY.swapSec : 90);
+          logEvent(s, d.id + ' grounded for battery service', 'info');
+        } else {
+          // Set down at a stale last-known home (the operator moved while C2
+          // was silent): no swap is authorized, so it stays landed for good.
+          d.swapAt = null;
+          logEvent(s, d.id + ' landed at its last-known base — no ground crew there', 'warn');
+        }
       }
       const p = ExternalMode.prev[d.id];
       d.vx = d.vy = 0;
@@ -558,7 +577,13 @@
     for (const d of s.drones) {
       if (!alive(d) || d.goalX == null) continue;
       const svc = ExternalMode.services[d.id];
-      const overPad = (d.mode === 'rtb' || d.mode === 'rtl') && dist2d(d, s.base) < DRONE.landThresholdM;
+      // Touchdown is the drone's own call, on stepDrone's rule (ONB-01): its
+      // nav belief within the land threshold of the home it last learned,
+      // never the live true base — a drone flying home to a stale fix never
+      // reaches that one, and hovered there until its pack was empty.
+      const homeK = d.baseKnown || s.base;
+      const overPad = (d.mode === 'rtb' || d.mode === 'rtl') &&
+        Math.hypot(d.belX - homeK.x, d.belY - homeK.y) < DRONE.landThresholdM;
       const origin = ExternalMode.origin;
       const t = ExternalMode.telem[d.id];
       const landFailed = svc && overPad && positionFresh(t) && t.armed === true && t.servicePhase === 'failed';

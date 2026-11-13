@@ -7,6 +7,10 @@
 //      bridge has the vehicle back in 'landed' and takes the swap handshake
 //      again under its request id, but the browser stayed in 'relaunch' and
 //      the drone stayed landed in the sim until a re-init or reload.
+//  stale-home-land: external mode decided touchdown against the TRUE base,
+//      stepDrone on the drone's belief against the home it last learned
+//      (ONB-01): a drone flying home to a stale fix never got a land
+//      command and hovered there until its pack was empty.
 const { test } = require('node:test');
 const assert = require('node:assert');
 const { loadUI } = require('./helpers/dom.js');
@@ -194,4 +198,32 @@ test('relaunch-refused-redone: relaunches are capped, and the capped failure is 
   const diag = ui.ctx.getExternalDiagnostics().find(v => v.id === d.id);
   assert.ok(diag.servicePhase === 'failed' && diag.failureReason === 'failed:arm', JSON.stringify(diag));
   assert.strictEqual(d.mode, 'landed', 'the vehicle on the pad is not flying in the sim');
+});
+
+test('stale-home-land: an external drone at the stale home it last learned is told to land there, and gets no phantom swap', () => {
+  const ui = loadUI();
+  const s = ui.ctx.sim.swarm;
+  const ws = connect(ui);
+  const d = s.drones[0];
+  const frame = telemetry(ui, ws, d);
+  const home = { x: d.baseKnown.x, y: d.baseKnown.y };
+  // The operator relocates 3 km while C2 is silent: the drone, flying home
+  // in rtl, still knows the old base.
+  s.c2.nextCmd = Infinity;
+  s.base.x += 3000;
+  d.mode = 'rtl';
+  s.time += 1;
+  for (let i = 0; i < 4; i++) { ui.ctx.__clock.ms += 250; frame({ alt: 50 }); ui.ctx.stepSwarm(s, 0.25); }
+  assert.deepStrictEqual({ x: d.baseKnown.x, y: d.baseKnown.y }, home, 'precondition: the home it knows is stale');
+  const land = services(ws, 'land')[0];
+  assert.ok(land, 'a drone hovering over the home it knows is never told to land');
+  const goals = ws.sent.map(m => JSON.parse(m)).filter(m => m.type === 'goals').at(-1);
+  assert.ok(!goals.goals.some(g => g.id === d.id), 'no cruising goal competes with the landing');
+
+  ack(ws, d, land.requestId, 'land');
+  for (let i = 0; i < 20; i++) { ui.ctx.__clock.ms += 250; frame(onPad(land.requestId)); ui.ctx.stepSwarm(s, 0.25); }
+  assert.strictEqual(services(ws, 'authorize').length, 0, 'no ground crew at the stale home — no battery swap');
+  assert.strictEqual(d.mode, 'landed', 'the vehicle on the ground is not flying in the sim');
+  assert.strictEqual(d.swapAt, null);
+  assert.ok(s.events.some(e => e.msg === d.id + ' landed at its last-known base — no ground crew there'));
 });
