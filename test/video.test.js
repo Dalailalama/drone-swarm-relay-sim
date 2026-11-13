@@ -89,3 +89,24 @@ test('after-action report includes the payload section when video is on', () => 
   assert.ok(md.includes('## Payload link'), 'report must carry the payload section');
   assert.ok(/chunks delivered/.test(md));
 });
+
+// Review: the report's packet line summed every outcome, video fragments
+// included, while tools/batch.js and tools/compare.js report control-plane
+// loss (controlLossPct, NET-04). Video has its own line in the payload
+// section; the packet line must be the control plane, by the same definition.
+test('after-action report states control-plane loss as batch and compare do, video kept apart', () => {
+  const s = makeSw({});
+  run(s, 120);
+  let ok = 0, lost = 0;
+  for (const kind in s.net.byKind) {
+    if (kind === 'vid') continue;
+    ok += s.net.byKind[kind].delivered; lost += s.net.byKind[kind].dropped;
+  }
+  assert.ok(s.net.byKind.vid && s.net.byKind.vid.delivered + s.net.byKind.vid.dropped > 0, 'setup: video fragments were counted');
+  const md = ctx.afterActionReport(s);
+  const m = md.match(/delivered:\*\* ([\d,]+) · \*\*dropped:\*\* ([\d,]+) \(([\d.]+)% loss\)/);
+  assert.ok(m, 'packet line missing');
+  assert.strictEqual(m[1], ok.toLocaleString(), 'delivered counts video fragments');
+  assert.strictEqual(m[2], lost.toLocaleString(), 'dropped counts video fragments');
+  assert.strictEqual(m[3], ctx.controlLossPct(s).toFixed(1), 'loss % differs from controlLossPct');
+});

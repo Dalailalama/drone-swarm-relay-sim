@@ -896,6 +896,11 @@ function jamSirDb(r) { return r && r.jamSirDb != null ? r.jamSirDb : JAM_SNR_OFF
 // here is isotropic, so convert to EIRP first. The receiver then hears it
 // through its own antenna, exactly like a signal (txDbm + G_tx + G_rx - PL).
 const ERP_TO_EIRP_DB = 2.15;
+// Antenna height (m above ground) of a source that names no altM: the mast
+// makeJammer gives an operator-placed source. The interference floor, a
+// red-team hunter's DF receiver and the TAK hazard mark all read this one
+// default (they used 15, 2 and 0 m), and an explicit altM of 0 stays 0.
+const JAMMER_DEFAULT_ALT_M = 15;
 
 // One band representation everywhere (review finding #20): a jammer's band
 // may arrive as a number (MHz), a numeric string, 'all', or a legacy name.
@@ -958,7 +963,7 @@ function interferenceFloorDbm(s, rxPos, rxAlt, rxRadio, nOverride, jamList) {
     const jf = jammerFreqMHz(j);
     if (Number.isNaN(jf) || (jf != null && Math.abs(jf - rad.freqMHz) > 150)) continue; // out of band
     const ground = Math.hypot(rxPos.x - j.x, rxPos.y - j.y);
-    const jAlt = terrainGroundAt(s.terrain, j.x, j.y) + (j.altM || 15);
+    const jAlt = terrainGroundAt(s.terrain, j.x, j.y) + (j.altM ?? JAMMER_DEFAULT_ALT_M);
     if (losBlocked(s.terrain, j.x, j.y, jAlt, rxPos.x, rxPos.y, rxAlt, rad.freqMHz)) continue; // terrain shadows it
     const slant = Math.hypot(ground, jAlt - rxAlt);
     const pl = pl1 + 10 * n * Math.log10(Math.max(1, slant / s.envFactor));
@@ -967,22 +972,10 @@ function interferenceFloorDbm(s, rxPos, rxAlt, rxRadio, nOverride, jamList) {
   return lin > 0 ? 10 * Math.log10(lin) + jamSirDb(rad) : -Infinity;
 }
 
-// How much interference degrades this link, in dB (>=0). Each end's floor is
-// compared against THAT end's own sensitivity; the worst end wins. Radios ra
-// and rb are the transmit-side radios of each node (their receivers share the
-// hardware), or null for swarm-wide defaults. Evaluated per link (the link's
-// shared exponent), not as a per-position field.
-function interferencePenaltyDb(s, aPos, aAlt, bPos, bAlt, ra, rb) {
-  if (!s.jammers || !s.jammers.length) return 0;
-  const rA = ra || s.radio, rB = rb || s.radio;
-  const n = channelExponent(rA, rB);
-  const fa = interferenceFloorDbm(s, aPos, aAlt, rA, n);
-  const fb = interferenceFloorDbm(s, bPos, bAlt, rB, n);
-  return Math.max(floorPenaltyDb(fa, rA), floorPenaltyDb(fb, rB));
-}
-
-// The same penalty for one receiver: its floor against its own sensitivity
-// (n: the link's shared exponent, when the receiver is one end of a link).
+// How much interference degrades one receiver, in dB (>=0): its floor
+// against its own sensitivity (n: the link's shared exponent, when the
+// receiver is one end of a link; liveMarginDb charges each end's penalty to
+// the direction that end hears).
 function endPenaltyDb(s, pos, alt, radio, n) {
   if (!s.jammers || !s.jammers.length) return 0;
   const r = radio || s.radio;
@@ -1063,7 +1056,7 @@ function jammerDenialRadiusM(s, j) {
 let jammerSeq = 0;
 function makeJammer(x, y, erpDbm) {
   jammerSeq += 1;
-  return { id: 'JX-' + jammerSeq, x, y, erpDbm: erpDbm != null ? erpDbm : 10, band: 'all', altM: 15, on: true };
+  return { id: 'JX-' + jammerSeq, x, y, erpDbm: erpDbm != null ? erpDbm : 10, band: 'all', altM: JAMMER_DEFAULT_ALT_M, on: true };
 }
 
 function liveMarginDb(s, aId, bId) {
@@ -2413,7 +2406,7 @@ function stepAdversaries(s, dt) {
   for (const j of s.jammers) {
     if (j.on === false) continue;
     const contacts = [];
-    const jAlt = terrainGroundAt(s.terrain, j.x, j.y) + (j.altM != null ? j.altM : 2);
+    const jAlt = terrainGroundAt(s.terrain, j.x, j.y) + (j.altM ?? JAMMER_DEFAULT_ALT_M);
     // A DF fix is a MEASUREMENT: taken once, at the emission, and kept as
     // taken (finding #20). Re-deriving bearings from the emitter's live
     // position every tick let a hunter track targets that had gone silent.
@@ -2550,8 +2543,9 @@ function afterActionReport(s) {
   const cov = [...s.c2.cov.values()];
   const badCells = cov.filter(e => e.bad > e.good).length;
   const goodCells = cov.filter(e => e.good >= e.bad && (e.good + e.bad) > 0).length;
-  const deliv = s.net.delivered, drop = s.net.dropped;
-  const dropPct = (deliv + drop) ? (100 * drop / (deliv + drop)).toFixed(1) : '0';
+  // Control plane only, as tools/batch.js and tools/compare.js report it:
+  // video fragments have their own line in the payload section.
+  const ctl = controlOutcomes(s);
   const activeJam = (s.jammers || []).filter(j => j.on !== false).length;
   const D = dist2d(s.base, s.target);
   const relayEvents = (s.stats && s.stats.relayEvents) || s.events.filter(e => e.kind === 'relay').length;
@@ -2616,7 +2610,7 @@ function afterActionReport(s) {
   }
   L.push('## RF environment learned');
   L.push('- **Coverage cells mapped:** ' + cov.length + ' (' + goodCells + ' measured-good, ' + badCells + ' measured dead zones)');
-  L.push('- **Packets delivered:** ' + deliv.toLocaleString() + ' · **dropped:** ' + drop.toLocaleString() + ' (' + dropPct + '% loss)');
+  L.push('- **Control packets delivered:** ' + ctl.delivered.toLocaleString() + ' · **dropped:** ' + ctl.dropped.toLocaleString() + ' (' + controlLossPct(s).toFixed(1) + '% loss)');
   L.push('- **Channel utilization:** ' + (s.net.utilization * 100).toFixed(1) + '%' + (s.radio.dutyCycle ? ' (legal duty-cycle cap ' + (s.radio.dutyCycle * 100) + '%)' : ''));
   L.push('');
   L.push('## Timeline (last events)');

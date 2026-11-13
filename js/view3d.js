@@ -682,7 +682,7 @@ function renderView3D(ctx, cv, s, status, cam, selected) {
       ctx.stroke(); ctx.setLineDash([]);
     }
     const base = proj(j.x, j.y, g);
-    const top = proj(j.x, j.y, g + (j.altM || 15) + 10);
+    const top = proj(j.x, j.y, g + (j.altM ?? JAMMER_DEFAULT_ALT_M) + 10);
     if (base && top) {
       ctx.strokeStyle = col; ctx.lineWidth = 2 * U;
       ctx.beginPath(); ctx.moveTo(base.x, base.y); ctx.lineTo(top.x, top.y); ctx.stroke();

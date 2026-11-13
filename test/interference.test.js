@@ -150,11 +150,21 @@ test('noise and interference add in power: 3.01 dB when the floor equals sensiti
     j.erpDbm = SIK.sensDbm + above - f0;
     const got = ctx.endPenaltyDb(s, pos, 15, SIK);
     assert.ok(Math.abs(got - want) < 0.01, 'floor ' + above + ' dB vs sensitivity: penalty ' + got.toFixed(4) + ' dB, want ' + want);
-    const link = ctx.interferencePenaltyDb(s, pos, 15, { x: -400, y: 0 }, 15, SIK, SIK);
+    // The mirror receiver, on the link's shared exponent (as liveMarginDb charges it).
+    const link = ctx.endPenaltyDb(s, { x: -400, y: 0 }, 15, SIK, ctx.channelExponent(SIK, SIK));
     assert.ok(Math.abs(link - want) < 0.01, 'link penalty ' + link.toFixed(4) + ' dB, want ' + want);
   }
   j.on = false;
   assert.strictEqual(ctx.endPenaltyDb(s, pos, 15, SIK), 0, 'no active source, no penalty');
   j.on = true; j.band = 2400;
   assert.strictEqual(ctx.endPenaltyDb(s, pos, 15, SIK), 0, 'out-of-band source, no penalty');
+});
+
+// Review: interferencePenaltyDb charged a whole link its worse end's penalty
+// in both directions. Nothing called it — liveMarginDb subtracts each
+// receiver's own penalty from the direction it hears (above) — so the stale
+// model is gone rather than left to be picked up by mistake.
+test('no dead whole-link interference penalty is left beside the per-receiver one', () => {
+  assert.strictEqual(typeof ctx.interferencePenaltyDb, 'undefined');
+  assert.strictEqual(typeof ctx.endPenaltyDb, 'function');
 });
