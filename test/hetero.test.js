@@ -194,18 +194,16 @@ test('decline log reports battery % against the drone\'s own airframe, not the f
     targetX: 2600, targetY: -650, altitudeM: 60, seed: 7,
     relayWing: 3, relayAirframe: X8, relayRadio: RFD,
   });
-  const x8ids = new Set(s.drones.filter(d => d.af && d.af.id === 'x8').map(d => d.id));
-  let drained = null;
-  while (s.time < 60) {
-    ctx.stepSwarm(s, 0.05);
-    if (drained) continue;
-    const ev = s.events.find(e => /C2 orders (DR-\d+) to relay/.test(e.msg) && x8ids.has(e.msg.match(/DR-\d+/)[0]));
-    if (ev) {
-      drained = s.drones.find(d => d.id === ev.msg.match(/DR-\d+/)[0]);
-      drained.energyWh = 25; // ~13% of the X8's own usable pack
-    }
-  }
-  assert.ok(drained, 'an X8 must be ordered to relay');
+  const drained = s.drones.find(d => d.af && d.af.id === 'x8');
+  while (s.time < 2) ctx.stepSwarm(s, 0.05);
+  drained.energyWh = 25; // ~13% of the X8's own usable pack
+  // A slot beyond the objective: costlier than the (no longer closing)
+  // mission it is flying, so the commitment rule declines it. A cheaper slot
+  // it would now take instead (audit C2-06).
+  drained.inbox.push({ kind: 'cmd', src: 'C2', dst: drained.id, payload: {
+    role: 'relay', slot: 0, k: 1, upstream: 'C2', slotPos: { x: 9000, y: -2250 },
+    c2: { x: s.base.x, y: s.base.y, at: s.time }, target: { x: s.target.x, y: s.target.y } } });
+  ctx.droneComms(s, drained);
   const declines = s.events.filter(e => e.msg.startsWith(drained.id + ' declines'));
   assert.ok(declines.length, 'the drained X8 must decline');
   for (const e of declines) {

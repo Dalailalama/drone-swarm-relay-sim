@@ -111,12 +111,16 @@ function c2HopEstimate(s) {
   return 1 + (slots ? slots.length : 0);
 }
 
-// Every drone reports once per interval across the chain's hops.
-function tlmIntervalSec(s) {
+// Every drone reports once per interval across the chain's hops. C2 sizes
+// it (fleet manifest x its own planned hops) and announces it in every order
+// table, the way a GCS sets stream rates; drones pace on the announced value
+// (audit C2-10). Counting the truly-alive drones let C2's staleness timer
+// shrink the moment a drone died unseen, and drones read C2's private plan.
+function tlmIntervalSec(s, hops) {
   const tx = ((NET.tlmBytes + 8) * 8) / (s.radio.airRateKbps * 1000);
-  const n = s.drones ? s.drones.filter(alive).length : 1;
+  const n = s.drones ? s.drones.length : 1;
   return Math.max(C2.tlmIntervalSec, s.radio.dutyCycle ? tx / s.radio.dutyCycle : 0,
-    n * c2HopEstimate(s) * tx / TLM_AIR_SHARE);
+    n * (hops != null ? hops : c2HopEstimate(s)) * tx / TLM_AIR_SHARE);
 }
 
 function cmdIntervalSec(s, nDrones) {
@@ -176,7 +180,7 @@ function makeDrone(x, y, target, rng, airframe, radio, cls) {
     relinkUntil: null,
     relinkAttempt: 0,
     relinkGoalX: 0, relinkGoalY: 0,
-    rejectedRole: null, rejectedSig: null,
+    rejectedRole: null, rejectedSig: null, rejectSeq: 0,
     deadLog: [],          // onboard black box: positions where the link was dead
     deadLogSession: session,
     neighborKnown: {},
@@ -443,7 +447,7 @@ const C2_ANTENNA_M = 6; // ground station telemetry mast — BVLOS ops raise the
 // the terrain model — a ridge between two slots gets an extra relay ON it
 // rather than a dead hop across it.
 const PLAN = {
-  replanSec: 5, maxSlots: 12,
+  replanSec: 5,
   maxCells: 40000,  // search-grid bound: cells coarsen past it (a 40 m grid over 100 km took ~1 min; #27)
   gpsCost: 3,       // GNSS-denied cells cost this much more to cross — avoided, never walls (#27)
   failedHoldSec: 60, // an unchanged world re-searches a failed plan at most this often (#27)
@@ -457,7 +461,7 @@ function planWorldKey(s) {
   for (const e of s.c2.cov.values()) if (e.bad > e.good) bad++;
   const r40 = v => Math.round(v / 40);
   return [r40(s.base.x), r40(s.base.y), r40(s.target.x), r40(s.target.y), bad,
-    (s.jammers || []).map(j => [r40(j.x), r40(j.y), j.erpDbm, j.on !== false, j.band, j.freqMHz].join(':')).join('|'),
+    c2Jammers(s).map(j => [r40(j.x), r40(j.y), j.erpDbm, j.on !== false, j.band, j.freqMHz].join(':')).join('|'),
     (s.gpsZones || []).map(z => [r40(z.x), r40(z.y), Math.round(z.rM), z.on !== false].join(':')).join('|'),
   ].join(';');
 }
@@ -588,8 +592,13 @@ function planChain(s) {
     let k = idx(gIx, gIy);
     while (k !== undefined && k !== idx(sIx, sIy)) { cellsRev.push(k); k = from.get(k); }
     const pts = cellsRev.reverse().map(kk => pos(kk % nx, Math.floor(kk / nx)));
+    // The goal cell's centre gives way to the exact objective. With base and
+    // objective in ONE cell there is no goal entry to replace: overwriting
+    // the last point then erased the base and left path=[target], pathLen 0
+    // (audit C2-03).
+    if (pts.length) pts[pts.length - 1] = { x: s.target.x, y: s.target.y };
+    else pts.push({ x: s.target.x, y: s.target.y });
     pts.unshift({ x: s.base.x, y: s.base.y });
-    pts[pts.length - 1] = { x: s.target.x, y: s.target.y };
     const clearRun = (a, b) => {
       const n = Math.ceil(dist2d(a, b) / (cell / 2));
       for (let i = 1; i < n; i++) {
@@ -622,7 +631,16 @@ function planChain(s) {
   const segs = [];
   let pathLen = 0;
   for (let i = 0; i < path.length - 1; i++) { const L = dist2d(path[i], path[i + 1]); segs.push(L); pathLen += L; }
-  const kSlots = Math.min(PLAN.maxSlots, Math.max(0, Math.ceil(pathLen / span) - 1));
+  // The chain is as long as the path needs (audit C2-01): a fixed 12-slot cap
+  // stretched a 23-relay route into hops past usable range and still called
+  // it feasible. The only real cap is the fleet manifest, less one airframe
+  // that has to stay on the mission (SCN-03). A route that needs more is
+  // flagged `capped` — it cannot close — and its slots stay at hop spacing
+  // from the base, so the relays C2 does have form a chain that holds.
+  const slotCap = Math.max(0, s.drones.length - 1);
+  const kRaw = Math.max(0, Math.ceil(pathLen / span) - 1);
+  const kSlots = Math.min(slotCap, kRaw);
+  let capped = kRaw > slotCap;
   const at = arc => {
     let rem = arc;
     for (let i = 0; i < segs.length; i++) {
@@ -635,14 +653,14 @@ function planChain(s) {
     return path[path.length - 1];
   };
   let slots = [];
-  for (let i = 0; i < kSlots; i++) slots.push(at(pathLen * (i + 1) / (kSlots + 1)));
+  for (let i = 0; i < kSlots; i++) slots.push(at(pathLen * (i + 1) / (kRaw + 1)));
 
   // Heterogeneous fleets: the wing's long hops span the backhaul, but the
   // FLOCK hangs off the last relay on the tactical radio's short legs — so
   // the plan always ends with a slot inside tactical reach of the objective.
   // Without this the chain "closes" on paper over wing-radio hops and then
   // can't hand off to short-range mission drones at all.
-  if (s.relayIdx && s.relayIdx.length) {
+  if (s.relayIdx && s.relayIdx.length && !capped) {
     const tactReach = usableRangeM(s.radio, s.envFactor, planLossDb(s)) * s.deployFrac * 0.9;
     if (pathLen > tactReach) {
       const arcs = [];
@@ -658,6 +676,7 @@ function planChain(s) {
         slots.push(at(arc));
         prev = arc;
       }
+      if (slots.length > slotCap) { slots = slots.slice(0, slotCap); capped = true; }
     }
   }
 
@@ -665,18 +684,19 @@ function planChain(s) {
   // a relay on it instead of a dead hop over it. Re-walks until every hop is
   // clear, too short to split, or the slot cap is reached.
   const altOf = (p, isC2) => terrainGroundAt(s.terrain, p.x, p.y) + (isC2 ? C2_ANTENNA_M : s.altitudeM);
-  for (let pass = 0; pass < 2 && slots.length < PLAN.maxSlots; pass++) {
+  // A hop under 4x the separation radius is never bisected: its halves
+  // would fall under 2x separation, closer than two relays can both hold
+  // station. It also bounds the walk — a hop blocked by a building rather
+  // than by its length never clears, and splitting it again and again
+  // stacked slots at the building's edge (#15).
+  const hopBlocked = (a, b, fromC2) => dist2d(a, b) >= 4 * DRONE.separationM
+    && losBlocked(s.terrain, a.x, a.y, altOf(a, fromC2), b.x, b.y, altOf(b, false), chainRadio(s).freqMHz);
+  for (let pass = 0; pass < 2 && slots.length < slotCap; pass++) {
     const nodesL = [s.base, ...slots, s.target];
     let inserted = false;
-    for (let i = 0; i < nodesL.length - 1 && slots.length < PLAN.maxSlots; i++) {
+    for (let i = 0; i < nodesL.length - 1 && slots.length < slotCap; i++) {
       const a = nodesL[i], b = nodesL[i + 1];
-      // A hop under 4x the separation radius is never bisected: its halves
-      // would fall under 2x separation, closer than two relays can both hold
-      // station. It also bounds the walk — a hop blocked by a building rather
-      // than by its length never clears, and splitting it again and again
-      // stacked slots at the building's edge (#15).
-      if (dist2d(a, b) < 4 * DRONE.separationM) continue;
-      if (losBlocked(s.terrain, a.x, a.y, altOf(a, i === 0), b.x, b.y, altOf(b, false), chainRadio(s).freqMHz)) {
+      if (hopBlocked(a, b, i === 0)) {
         const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
         slots.splice(i === 0 ? 0 : i, 0, mid); // insert between a and b
         inserted = true;
@@ -686,8 +706,16 @@ function planChain(s) {
     if (inserted) pass--; // keep passing until clean or capped
     else break;
   }
+  // Densify that ran out of airframes with a ridge still cutting a hop is the
+  // same verdict as a route too long for the fleet: the chain cannot close.
+  if (!capped && slots.length >= slotCap) {
+    const nodesL = [s.base, ...slots, s.target];
+    for (let i = 0; i < nodesL.length - 1 && !capped; i++) capped = hopBlocked(nodesL[i], nodesL[i + 1], i === 0);
+  }
 
-  const plan = { slots, pathLen, tKey, worldKey, at: s.time, feasible: found };
+  // kNeeded is what the route asks for; slots is what the fleet can hold.
+  const kNeeded = capped ? Math.max(kRaw, slotCap + 1) : slots.length;
+  const plan = { slots, pathLen, kNeeded, capped, tKey, worldKey, at: s.time, feasible: found };
   s.c2.chainPlan = plan;
   return plan;
 }
@@ -889,8 +917,9 @@ function agilityGainDb(s, radio) {
 // nOverride is a link's shared exponent (channelExponent), so on a mixed link
 // the jammer and the partner's signal cross the air by one law; without it
 // the receiver's own fit applies (the per-position spectrum survey).
-function interferenceFloorDbm(s, rxPos, rxAlt, rxRadio, nOverride) {
-  const jams = s.jammers;
+// jamList overrides the true sources: C2's survey passes its own picture.
+function interferenceFloorDbm(s, rxPos, rxAlt, rxRadio, nOverride, jamList) {
+  const jams = jamList || s.jammers;
   if (!jams || !jams.length) return -Infinity;
   const rad = rxRadio || s.radio;
   const n = nOverride != null ? nOverride : pathLossExponent(rad);
@@ -950,16 +979,39 @@ function floorPenaltyDb(f, r) {
 // it already uses its terrain database. Terrain shadowing is respected, so a
 // hill that blocks the emitter also shrinks the avoided area.
 function inDenialZone(s, pos) {
-  if (!s.jammers || !s.jammers.length) return false;
+  const jams = c2Jammers(s);
+  if (!jams.length) return false;
   const alt = terrainGroundAt(s.terrain, pos.x, pos.y) + s.altitudeM;
   // Spectrum survey uses the radio that would actually HOLD a relay there.
-  return interferenceFloorDbm(s, pos, alt, chainRadio(s)) > chainRadio(s).sensDbm;
+  return interferenceFloorDbm(s, pos, alt, chainRadio(s), null, jams) > chainRadio(s).sensDbm;
+}
+
+// The interference sources as C2 knows them (audit C2-09). An operator-placed
+// source is intel the moment it is placed, and a static one stays where the
+// operator puts it, so outside red-team mode the picture is the placement.
+// Red-team hunters MOVE: C2 keeps each where it was reported and learns of a
+// move only the way it learns any dead zone, through lost telemetry and
+// black-box uploads into the coverage map. Reading their live positions was
+// a god view of the adversary.
+function c2Jammers(s) {
+  const jams = s.jammers || [];
+  if (!s.adversaryMode || !jams.length) return jams;
+  const v = s.c2.jamView;
+  if (v && v.at === s.time && v.n === jams.length) return v.list;
+  const intel = s.c2.jamIntel || (s.c2.jamIntel = new WeakMap());
+  const list = jams.map(j => {
+    let at = intel.get(j);
+    if (!at) { at = { x: j.x, y: j.y }; intel.set(j, at); }
+    return { ...j, x: at.x, y: at.y }; // a copy: a hunter moving later this tick must not leak in
+  });
+  s.c2.jamView = { at: s.time, n: jams.length, list };
+  return list;
 }
 
 // Widest active denial radius — used to give the path planner room to detour.
 function maxDenialRadiusM(s) {
   let r = 0;
-  for (const j of (s.jammers || [])) r = Math.max(r, jammerDenialRadiusM(s, j));
+  for (const j of c2Jammers(s)) r = Math.max(r, jammerDenialRadiusM(s, j));
   return r;
 }
 
@@ -1100,6 +1152,12 @@ function groundSpeedAlong(af, wind, fromP, toP) {
 // scalar "max(1, maxV − |wind|)" floor used to accept short impossible
 // returns on battery cost and reject easy downwind runs at stall speed.
 function orderFeasible(s, d, order) {
+  return d.energyWh > orderEnergyWh(s, d, order);
+}
+
+// Energy the order's backup plan needs: out to the goal, home with the
+// pessimism margin, reserve intact. Infinity when a leg can't be flown.
+function orderEnergyWh(s, d, order) {
   const af = afOf(s, d);
   const goal = orderGoal(s, order);
   // Drone-side: plan from beliefs (nav position, last-known base), never truth.
@@ -1108,11 +1166,11 @@ function orderFeasible(s, d, order) {
   const homeK = d.baseKnown || s.base;
   const gOut = groundSpeedAlong(af, s.wind, here, goal);
   const gHome = groundSpeedAlong(af, s.wind, goal, homeK);
-  if (gOut < 0.5 || gHome < 0.5) return false; // a leg that can't be flown fails every backup plan
+  if (gOut < 0.5 || gHome < 0.5) return Infinity; // a leg that can't be flown fails every backup plan
   const pw = flightPowerW(af, af.maxSpeedMs);
   const whToGoal = pw * (dist2d(here, goal) / gOut) / 3600;
   const whGoalHome = pw * (dist2d(goal, homeK) / gHome) / 3600 * BATTERY.homeMargin;
-  return d.energyWh > whToGoal + whGoalHome + usableWh(af) * BATTERY.reserveFrac;
+  return whToGoal + whGoalHome + usableWh(af) * BATTERY.reserveFrac;
 }
 
 // Slot i of k relays: fraction (i+1)/(k+1) along base → ordered target.
@@ -1129,11 +1187,14 @@ function slotFromOrder(s, order) {
 // --- C2 ground station -------------------------------------------------------
 function c2Step(s) {
   // Ingest telemetry that physically arrived. Every received report is also
-  // a coverage measurement: the link provably worked at that position.
+  // a coverage measurement: the link provably worked at that position —
+  // unless the drone says it has no GNSS fix, when the position is dead
+  // reckoning that can sit cells away from where the packet really left
+  // (audit C2-08).
   for (const p of s.c2.inbox) {
     s.c2.known[p.src] = { ...p.payload, at: s.time };
     s.c2.everHeard.add(p.src);
-    covMark(s, p.payload.x, p.payload.y, 'good');
+    if (p.payload.gps !== 'denied') covMark(s, p.payload.x, p.payload.y, 'good');
     if (p.payload.deadLog && p.payload.deadLog.length) {
       s.c2.covSeqApplied = s.c2.covSeqApplied || new Map();
       const session = p.payload.deadLogSession;
@@ -1178,15 +1239,25 @@ function c2Step(s) {
   const staleAfter = c2StaleAfterSec(s);
   const forgetAfter = Math.max(C2.forgetSec, 4 * staleAfter);
   const fresh = id => known[id] && (s.time - known[id].at) <= staleAfter;
+  // A position reported with a GNSS fix; a denied one is dead reckoning that
+  // C2 must not place coverage, call-offs, anchors or elections on (C2-08).
+  const fixed = id => known[id].gps !== 'denied';
 
   // Operator display: log contact changes, and REMEMBER where the lost were
   // last heard — that memory is what rescue dispatch works from.
   for (const id of Object.keys(known)) {
     const f = fresh(id);
     if (s.c2.wasFresh[id] && !f) {
-      logEvent(s, 'C2 lost telemetry from ' + id, 'warn');
-      s.c2.lost[id] = { x: known[id].x, y: known[id].y, at: s.time };
-      covMark(s, known[id].x, known[id].y, 'bad', 2); // weaker than a dead log, but evidence
+      if (known[id].role === 'rtb' || known[id].role === 'landed') {
+        // It said it was going home, and homebound drones stop beaconing:
+        // silence is expected, not a comms loss. Booking it lost painted its
+        // position RF-bad and sent rescuers after it (audit C2-04).
+        logEvent(s, 'C2: ' + id + ' out of contact on its way home (RTB, expected)', 'info');
+      } else {
+        logEvent(s, 'C2 lost telemetry from ' + id, 'warn');
+        s.c2.lost[id] = { x: known[id].x, y: known[id].y, at: s.time, uncertain: !fixed(id) };
+        if (fixed(id)) covMark(s, known[id].x, known[id].y, 'bad', 2); // weaker than a dead log, but evidence
+      }
     }
     if (!s.c2.wasFresh[id] && f) {
       logEvent(s, 'C2 regained telemetry from ' + id, 'info');
@@ -1204,18 +1275,23 @@ function c2Step(s) {
 
   // A drone that declined its tasking gets struck off and benched for a
   // while, so C2 immediately elects someone with the reserves for the job.
-  for (const id of [...s.c2.relays]) {
-    if (fresh(id) && known[id].reject === 'relay') {
+  // Each decline is acted on once, by its sequence number, whether or not
+  // the drone is still on the roster: it has usually accepted its next order
+  // (often the mission order C2 sent on striking it off as stale) by the
+  // time slow telemetry reports the decline (audit C2-07).
+  s.c2.rejectSeen = s.c2.rejectSeen || {};
+  for (const id of Object.keys(known)) {
+    const kn = known[id];
+    if (!fresh(id) || !(kn.rejectSeq > (s.c2.rejectSeen[id] || 0))) continue;
+    s.c2.rejectSeen[id] = kn.rejectSeq;
+    if (kn.reject === 'relay') {
       s.c2.relays = s.c2.relays.filter(r => r !== id);
       s.c2.unfit[id] = s.time + 60;
       logEvent(s, 'C2: ' + id + ' declined relay duty (low reserves) — benched, reassigning', 'warn');
-    }
-  }
-  for (const rid of [...s.c2.rescuers]) {
-    if (fresh(rid) && known[rid].reject === 'rescue') {
-      s.c2.unfit[rid] = s.time + 60;
-      logEvent(s, 'C2: ' + rid + ' declined rescue tasking — benched', 'warn');
-      s.c2.rescuers = s.c2.rescuers.filter(x => x !== rid);
+    } else if (kn.reject === 'rescue') {
+      s.c2.unfit[id] = s.time + 60;
+      logEvent(s, 'C2: ' + id + ' declined rescue tasking — benched', 'warn');
+      s.c2.rescuers = s.c2.rescuers.filter(x => x !== id);
     }
   }
 
@@ -1250,11 +1326,13 @@ function c2Step(s) {
 
   // Operator warning: mission demands more relays than the fleet can supply.
   // Drones will still try (and their failsafes will bring them back) — but
-  // the operator should know the plan doesn't close.
+  // the operator should know the plan doesn't close. The count is what the
+  // ROUTE needs, not the slots the fleet could fill (audit C2-01).
   const assets = Object.keys(known).filter(id => fresh(id)).length;
-  const infeasible = kNeeded >= assets && assets > 0;
+  const kRoute = plan.kNeeded != null ? plan.kNeeded : kNeeded;
+  const infeasible = kRoute >= assets && assets > 0;
   if (infeasible && !s.c2.infeasibleWarned) {
-    logEvent(s, 'C2 warning: target needs ' + kNeeded + ' relays but only ' + assets + ' drones in contact — link cannot close', 'error');
+    logEvent(s, 'C2 warning: target needs ' + kRoute + ' relays but only ' + assets + ' drones in contact — link cannot close', 'error');
     s.c2.infeasibleWarned = true;
   } else if (!infeasible) {
     s.c2.infeasibleWarned = false;
@@ -1269,6 +1347,12 @@ function c2Step(s) {
       fresh(id) && known[id].role === 'mission' &&
       known[id].battery >= RELAY.minBatteryPct && !s.c2.relays.includes(id) &&
       !s.c2.rescuers.includes(id) && !(s.c2.unfit[id] > s.time));
+    // The chain exists to serve the mission: never conscript the last drone
+    // in contact that is still flying it (SCN-03), or nothing is left on
+    // station for the relays to connect.
+    const onMission = Object.keys(known).filter(id => fresh(id) && known[id].role === 'mission' &&
+      !s.c2.relays.includes(id) && !s.c2.rescuers.includes(id)).length;
+    if (onMission <= 1) base.length = 0;
     const wing = base.filter(id => known[id].cls === 'relay');
     const candidates = wing.length ? wing : base;
     // Mixed fleet, launch phase: if wing units exist but haven't checked in
@@ -1282,7 +1366,7 @@ function c2Step(s) {
       let best = null, bestScore = -Infinity;
       for (const id of candidates) {
         const score = 0.6 * (known[id].battery / 100)
-                    + 0.4 * (1 - Math.min(1, dist2d(known[id], slot) / (usable * 2)));
+                    + (fixed(id) ? 0.4 * (1 - Math.min(1, dist2d(known[id], slot) / (usable * 2))) : 0);
         if (score > bestScore) { bestScore = score; best = id; }
       }
       if (!wing.length && !s.c2.wingFallbackWarned) {
@@ -1293,6 +1377,12 @@ function c2Step(s) {
       s.c2.relays.push(best);
       logEvent(s, 'C2 orders ' + best + ' to relay slot ' + s.c2.relays.length, 'relay');
     }
+  } else if (!plan.feasible && k > 0) {
+    // No route: the k-1 hysteresis below kept one relay on a plan with no
+    // slots, and its order (slotPos null) made the drone mint the straight-
+    // line slot inside the very blockage that failed the search (C2-02).
+    logEvent(s, 'C2 releases ' + s.c2.relays.join(', ') + ' from relay duty — no route to hold', 'relay');
+    s.c2.relays = [];
   } else if (kNeeded < k - 1 && k > 0) {
     // Plan wants a visibly shorter chain (>1 spare, so replan jitter can't flap)
     const freed = s.c2.relays.pop();
@@ -1312,7 +1402,7 @@ function c2Step(s) {
   for (const id of Object.keys(s.c2.lost)) {
     const L = s.c2.lost[id];
     if (s.time - L.at < RESCUE.delaySec) continue;
-    const covered = Object.keys(known).some(k => k !== id && fresh(k) &&
+    const covered = Object.keys(known).some(k => k !== id && fresh(k) && fixed(k) &&
       !s.c2.rescuers.includes(k) && dist2d(known[k], L) < usable * 0.5);
     if (covered) {
       delete s.c2.lost[id];
@@ -1339,9 +1429,13 @@ function c2Step(s) {
     if (!lostIds.length || s.c2.rescuers.length >= RESCUE.maxChain) return false;
     if (!lostIds.some(id => s.time - s.c2.lost[id].at > RESCUE.delaySec)) return false;
     if (!s.c2.rescuers.length) return true;
-    // extend only when the current tip is on station and still short
-    const tip = known[s.c2.rescuers[s.c2.rescuers.length - 1]];
-    return tip && dist2d(tip, lostCentroid(s)) > reach * 1.05;
+    // extend only when the current tip is on station and still short. "On
+    // station" is the goto C2 gave it last round: a tip still in transit
+    // always looks short, and drafted a new link every round (audit C2-05).
+    const tipId = s.c2.rescuers[s.c2.rescuers.length - 1];
+    const tip = known[tipId];
+    const tipGoto = s.c2.rescueGoto && s.c2.rescueGoto[tipId];
+    return tip && tipGoto && dist2d(tip, tipGoto) < reach * 0.25 && dist2d(tip, lostCentroid(s)) > reach * 1.05;
   })();
   if (wantMoreRescuers) {
     // Rescue prefers TACTICAL units: pulling a relay-wing drone off the chain
@@ -1360,7 +1454,7 @@ function c2Step(s) {
       const c = lostCentroid(s);
       let best = null, bestD = Infinity;
       for (const id of candidates) {
-        const dd = dist2d(known[id], c);
+        const dd = dist2d(known[id], c) + (fixed(id) ? 0 : 1e9); // a fix outranks any dead-reckoned position
         if (dd < bestD) { bestD = dd; best = id; }
       }
       s.c2.rescuers.push(best);
@@ -1402,7 +1496,7 @@ function c2Step(s) {
     s.c2.rescueOrder = ordered.slice();
     let anchor = s.base, anchorId = 'C2', aD = dist2d(s.base, c);
     for (const id of Object.keys(known)) {
-      if (!fresh(id) || s.c2.rescuers.includes(id)) continue;
+      if (!fresh(id) || !fixed(id) || s.c2.rescuers.includes(id)) continue;
       const dd = dist2d(known[id], c);
       if (dd < aD) { aD = dd; anchor = known[id]; anchorId = id; }
     }
@@ -1410,7 +1504,7 @@ function c2Step(s) {
     const incA = s.c2.rescueAnchorId;
     if (incA && incA !== anchorId) {
       const incPos = incA === 'C2' ? s.base
-        : (fresh(incA) && !s.c2.rescuers.includes(incA) ? known[incA] : null);
+        : (fresh(incA) && fixed(incA) && !s.c2.rescuers.includes(incA) ? known[incA] : null);
       if (incPos && dist2d(incPos, c) <= aD * 1.25) { anchor = incPos; anchorId = incA; }
     }
     s.c2.rescueAnchorId = anchorId;
@@ -1424,10 +1518,12 @@ function c2Step(s) {
       rescueOrders[rid] = { goto, upstream: anchorId };
       // the next link anchors on this one: its live position if fresh,
       // otherwise where it was told to go
-      anchor = fresh(rid) && known[rid] ? known[rid] : goto;
+      anchor = fresh(rid) && known[rid] && fixed(rid) ? known[rid] : goto;
       anchorId = rid;
     }
   }
+  s.c2.rescueGoto = {};
+  for (const rid of Object.keys(rescueOrders)) s.c2.rescueGoto[rid] = rescueOrders[rid].goto;
 
   // Build every drone's order. Every order names the drone's UPSTREAM chain
   // neighbor, so it can tether to it: relays hang off the previous slot
@@ -1462,9 +1558,11 @@ function c2Step(s) {
     };
   };
 
+  const tlmEvery = tlmIntervalSec(s);
   const orderFor = id => {
     const order = buildOrder(id);
     const up = known[order.upstream];
+    order.tlmEvery = tlmEvery;
     order.c2 = { x: s.base.x, y: s.base.y, at: s.time };
     order.upstreamPos = order.upstream === 'C2' ? { ...order.c2 }
       : up && Number.isFinite(up.posAt) ? { x: up.x, y: up.y, at: up.posAt } : null;
@@ -1513,9 +1611,9 @@ function c2Step(s) {
     for (const id of ids) orders[id] = orderFor(id);
     s.c2.bcastSeq += 1;
     const bcastBytes = NET.bcastHeaderBytes + 4 + (NET.bcastRowBytes + 12) * ids.length;
-    sendBroadcast(s, 'C2', { seq: s.c2.bcastSeq, orders, c2: { x: s.base.x, y: s.base.y, at: s.time } }, bcastBytes);
+    sendBroadcast(s, 'C2', { seq: s.c2.bcastSeq, orders, tlmEvery, c2: { x: s.base.x, y: s.base.y, at: s.time } }, bcastBytes);
     if (s.relayRadio && !bandCompatible(s.radio, s.relayRadio)) {
-      sendBroadcast(s, 'C2', { seq: s.c2.bcastSeq, orders, c2: { x: s.base.x, y: s.base.y, at: s.time } }, bcastBytes, s.relayRadio);
+      sendBroadcast(s, 'C2', { seq: s.c2.bcastSeq, orders, tlmEvery, c2: { x: s.base.x, y: s.base.y, at: s.time } }, bcastBytes, s.relayRadio);
     }
   } else {
     // Unicast: one routed packet per drone — best effort, dies without a route
@@ -1565,6 +1663,10 @@ function droneComms(s, d) {
         Number.isFinite(c2at) && c2at <= s.time && (!d.baseKnown || c2at >= d.baseKnown.at)) {
       d.baseKnown = { x: c2pos.x, y: c2pos.y, at: c2at };
     }
+    // The report interval C2 announces rides in every table, even one
+    // without a row for us yet.
+    const every = p.payload && p.payload.tlmEvery;
+    if (Number.isFinite(every) && every > 0) d.tlmEvery = every;
     const inExternalService = (typeof externalServiceActive === 'function' && externalServiceActive(d.id)) ||
                               (typeof ExternalMode !== 'undefined' && ExternalMode.services && ExternalMode.services[d.id] && ExternalMode.services[d.id].phase !== 'failed') ||
                               (typeof window !== 'undefined' && window.ExternalMode && window.ExternalMode.services && window.ExternalMode.services[d.id] && window.ExternalMode.services[d.id].phase !== 'failed');
@@ -1575,7 +1677,11 @@ function droneComms(s, d) {
     }
 
     // Commitment rule: refuse a NEW tasking whose recovery plan doesn't
-    // close; keep flying the current (previously vetted) order instead.
+    // close; keep flying the current order instead — but only while the
+    // current order closes. The preflight mission was never vetted, and an
+    // order can stop closing as the battery drains: keeping a farther
+    // non-closing order over a cheaper new one inverted the rule (audit
+    // C2-06), so then the cheaper of the two wins.
     // The signature keys on the RESOLVED goal (relay slotPos / rescue goto /
     // mission target), not just the role/slot label — otherwise a slot that
     // migrates after a replan, or a rescue goto that steps deeper, keeps the
@@ -1591,10 +1697,12 @@ function droneComms(s, d) {
     const og = orderGoal(s, o), cg = orderGoal(s, d.order);
     const sig = o.role + '/' + Math.round(og.x) + ',' + Math.round(og.y);
     const changed = sig !== (d.order.role + '/' + Math.round(cg.x) + ',' + Math.round(cg.y));
-    if (changed && !orderFeasible(s, d, o)) {
+    if (changed && !orderFeasible(s, d, o) &&
+        (orderFeasible(s, d, d.order) || orderEnergyWh(s, d, o) > orderEnergyWh(s, d, d.order))) {
       d.rejectedRole = o.role;
       if (d.rejectedSig !== sig) {
         d.rejectedSig = sig;
+        d.rejectSeq += 1;
         const pct = (d.energyWh / usableWh(afOf(s, d)) * 100).toFixed(0);
         logEvent(s, d.id + ' declines ' + o.role + ' tasking — recovery plan does not close (' + pct + '% battery)', 'warn');
       }
@@ -1602,7 +1710,10 @@ function droneComms(s, d) {
     }
     const prevRole = d.order.role;
     d.order = o;
-    d.rejectedRole = null; d.rejectedSig = null;
+    // rejectedRole stays latched (the role of the LAST decline) and rides in
+    // telemetry with rejectSeq: clearing it here erased the decline before
+    // slow telemetry ever carried it to C2 (audit C2-07).
+    d.rejectedSig = null;
     if (d.mode === 'ok' && prevRole !== d.order.role) {
       logEvent(s, d.id + ' now ' + d.order.role + (d.order.role === 'relay' ? ' (slot ' + (d.order.slot + 1) + ')' : ''), 'relay');
     }
@@ -1615,7 +1726,8 @@ function droneComms(s, d) {
   // Any dead-zone samples collected while disconnected ride along (black box
   // upload) and are retained until network delivery is confirmed by ACK.
   if (s.time >= d.nextTlm) {
-    d.nextTlm = s.time + tlmIntervalSec(s);
+    // Before C2's first table: the manifest-sized single-hop interval.
+    d.nextTlm = s.time + (d.tlmEvery || tlmIntervalSec(s, 1));
     // Report what the drone's navigation believes — GNSS denial poisons the
     // position C2 sees, which is exactly how a real jammed airframe lies.
     const repX = d.gpsDenied ? d.belX : d.x + GPS_SIGMA_M * gaussian(s.net.rng);
@@ -1648,6 +1760,7 @@ function droneComms(s, d) {
       battery: d.batteryPct, role: effRole(d),
       cls: d.cls,   // fleet class rides along so C2 assigns roles by capability
       reject: d.rejectedRole || null,
+      rejectSeq: d.rejectSeq,   // one count per decline, so C2 benches each exactly once
       deadLog: unacked,
       deadLogMaxSeq: deadLogMaxSeq,
       deadLogSession: d.deadLogSession,
@@ -1756,7 +1869,13 @@ function updateBattery(s, d, dt, vAirMs) {
       logEvent(s, d.id + (isFinite(secsHome) ? ' battery low'
         : ' home leg unflyable (wind ' + Math.hypot(s.wind.x, s.wind.y).toFixed(0) + ' m/s vs ' + af.maxSpeedMs + ' m/s airspeed)') +
         ' — RTB (' + d.batteryPct.toFixed(0) + '%)', 'warn');
-      sendPacket(s, 'tlm', d.id, 'C2', { x: d.x, y: d.y, battery: d.batteryPct, role: 'rtb' });
+      // Reported like any beacon — the navigation position, never truth —
+      // and stamped, so C2 can age it (audit C2-10).
+      sendPacket(s, 'tlm', d.id, 'C2', {
+        x: d.gpsDenied ? d.belX : d.x + GPS_SIGMA_M * gaussian(s.net.rng),
+        y: d.gpsDenied ? d.belY : d.y + GPS_SIGMA_M * gaussian(s.net.rng),
+        gps: d.gpsDenied ? 'denied' : 'ok', battery: d.batteryPct, role: 'rtb', posAt: s.time,
+      });
     }
   }
 
