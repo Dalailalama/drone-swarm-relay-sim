@@ -142,9 +142,14 @@ function cmdIntervalSec(s, nDrones) {
 
 // C2 calls a drone out of contact after ~3 missed reports at the CURRENT
 // report interval — a fixed 6 s struck off healthy relays whose paced
-// reports simply hadn't come round yet.
+// reports simply hadn't come round yet. Drones pace on the interval C2
+// announced and keep a report already scheduled, so a longer interval C2
+// told them stays in force for three of its own periods after a replan
+// shrinks the live one (audit C2-10 follow-up).
 function c2StaleAfterSec(s) {
-  return Math.max(C2.staleSec, 3 * tlmIntervalSec(s));
+  const told = s.c2 && s.c2.tlmTold;
+  const held = told && s.time - told.at <= 3 * told.sec ? told.sec : 0;
+  return Math.max(C2.staleSec, 3 * Math.max(tlmIntervalSec(s), held));
 }
 
 // The cadence a DRONE times itself by: what it was last told (launch
@@ -1580,6 +1585,10 @@ function c2Step(s) {
   // The cadence C2 paces traffic at rides in every order, so each drone
   // times its telemetry and link-loss failsafe from what it was told.
   const cadence = { tlmSec: tlmIntervalSec(s), cmdSec: cmdIntervalSec(s, s.drones.length) };
+  const told = s.c2.tlmTold; // the longest report interval still in force (c2StaleAfterSec)
+  if (!told || cadence.tlmSec >= told.sec || s.time - told.at > 3 * told.sec) {
+    s.c2.tlmTold = { sec: cadence.tlmSec, at: s.time };
+  }
   const orderFor = id => {
     const order = buildOrder(id);
     const up = known[order.upstream];
