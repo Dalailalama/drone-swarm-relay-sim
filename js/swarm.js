@@ -138,6 +138,13 @@ function c2StaleAfterSec(s) {
   return Math.max(C2.staleSec, 3 * tlmIntervalSec(s));
 }
 
+// The cadence a DRONE times itself by: what it was last told (launch
+// briefing, then every order — a GCS sets SR*/COM_DL_LOSS_T the same way),
+// never C2's private plan or the channel's internals (audit ONB-06).
+function droneCadence(d) {
+  return d.linkCadence || { tlmSec: C2.tlmIntervalSec, cmdSec: C2.cmdIntervalSec };
+}
+
 let droneSeq = 0;
 const droneBootSeq = new WeakMap();
 
@@ -270,6 +277,9 @@ function makeSwarm(opts) {
     dr.baseKnown = { x: s.base.x, y: s.base.y, at: 0 };
     s.drones.push(dr);
   }
+  // ...and the link cadence C2 will open with; orders retune it later.
+  const cadence = { tlmSec: tlmIntervalSec(s), cmdSec: cmdIntervalSec(s, s.drones.length) };
+  for (const dr of s.drones) dr.linkCadence = { ...cadence };
   s.initialSettings = captureInitialSettings(s);
   return s;
 }
@@ -1457,10 +1467,14 @@ function c2Step(s) {
     };
   };
 
+  // The cadence C2 paces traffic at rides in every order, so each drone
+  // times its telemetry and link-loss failsafe from what it was told.
+  const cadence = { tlmSec: tlmIntervalSec(s), cmdSec: cmdIntervalSec(s, s.drones.length) };
   const orderFor = id => {
     const order = buildOrder(id);
     const up = known[order.upstream];
     order.c2 = { x: s.base.x, y: s.base.y, at: s.time };
+    order.cadence = cadence;
     order.upstreamPos = order.upstream === 'C2' ? { ...order.c2 }
       : up && Number.isFinite(up.posAt) ? { x: up.x, y: up.y, at: up.posAt } : null;
     return order;
@@ -1581,6 +1595,12 @@ function droneComms(s, d) {
     // same label and slips past the feasibility gate unvetted.
     const o = p.kind === 'bcast' ? p.payload.orders[d.id] : p.payload;
     if (!o) continue;
+    // Link cadence is configuration, not tasking: take it even from an order
+    // the commitment rule goes on to decline.
+    const cad = o.cadence;
+    if (cad && Number.isFinite(cad.tlmSec) && Number.isFinite(cad.cmdSec) && cad.tlmSec > 0 && cad.cmdSec > 0) {
+      d.linkCadence = { tlmSec: cad.tlmSec, cmdSec: cad.cmdSec };
+    }
     const observation = o.upstreamPos;
     const previous = d.neighborKnown[o.upstream];
     if (observation && Number.isFinite(observation.x) && Number.isFinite(observation.y) &&
@@ -1614,7 +1634,7 @@ function droneComms(s, d) {
   // Any dead-zone samples collected while disconnected ride along (black box
   // upload) and are retained until network delivery is confirmed by ACK.
   if (s.time >= d.nextTlm) {
-    d.nextTlm = s.time + tlmIntervalSec(s);
+    d.nextTlm = s.time + droneCadence(d).tlmSec;
     // Report what the drone's navigation believes — GNSS denial poisons the
     // position C2 sees, which is exactly how a real jammed airframe lies.
     const repX = d.gpsDenied ? d.belX : d.x + GPS_SIGMA_M * gaussian(s.net.rng);
@@ -1690,8 +1710,8 @@ function droneComms(s, d) {
 
   // Link-loss failsafe ladder. Timeouts scale with the expected command rate
   // (like PX4's COM_DL_LOSS_T) so a slow duty-limited link isn't mistaken for
-  // a dead one.
-  const holdAfter = Math.max(FAILSAFE.holdSec, 3 * cmdIntervalSec(s, s.drones.length));
+  // a dead one — the rate C2 last advertised, not one read off its plan.
+  const holdAfter = Math.max(FAILSAFE.holdSec, 3 * droneCadence(d).cmdSec);
   const rtlAfter = d.order.role === 'relay'
     ? Math.max(FAILSAFE.rtlRelaySec, 3 * holdAfter)
     : Math.max(FAILSAFE.rtlMissionSec, 2 * holdAfter);
@@ -1844,7 +1864,8 @@ function tetherGoal(s, d, goal) {
   // Goals live in the frame the drone steers in — its nav belief. Built on
   // truth, a GNSS-denied drone chased a target that moved with it (ONB-03).
   const me = { x: d.belX, y: d.belY };
-  const staleAfter = Math.max(C2.staleSec, 3 * (tlmIntervalSec(s) + cmdIntervalSec(s, s.drones.length)));
+  const cad = droneCadence(d);
+  const staleAfter = Math.max(C2.staleSec, 3 * (cad.tlmSec + cad.cmdSec));
   if (!upPos || !Number.isFinite(upPos.at) || s.time - upPos.at > staleAfter) return me;
   // only throttle motion that takes us FARTHER from the upstream node
   if (dist2d(goal, upPos) <= dist2d(me, upPos)) return goal;
