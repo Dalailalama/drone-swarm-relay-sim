@@ -1723,7 +1723,7 @@ function updateBattery(s, d, dt, vAirMs) {
   d.energyWh = Math.max(0, d.energyWh - flightPowerW(af, vAirMs) * dt / 3600);
   d.batteryPct = d.energyWh / usableWh(af) * 100;
 
-  if (d.mode === 'ok' || d.mode === 'hold' || d.mode === 'relink') {
+  if (d.mode === 'ok' || d.mode === 'hold' || d.mode === 'relink' || d.mode === 'rtl') {
     // Onboard smart-RTH: energy to fly home at cruise, with pessimism +
     // reserve, along the ACTUAL home track against the wind vector (review
     // finding #2). A home leg that can't be flown at all reads as infinite
@@ -2025,17 +2025,28 @@ function stepDrone(s, d, dt) {
     updateBattery(s, d, dt, Math.min(va, maxV));
   }
 
-  if ((d.mode === 'rtb' || (external && d.mode === 'rtl')) && dist2d(d, s.base) < DRONE.landThresholdM) {
+  // Touchdown is the drone's own call: it lands when its NAV BELIEF reaches
+  // the home it last learned (finding #18) — an rtl drone still silent at
+  // home lands too, as PX4's RTL does, instead of hovering the pack flat.
+  const homeK = d.baseKnown || s.base;
+  if ((d.mode === 'rtb' || d.mode === 'rtl') &&
+      Math.hypot(d.belX - homeK.x, d.belY - homeK.y) < DRONE.landThresholdM) {
     // Internal physics is a 2D abstraction — touchdown is instantaneous.
     const grounded = !external || externalServiceGrounded(d.id);
-    if ((d.mode === 'rtb' || d.mode === 'rtl') && grounded) {
+    if (grounded) {
       d.mode = 'landed'; d.vx = d.vy = 0;
       d.endpointDeadAt = s.time;
       if (typeof interruptEndpointAttempts === 'function') interruptEndpointAttempts(s, d.id);
-      d.swapAt = s.time + BATTERY.swapSec;
-      logEvent(s, d.id + ' landed at base — battery swap in progress', 'info');
+      // The ground crew is wherever the base TRULY is: a drone that set down
+      // at a stale home (operator moved in radio silence) gets no swap.
+      if (dist2d(d, s.base) < DRONE.landThresholdM) {
+        d.swapAt = s.time + BATTERY.swapSec;
+        logEvent(s, d.id + ' landed at base — battery swap in progress', 'info');
+      } else {
+        d.swapAt = null;
+        logEvent(s, d.id + ' landed at its last-known base — no ground crew there', 'warn');
+      }
     }
-    // rtl drones hovering at base will regain link and be re-tasked
   }
 }
 
