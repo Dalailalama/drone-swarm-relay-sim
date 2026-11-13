@@ -2,8 +2,8 @@
 // straight into hae= — height above ELLIPSOID. With a vehicle at 120 m AGL
 // and an origin at 500 m HAE the export said hae="50.0" (the altitude
 // slider). The vertical datum must be defined: anchor HAE + local absolute
-// altitude (terrain + AGL), and an UNKNOWN origin omits hae rather than
-// inventing one.
+// altitude (terrain + AGL), and an UNKNOWN origin sends TAK's unknown hae
+// rather than inventing one.
 const { test } = require('node:test');
 const assert = require('node:assert');
 const { loadCore } = require('./helpers/sim.js');
@@ -51,6 +51,27 @@ test('regression #26: an UNKNOWN origin altitude sends TAK unknown hae instead o
   for (const a of atoms) {
     assert.ok(/hae="9999999\.0"/.test(a), 'atom invented an hae with no vertical datum: ' + a.slice(0, 120));
   }
+});
+
+// Review: main.js takAnchor() still said a blank origin HAE makes exports
+// omit hae — they send TAK's unknown value since the schema fix above. The
+// page's own export path and the comment that describes it must agree.
+test('the page exports TAK unknown hae for a blank origin HAE, as takAnchor() documents', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const { loadUI } = require('./helpers/dom.js');
+  const { ctx: ui, el } = loadUI();
+  el('takHae').value = '';
+  el('takExportBtn').click();
+  const out = ui.__downloads.find(d => /^cot-snapshot/.test(d.name));
+  assert.ok(out, 'the CoT snapshot downloaded');
+  const points = out.text.match(/<point [^>]*>/g) || [];
+  assert.ok(points.length > 0, 'snapshot has points');
+  for (const p of points) assert.match(p, /hae="9999999\.0"/, p);
+  const src = fs.readFileSync(path.join(__dirname, '..', 'js', 'main.js'), 'utf8');
+  const body = src.slice(src.indexOf('function takAnchor()'), src.indexOf('function syncTakOrigin()'));
+  assert.ok(body.length > 0, 'takAnchor() found in main.js');
+  assert.doesNotMatch(body, /omit\w*\s+hae/i, 'takAnchor() comment says exports omit hae');
 });
 
 test('terrain-following drones export terrain + AGL over hills', () => {

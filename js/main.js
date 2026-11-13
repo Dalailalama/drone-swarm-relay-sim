@@ -1260,7 +1260,8 @@
     // A loaded real area pins the exact geographic anchor; otherwise the
     // operator-entered origin converts local metres to lat/lon. The origin
     // HAE is the vertical datum for every exported altitude (finding #26) —
-    // left blank, exports omit hae rather than invent one.
+    // left blank, exports send TAK's unknown hae (9999999, js/tak.js) rather
+    // than invent one.
     const hae = takHae ? parseFloat(takHae.value) : NaN;
     const haeM = isNaN(hae) ? null : hae;
     const geo = swarm && swarm.terrain && swarm.terrain.geoAnchor;
