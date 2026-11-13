@@ -656,6 +656,23 @@ async def send_status(websocket, msg: str) -> None:
         pass
 
 
+def _number(value) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def init_problem(msg: dict) -> Optional[str]:
+    """Why an "init" is unusable (as bridge.parse_init decides), or None."""
+    if not _number(msg.get("count", 0)):
+        return f"count {msg.get('count')!r} is not a number"
+    if not _number(msg.get("alt", 50)) or msg.get("alt", 50) <= TAKEOFF_CONFIRM_ALT_M:
+        return f"alt {msg.get('alt')!r} is not a number above {TAKEOFF_CONFIRM_ALT_M:g} m"
+    origin = msg.get("origin", {"frame": "common-local-origin", "x": 0.0, "y": 0.0, "groundM": 0.0})
+    if not (isinstance(origin, dict) and origin.get("frame") == "common-local-origin"
+            and all(_number(origin.get(k)) for k in ("x", "y", "groundM"))):
+        return "origin is not a common-local-origin with finite x, y and groundM"
+    return None
+
+
 async def handle_message(websocket, raw: str) -> None:
     try:
         msg = json.loads(raw)
@@ -666,6 +683,11 @@ async def handle_message(websocket, raw: str) -> None:
     mtype = msg.get("type")
 
     if mtype == "init":
+        # Same checks as bridge.parse_init, before taking control.
+        problem = init_problem(msg)
+        if problem is not None:
+            await send_status(websocket, f"mock: init refused: {problem}")
+            return
         if WORLD.controller is not None and WORLD.controller in WORLD.clients \
                 and WORLD.controller is not websocket:
             await send_status(websocket, "mock is controlled by another client")

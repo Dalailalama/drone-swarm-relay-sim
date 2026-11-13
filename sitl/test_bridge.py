@@ -2062,6 +2062,29 @@ async def scenario_init_does_not_block_controller() -> None:
             await h.close()
 
 
+async def scenario_malformed_init_refused_without_control() -> None:
+    """An init with a malformed origin, count or alt is refused with a status
+    line before it can take control: it used to make its sender the
+    controller and then return without a word (or raise)."""
+    h = Harness()
+    ws = h.client("browser-1")
+    for bad in [
+        {"count": 1, "alt": 30.0, "origin": {"frame": "common-local-origin", "x": 0.0, "y": 0.0, "groundM": None}},
+        {"count": 1, "alt": 30.0, "origin": "here"},
+        {"count": "three", "alt": 30.0},
+        {"count": 1, "alt": 0.5},
+        {"count": 1, "alt": "high"},
+    ]:
+        ws.messages.clear()
+        await bridge.handle_message(ws, json.dumps({"type": "init", **bad}), None, 14550)
+        assert bridge.STATE.controller is None, f"a malformed init took control: {bad}"
+        assert not bridge.STATE.vehicles and ws.said("bridge: init refused"), (bad, ws.statuses())
+    other = h.client("browser-2")
+    await ready_reply(other, h.init(other, count=0, alt=30.0))
+    assert bridge.STATE.controller is other, "a well-formed init from another client is still free to take over"
+    await h.close()
+
+
 async def scenario_gcs_heartbeat_sent() -> None:
     """The bridge is the vehicle's GCS: once it has heard the vehicle it sends a
     GCS HEARTBEAT (~1 Hz), so ArduPilot's GCS-loss failsafe can engage when
@@ -2391,6 +2414,7 @@ SCENARIOS = [
     ("CSWSH: --token (or a LAN bind) requires ?token= at the handshake", scenario_token_gate),
     ("init: a huge vehicle count is clamped", scenario_init_count_bounded),
     ("malformed messages are skipped without dropping the connection", scenario_malformed_messages_keep_connection),
+    ("a malformed init is refused with a status before it can take control", scenario_malformed_init_refused_without_control),
     ("the bridge sends a GCS HEARTBEAT once it hears the vehicle", scenario_gcs_heartbeat_sent),
     ("an init waiting on first passes does not block the controller's messages", scenario_init_does_not_block_controller),
     ("MAVLink from a GCS or another system id is ignored", scenario_foreign_mavlink_source_ignored),

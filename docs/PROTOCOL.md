@@ -64,8 +64,9 @@ Requests initialization and allocation of vehicles, and fixes the common local o
 }
 ```
 - `count` (integer $\ge 0$): Number of vehicles to initialize (`DR-1` through `DR-N`).
-- `alt` (float): Takeoff altitude in metres above each vehicle's launch point.
-- `origin` (object): The browser always sends it. When it is absent both servers use the zero origin; the bridge ignores an `init` whose `origin` is malformed (wrong `frame`, or non-finite `x`/`y`/`groundM`).
+- `alt` (float): Takeoff altitude in metres above each vehicle's launch point; must be above 1.0 m (`TAKEOFF_CONFIRM_ALT_M`).
+- `origin` (object): The browser always sends it. When it is absent both servers use the zero origin.
+- Both servers refuse an `init` whose `count` or `alt` is not a finite number, whose `alt` is 1.0 m or less, or whose `origin` is malformed (wrong `frame`, or non-finite `x`/`y`/`groundM`), with a `status` line, before it can take control.
 - An `init` is not a teardown. A vehicle it still lists keeps its link, flight and service state: a flying vehicle keeps flying, and one parked in a service phase stays parked (its `ready` entry and telemetry `state` name the phase); only the §5.2 handshake arms it again. The browser picks a parked vehicle's service up from telemetry (`serviceId`, phases `landing` to `swapped`) and finishes it. `positionSeq` and `landedSeq` never restart for an id, also for one that leaves the fleet and comes back. A vehicle the `init` drops leaves telemetry at once; the bridge first commands one that last reported armed to LAND and keeps watching it until it is down (an id that returns meanwhile comes back in that landing service), while the mock, having no aircraft, simply removes it.
 
 #### `goals`

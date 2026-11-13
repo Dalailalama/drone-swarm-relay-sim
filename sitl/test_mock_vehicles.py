@@ -675,7 +675,31 @@ async def test_reinit_keeps_vehicles():
     assert w.vehicles["DR-2"].position_seq >= seq2, (w.vehicles["DR-2"].position_seq, seq2)
 
 
+async def test_malformed_init_refused_without_control():
+    """Same as bridge.py: an init with a malformed origin, count or alt is
+    refused with a status line and never makes its sender the controller."""
+    mock_vehicles.WORLD = World()
+    ws = MockWebSocket()
+    mock_vehicles.WORLD.clients.add(ws)
+    for bad in [
+        {"count": 1, "alt": 30.0, "origin": {"frame": "common-local-origin", "x": 0.0, "y": 0.0, "groundM": None}},
+        {"count": 1, "alt": 30.0, "origin": "here"},
+        {"count": "three", "alt": 30.0},
+        {"count": 1, "alt": 0.5},
+        {"count": 1, "alt": "high"},
+    ]:
+        ws.sent.clear()
+        try:
+            await mock_vehicles.handle_message(ws, json.dumps({"type": "init", **bad}))
+        except Exception:
+            pass  # the connection handler skips a message that raises
+        assert mock_vehicles.WORLD.controller is None, f"a malformed init took control: {bad}"
+        assert not mock_vehicles.WORLD.vehicles, bad
+        assert any("mock: init refused" in json.loads(m).get("msg", "") for m in ws.sent), (bad, ws.sent)
+
+
 SCENARIOS = [
+    ("Mock: a malformed init is refused with a status before it can take control", test_malformed_init_refused_without_control),
     ("Mock: re-init keeps listed vehicles (parked stays parked, no teleport, seq continues)", test_reinit_keeps_vehicles),
     ("Mock: startup, physics tick, and telemetry schema", test_startup_physics_telemetry),
     ("Mock: origin coordinates not double-offset in apply_goals", test_origin_coordinates_not_double_offset),

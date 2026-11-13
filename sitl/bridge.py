@@ -1211,6 +1211,31 @@ async def _stop_all_vehicles() -> None:
     STATE.retiring = {}
 
 
+def _number(value) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def parse_init(msg: dict, cli_count: Optional[int]):
+    """(problem, count, alt, origin) of an "init"; problem is None when usable.
+
+    count is a number (unless --count overrides it), alt a number above
+    TAKEOFF_CONFIRM_ALT_M (a lower takeoff could never be confirmed), and
+    origin, when sent, a common-local-origin with finite x/y/groundM.
+    """
+    count = msg.get("count", 0) if cli_count is None else cli_count
+    if not _number(count):
+        return f"count {count!r} is not a number", 0, 0.0, None
+    alt = msg.get("alt", 50)
+    if not _number(alt) or alt <= TAKEOFF_CONFIRM_ALT_M:
+        return f"alt {alt!r} is not a number above {TAKEOFF_CONFIRM_ALT_M:g} m", 0, 0.0, None
+    supplied = msg.get("origin", {"frame": "common-local-origin", "x": 0.0, "y": 0.0, "groundM": 0.0})
+    if not (isinstance(supplied, dict) and supplied.get("frame") == "common-local-origin"
+            and all(_number(supplied.get(k)) for k in ("x", "y", "groundM"))):
+        return "origin is not a common-local-origin with finite x, y and groundM", 0, 0.0, None
+    origin = {"frame": "common-local-origin", **{k: float(supplied[k]) for k in ("x", "y", "groundM")}}
+    return None, int(count), float(alt), origin
+
+
 async def handle_init(websocket, msg: dict, cli_count: Optional[int], base_port: int) -> Optional[asyncio.Task]:
     """Fit the fleet to DR-1..DR-count, start a task per new vehicle, report
     per-vehicle readiness.
@@ -1227,13 +1252,20 @@ async def handle_init(websocket, msg: dict, cli_count: Optional[int], base_port:
     parked in a service phase, which its state names), and its task keeps
     trying.
     """
+    # Validate before taking control: a malformed init used to make its
+    # sender the controller and then return without a word.
+    problem, requested, alt, origin = parse_init(msg, cli_count)
+    if problem is not None:
+        if websocket in STATE.clients:
+            await send_status(websocket, f"bridge: init refused: {problem}")
+        return None
+
     async with STATE.init_lock:
         # Re-check ownership inside the lock: another client may have claimed
         # control while this init waited its turn.
         if not await _may_control(websocket, acquire=True) or not _owns_control(websocket):
             return
 
-        requested = cli_count if cli_count is not None else int(msg.get("count", 0))
         count = max(0, min(requested, MAX_VEHICLES))
         if requested > MAX_VEHICLES:
             await send_status(websocket, f"bridge: requested {requested} vehicles exceeds limit {MAX_VEHICLES}; clamping")
@@ -1242,14 +1274,6 @@ async def handle_init(websocket, msg: dict, cli_count: Optional[int], base_port:
             # Say so: the sim's drones beyond the bridge's fleet have no vehicle.
             await send_status(websocket, f"bridge: --count {cli_count} overrides the {asked} vehicles this init "
                                          f"asked for; only {count} exist")
-        alt = float(msg.get("alt", 50))
-        supplied_origin = msg.get("origin", {"frame": "common-local-origin", "x": 0.0, "y": 0.0, "groundM": 0.0})
-        if not isinstance(supplied_origin, dict) or supplied_origin.get("frame") != "common-local-origin":
-            return
-        if not all(isinstance(supplied_origin.get(k), (int, float)) and math.isfinite(supplied_origin[k])
-                   for k in ("x", "y", "groundM")):
-            return
-        origin = {"frame": "common-local-origin", **{k: float(supplied_origin[k]) for k in ("x", "y", "groundM")}}
 
         await send_status(websocket, f"bridge: initializing {count} vehicle(s), target alt {alt:g} m")
         if not _owns_control(websocket):
