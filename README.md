@@ -440,8 +440,9 @@ can parse — think tcpdump for the mesh. Schema is documented at the top of
 The swarm logic here can command actual autopilot firmware instead of the
 built-in physics. In "external vehicle" mode the browser keeps running every
 bit of its C2 logic — planning, ETX routing, the tether, coverage learning —
-but the drones are flown by ArduPilot/PX4 SITL (or a mock), reached over a
-WebSocket bridge:
+but the drones are flown by ArduCopter SITL (or a mock), reached over a
+WebSocket bridge (the bridge refuses PX4: it needs ArduCopter's `GUIDED`
+mode):
 
 ```
 browser sim  <--WebSocket-->  bridge.py  <--MAVLink/UDP-->  SITL

@@ -2,7 +2,7 @@
 
 This server speaks exactly the same browser-facing WebSocket protocol as
 bridge.py (see the "goals"/"telemetry"/"status"/"ready" messages below), but
-instead of talking to ArduPilot/PX4 SITL over MAVLink it simulates a handful
+instead of talking to ArduCopter SITL over MAVLink it simulates a handful
 of simple point-mass vehicles in pure Python.
 
 Why this exists: it lets you verify the *entire* pipeline -- browser sim ->

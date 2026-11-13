@@ -31,7 +31,7 @@ Every feature below exists to make one of those four signatures defensible.
   dead zone onto a learned coverage map and physically bends the chain around it.
 - **Real places** — type any place on Earth, fetch actual OSM buildings, fly over
   real geography in 2D map view or hand-rolled 3D.
-- **Bridge to reality** — the same C2 logic commands ArduPilot/PX4 SITL (or a
+- **Bridge to reality** — the same C2 logic commands ArduCopter SITL (or a
   mock) over a WebSocket→MAVLink bridge. The sim is already half a ground station.
 - **Evidence artifacts** — JSONL packet capture ("tcpdump for the mesh"),
   Markdown after-action reports, reproducible seeded scenarios.

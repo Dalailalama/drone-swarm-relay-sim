@@ -52,7 +52,7 @@ The simulator interacts with three distinct reference frames:
 - **Z-axis**: Height Above Ground Level (AGL) in metres ($+z$ is up).
 
 ### 2.2 Autopilot / MAVLink Frame (NED)
-Autopilot firmware (ArduPilot / PX4) operates in North-East-Down (NED):
+The autopilot (ArduCopter, the only firmware the SITL bridge supports) operates in North-East-Down (NED):
 $$\begin{aligned}
 x_{\text{NED}} &= -y_{\text{sim}} \quad (\text{North}) \\
 y_{\text{NED}} &= +x_{\text{sim}} \quad (\text{East}) \\
@@ -161,4 +161,4 @@ The simulation strikes a deliberate balance between physical fidelity and 20 Hz 
 2. **Local Planar Earth**: Terrain and distances assume flat earth with curvature horizon clipping. Earth ellipsoidal geometry is projected locally without geodesics.
 3. **Statistical RF Environment**: Multipath fast Rayleigh fading is represented through log-normal shadowing distributions rather than full electrodynamic boundary-element wave solvers.
 4. **Micro-Meteorology**: Wind fields are modeled as spatially uniform vectors with temporal gusts; localized building wake vortices and updrafts are not simulated.
-5. **Autopilot Abstraction**: In built-in simulation mode, autopilot firmware loops are abstracted to waypoint tracking. In external mode, real firmware (ArduPilot/PX4) executes the true inner-loop flight dynamics via MAVLink.
+5. **Autopilot Abstraction**: In built-in simulation mode, autopilot firmware loops are abstracted to waypoint tracking. In external mode, real firmware (ArduCopter SITL; the bridge refuses PX4) executes the true inner-loop flight dynamics via MAVLink.

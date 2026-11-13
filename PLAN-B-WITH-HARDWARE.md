@@ -74,7 +74,8 @@ real drones, one honest step at a time.
 
 ### Week 1 — Bridge on real radios
 - **Goal:** the SITL bridge talks to a real autopilot over a real radio link.
-- **Tasks:** Flash ArduPilot/PX4 on the autopilot. Connect it to a companion
+- **Tasks:** Flash ArduCopter on the autopilot (the bridge supports
+  ArduCopter only; PX4 has no `GUIDED` mode). Connect it to a companion
   computer. Run your existing MAVLink bridge over the *real* telemetry radio
   (not UDP loopback). Confirm telemetry flows and you can send a goal.
 - **Kit/Cost:** T0.
