@@ -186,6 +186,18 @@ test('audit: a cross-origin browser POST is refused with 403; the CLI binds loop
   }
 });
 
+// The header's usage line showed only [--port 8090]; the CLI also takes
+// --host, the one flag that decides who can reach an unauthenticated API.
+test('the server header usage line names every flag its CLI parses, with its default', () => {
+  const { DEFAULT_HOST } = require('../tools/server.js');
+  const src = fs.readFileSync(path.join(__dirname, '../tools/server.js'), 'utf8');
+  const usage = src.split(/\r?\n/).find(l => l.includes('node tools/server.js'));
+  const flags = [...src.matchAll(/arg\('(--[a-z-]+)', ([^)]+)\)/g)].map(m => m[1]);
+  assert.deepStrictEqual(flags.sort(), ['--host', '--port']);
+  for (const flag of flags) assert.ok(usage.includes('[' + flag + ' '), flag + ' missing from: ' + usage);
+  assert.ok(usage.includes('[--host ' + DEFAULT_HOST + ']'), usage);
+});
+
 test('regression #14: the server queues bounded work and rejects overflow with 429', async () => {
   const app = createApp({ workers: 1, queue: 1, timeoutMs: 60000 });
   await new Promise(r => app.listen(0, r));

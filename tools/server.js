@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Batch REST API — the metered-cloud-service seed, zero dependencies.
 //
-//   node tools/server.js [--port 8090]
+//   node tools/server.js [--port 8090] [--host 127.0.0.1]
 //
 //   GET  /api/health          -> {ok:true}
 //   POST /api/batch           -> body: batch config JSON (same schema as
