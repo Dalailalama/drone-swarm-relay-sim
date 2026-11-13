@@ -972,22 +972,10 @@ function interferenceFloorDbm(s, rxPos, rxAlt, rxRadio, nOverride, jamList) {
   return lin > 0 ? 10 * Math.log10(lin) + jamSirDb(rad) : -Infinity;
 }
 
-// How much interference degrades this link, in dB (>=0). Each end's floor is
-// compared against THAT end's own sensitivity; the worst end wins. Radios ra
-// and rb are the transmit-side radios of each node (their receivers share the
-// hardware), or null for swarm-wide defaults. Evaluated per link (the link's
-// shared exponent), not as a per-position field.
-function interferencePenaltyDb(s, aPos, aAlt, bPos, bAlt, ra, rb) {
-  if (!s.jammers || !s.jammers.length) return 0;
-  const rA = ra || s.radio, rB = rb || s.radio;
-  const n = channelExponent(rA, rB);
-  const fa = interferenceFloorDbm(s, aPos, aAlt, rA, n);
-  const fb = interferenceFloorDbm(s, bPos, bAlt, rB, n);
-  return Math.max(floorPenaltyDb(fa, rA), floorPenaltyDb(fb, rB));
-}
-
-// The same penalty for one receiver: its floor against its own sensitivity
-// (n: the link's shared exponent, when the receiver is one end of a link).
+// How much interference degrades one receiver, in dB (>=0): its floor
+// against its own sensitivity (n: the link's shared exponent, when the
+// receiver is one end of a link; liveMarginDb charges each end's penalty to
+// the direction that end hears).
 function endPenaltyDb(s, pos, alt, radio, n) {
   if (!s.jammers || !s.jammers.length) return 0;
   const r = radio || s.radio;
