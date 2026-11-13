@@ -210,14 +210,21 @@ Five features that make this hard to copy — all software-only, all tested:
   black-box uploads). Uptime with hunting vs static jammers is measurable;
   the report accounts for how far the adversary moved.
 - **ATAK / TAK integration** (*ATAK / TAK section*) — exports the live common
-  operating picture as Cursor-on-Target atoms: every drone, the command post,
-  the objective, and denial/GNSS-dead zones as ellipse hazards. Download a
+  operating picture as Cursor-on-Target atoms: every drone (`a-f-A-M-H-Q`),
+  the command post, the objective (`b-m-p-w` waypoint), and denial/GNSS-dead
+  zones as drawn circles (`u-d-c-c`), each marked `how="m-s"` (simulated).
+  Uids are `<prefix>-GCS`, `<prefix>-DR-n`, `<prefix>-TGT`, `<prefix>-JX-n`
+  and `<prefix>-GZ-n`; the prefix is a random per-page `SIM-xxxxxx`, editable
+  in the TAK panel's *UID prefix* field, so two pages never overwrite each
+  other's marks. Download a
   snapshot `.xml`, or stream live (5 s cadence) through `sitl/tak_bridge.py`
   onto TAK's UDP multicast (`239.2.3.1:6969`) where real ATAK clients
-  subscribe. Import someone else's CoT marks onto the map; one click turns
+  subscribe. Import someone else's CoT marks onto the map (named from their
+  `<contact callsign>`; they survive a relaunch); one click turns
   any mark into the mission objective. Georeferencing reuses a loaded OSM
-  area's exact anchor, or an operator origin (equirectangular, sub-metre at
-  these scales).
+  area's exact anchor, or an operator origin; TAK, OSM and the basemap share
+  one WGS-84 local projection, under 1 m of error within about 3 km of the
+  anchor, and longitudes wrap at the antimeridian.
 - **Scale: 100+ nodes** — drone slider to 120. Unicast traffic to and from
   C2 uses one C2-rooted shortest-path tree refreshed on a 0.5 s cadence
   (and rebuilt when a node dies or launches) instead of a Dijkstra per
@@ -333,7 +340,22 @@ radio rather than assume it (an older version of this README quoted ~15% to
 
 The **3D view** button (header) switches to a FASTER-style perspective
 render — shaded terrain mesh, extruded buildings, drones on altitude stems,
-link lines colored by health. Drag to orbit, wheel to zoom.
+link lines colored by health, plus GPS-denied zones, C2's ghosts of lost
+drones, TAK marks, packets on the air and (with *Coverage map* checked) the
+coverage map, capped to the 1,500 cells nearest the camera aim. Drag to
+orbit, wheel to zoom.
+
+**Controls.** On the map a tap selects and a drag moves: pressing on the
+target, C2, a source or a zone grabs it only once the pointer has moved a
+few pixels. From the keyboard, Tab to a fleet-list row and press Enter or
+Space to select it; with the map focused, arrows pan (orbit in 3D), + and −
+zoom, `[` and `]` select the previous or next drone, N cycles through RF
+sources and GPS zones, Escape clears that selection, Shift+arrows move the
+selected source or zone (or the objective when none is selected) and
+Alt+arrows move C2. Keyboard moves are recorded in the capture like drags.
+At high time scales each frame steps for at most 10 ms; when the CPU cannot
+keep up, the clock readout appends the rate actually achieved (for example
+`T+04:10 · 23×`).
 
 What no terrain database can predict is the *RF shadow* — the region where
 hops between valid positions still die because the hill cuts the ray. That
@@ -372,22 +394,39 @@ view, but over the city you actually care about: your neighbourhood, a
 disaster-response sector, an inspection corridor.
 
 And it's map-first: with a real area loaded, the 2D canvas stops being an
-abstract dark plane and renders the *actual map* — genuine OSM cartography
-(CARTO dark tiles), streets and parks and block layout — with the swarm,
-relay chain, coverage and interference drawn on top, the way a professional
-ground-control station does it. Pan and zoom (mouse or pinch) work on the
-map itself. The map is the picture; the fetched buildings remain the
-physics — a river on the tile does not block radio, and we don't pretend it
-does.
+abstract dark plane and renders the *actual map* — the OpenStreetMap
+standard tile style from `tile.openstreetmap.org`, streets and parks and
+block layout — with the swarm, relay chain, coverage and interference drawn
+on top, the way a professional ground-control station does it. Pan and zoom
+(mouse or pinch) work on the map itself. The map is the picture; the
+fetched buildings remain the physics — a river on the tile does not block
+radio, and we don't pretend it does. (CARTO's raster basemaps now need an
+API key and are no longer used.)
 
 Honesty notes, because the physics depends on them: OSM building heights are
 used when surveyed, estimated from floor counts when not (the UI shows the
-split); a small staging clearing is carved at the GCS and objective; very
-dense fetches keep the largest 6,000 buildings (the UI says when); ground
-under a real city is flat in this version. Needs internet (this is the one
-feature that does); saved scenarios store the coordinates and re-fetch on
-load. Building data © [OpenStreetMap](https://www.openstreetmap.org/copyright)
+split); each building is its footprint's minimum-area rectangle, turned to
+match it, and multipolygon building relations give one box per outer ring
+(courtyards ignored); LOS uses the turned box, while flight avoidance uses
+the axis-aligned box around it, which is conservative; a small staging
+clearing is carved at the GCS and objective; very dense fetches keep the
+largest 6,000 buildings (the UI says when); ground under a real city is flat
+in this version. Needs internet (this is the one feature that does); saved
+scenarios store the coordinates and re-fetch on load. Building data and map
+tiles © [OpenStreetMap](https://www.openstreetmap.org/copyright)
 contributors (ODbL).
+
+Data sources and usage policies: tiles are used under the OSMF
+[Tile Usage Policy](https://operations.osmfoundation.org/policies/tiles/),
+which needs a valid Referer, so serve the page over http(s) (for example
+`python -m http.server`); a page opened from `file://` sends none and its
+tiles may be refused. Place search uses
+[Nominatim](https://operations.osmfoundation.org/policies/nominatim/): the
+app spaces requests at least 1.1 s apart and caches searches per page.
+Buildings come from the public Overpass API; the app pauses about 30 s on a
+server that answers 429, 406 or 504 and tries the next. Heavy users should
+run their own instances (the endpoints are set at the top of `js/osm.js`,
+and the CSP in `index.html` must allow them).
 
 ## Things to try
 
@@ -493,6 +532,10 @@ swarm maps it, holds its connected frontier, and reports it.
 
 - **Save/Load scenario** serializes every setting plus placed interference
   sources to a JSON file, so a study or demo is reproducible and shareable.
+  A loaded file is validated in full before anything changes: unknown env,
+  airframe, terrain or radio ids (a radio id is accepted when the file's own
+  `radioPreset`/`relayRadioPreset` defines it), malformed numbers, and bad
+  jammer or zone entries are rejected with one alert.
 - **After-action report** exports a Markdown mission summary — did the link
   hold, how many relays and failsafes, what dead zones were mapped, packet
   loss, interference survived — the artifact a planner or customer actually
@@ -500,12 +543,24 @@ swarm maps it, holds its connected frontier, and reports it.
 
 ## Packet capture
 
-Tick the "Packet capture" box (Mission setup) to record every network event —
+Tick the "Packet capture" box (Mission setup) to record network events —
 sends, per-hop forwards with their retry count and link margin, deliveries,
-drops (no-route or link-fail), and broadcast receptions. "Export capture"
-downloads it as JSONL (one JSON event per line), a portable trace any tool
-can parse — think tcpdump for the mesh. Schema is documented at the top of
-[js/net.js](js/net.js) (`exportCaptureJSONL`).
+drops (with one of ten reasons: no-route, queue-latency, link-fail,
+ttl-expired, dead-src, dead-dst, bcast-superseded, bcast-backlog,
+bcast-suppressed, bcast-miss), and broadcast receptions. The capture is a
+rolling window of the last 4,000 events, not the whole run; its header
+(format version 3) reports `firstSeq`, `totalEvents` and `truncated`.
+"Export capture" downloads it as JSONL (one JSON event per line), a
+portable trace any tool can parse — think tcpdump for the mesh. Schema is
+documented at the top of [js/net.js](js/net.js) (`exportCaptureJSONL`).
+
+The header also carries the seed, the settings and every user action from
+t=0 (recorded even while capture is off; `captureStartT` says when packet
+events begin), so "Replay capture…" can regenerate the run. It runs in the
+background with progress on the button, then logs whether the replay
+reproduced the capture's deliveries (`matches` or `DIVERGES from`, with
+both counts and the time window). It is a parity check, not a visual
+replay; the replayed state is kept on `window.sim.lastReplay`.
 
 ## Physics, Protocol & Model Specifications
 
