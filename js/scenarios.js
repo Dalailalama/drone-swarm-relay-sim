@@ -42,9 +42,12 @@ const SCENARIO_PACK = [
       windSpd: 0, windDir: 90,
       corridor: true, broadcast: true, coverage: true,
       spectrumAgility: true,
+      // ~1.5 km and ~1.0 km denial discs with agility on. Once a jammer
+      // arrived with its EIRP and the receive antenna gain (5.15 dB more),
+      // 26/22 dBm put the ground station itself inside the first disc.
       jammers: [
-        { x: 1100, y: -150, erpDbm: 26, band: 'all', altM: 15, on: true },
-        { x: 1500, y: -480, erpDbm: 22, band: 'all', altM: 15, on: true },
+        { x: 1100, y: -150, erpDbm: 21, band: 'all', altM: 15, on: true },
+        { x: 1500, y: -480, erpDbm: 17, band: 'all', altM: 15, on: true },
       ],
     },
   },
@@ -108,12 +111,13 @@ const SCENARIO_PACK = [
       spectrumAgility: true, lpiMode: true,
       videoBackhaul: true, videoKbps: 300,
       gpsZones: [{ x: 3150, y: -720, rM: 330, on: true }],
-      // 5 dBm denies a ~950 m disc of the wing's band beside the corridor
-      // (~1.8 km with agility and LPI off). At 18 dBm the disc was 3.9 km —
-      // base, objective and every detour — and on the compare tool's seeds
+      // 0 dBm denies a ~950 m disc of the wing's band beside the corridor
+      // (~1.8 km with agility and LPI off), counting the jammer's EIRP and
+      // the receive antenna gain. At 18 dBm the disc was 3.9 km — base,
+      // objective and every detour — and on the compare tool's seeds
       // 101-105 the objective was reached late or never (audit SCN-02).
       jammers: [
-        { x: 1700, y: -560, erpDbm: 5, band: 'all', altM: 15, on: true },
+        { x: 1700, y: -560, erpDbm: 0, band: 'all', altM: 15, on: true },
       ],
     },
   },

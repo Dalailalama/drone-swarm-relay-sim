@@ -99,20 +99,24 @@ test('each scenario runs headlessly without throwing and plans a chain', () => {
 // SiK 42 m of usable range — 18 relays for its span with 12 drones — so no
 // drone ever reached the objective. Every bundled scenario and mission must
 // be flyable with the fleet it ships: the planner's relay count for the
-// span (chain radio, clutter factor, radio horizon, hop spacing) leaves at
-// least one drone for the mission; a relay wing also holds the tactical
-// hand-off slot at the objective.
+// span (chain radio, clutter factor, LPI budget cost, radio horizon, hop
+// spacing) leaves at least one drone for the mission; a relay wing also
+// holds the tactical hand-off slot at the objective.
 const { MISSION_LIBRARY } = require('../js/missions.js');
 const { runScenarioSeed } = require('../tools/compare.js');
+
+// planChain's slot count over a straight base->objective path.
+const relaysForSpan = (D, span) => Math.max(0, Math.ceil(D / span) - 1);
 
 test('every bundled scenario and mission has enough drones for the relay chain its span needs', () => {
   const C2_MAST_M = 6;
   for (const { id, scenario: sc } of [...SCENARIO_PACK, ...MISSION_LIBRARY]) {
     const env = R.ENVIRONMENTS.find(e => e.id === sc.env);
     const chain = R.RADIOS.find(r => r.id === (sc.hetero ? sc.relayRadio : sc.radio));
-    const usable = Math.min(R.usableRangeM(chain, env.factor), R.radioHorizonM(C2_MAST_M, sc.altitudeM));
+    const lossDb = ctx.planLossDb({ lpiMode: !!sc.lpiMode });
+    const usable = Math.min(R.usableRangeM(chain, env.factor, lossDb), R.radioHorizonM(C2_MAST_M, sc.altitudeM));
     const D = Math.hypot(sc.target.x - sc.base.x, sc.target.y - sc.base.y);
-    const k = ctx.relaysRequired(D, usable * sc.spacingPct / 100);
+    const k = relaysForSpan(D, usable * sc.spacingPct / 100);
     if (sc.hetero) assert.ok(k + 1 <= sc.relayWing, `${id}: ${k} wing relays + the hand-off slot vs a wing of ${sc.relayWing}`);
     else assert.ok(k < sc.count, `${id}: ${k} relays for ${D.toFixed(0)} m vs ${sc.count} drones`);
   }
