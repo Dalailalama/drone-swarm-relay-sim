@@ -36,7 +36,20 @@ test('osmParseHeight reads bare metres, "m" units and imperial units', () => {
   assert.ok(Math.abs(O.osmParseHeight('60 feet') - 18.288) < 1e-6);
 });
 
+test('osmParseHeight reads OSM feet-and-inches and spelled-out metres', () => {
+  // Key:height documents height=7'4" for feet and inches.
+  assert.ok(Math.abs(O.osmParseHeight('7\'4"') - (7 * 0.3048 + 4 * 0.0254)) < 1e-9, '7\'4" is 2.2352 m');
+  assert.ok(Math.abs(O.osmParseHeight('12\'6"') - 3.81) < 1e-9);
+  assert.ok(Math.abs(O.osmParseHeight(' 6\' 7.5" ') - (6 * 0.3048 + 7.5 * 0.0254)) < 1e-9);
+  assert.strictEqual(O.osmParseHeight('12.5 metres'), 12.5);
+  assert.strictEqual(O.osmParseHeight('12.5 meters'), 12.5);
+  assert.strictEqual(O.osmParseHeight('1 metre'), 1);
+});
+
 test('osmParseHeight rejects garbage, blanks and non-positive heights', () => {
+  for (const bad of ['1.2.3', '12..5', '.', '7\'4', '4"', '7\'-4"']) {
+    assert.strictEqual(O.osmParseHeight(bad), null, JSON.stringify(bad) + ' is malformed');
+  }
   for (const bad of ['Mumbai', '', '   ', '18,5', '12 storeys', null, undefined, '-4', '-4 m', '0']) {
     assert.strictEqual(O.osmParseHeight(bad), null, JSON.stringify(bad) + ' should not parse');
   }

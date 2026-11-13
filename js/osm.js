@@ -41,14 +41,21 @@ const OSM_LEVEL_HEIGHT_M = 3.2;   // storey height when only a floor count is ma
 const OSM_DEFAULT_HEIGHT_M = 9;   // untagged building: low-rise guess (~3 floors)
 const OSM_MAX_BUILDINGS = 6000;   // keep the biggest N; renderer & physics stay smooth
 
-// "18.5", "18.5 m", "60 ft" → metres; null if unparseable.
+// "18.5", "18.5 m", "12.5 metres", "60 ft", and OSM's feet-and-inches
+// 7'4" (Key:height) → metres; null if unparseable — including malformed
+// numbers like "1.2.3", which must not read as 1.2 m.
 function osmParseHeight(v) {
   if (v == null) return null;
-  const m = String(v).match(/^\s*(-?[\d.]+)\s*(m|ft|feet|')?\s*$/i);
+  const fi = String(v).match(/^\s*(\d+(?:\.\d+)?)\s*'\s*(\d+(?:\.\d+)?)\s*"\s*$/);
+  if (fi) {
+    const h = parseFloat(fi[1]) * 0.3048 + parseFloat(fi[2]) * 0.0254;
+    return h > 0 ? h : null;
+  }
+  const m = String(v).match(/^\s*(-?\d+(?:\.\d+)?)\s*(m|metres?|meters?|ft|feet|')?\s*$/i);
   if (!m) return null;
   const n = parseFloat(m[1]);
   if (!isFinite(n) || n <= 0) return null;
-  return (m[2] && m[2].toLowerCase() !== 'm') ? n * 0.3048 : n;
+  return (m[2] && m[2][0].toLowerCase() !== 'm') ? n * 0.3048 : n;
 }
 
 // Minimum-area rectangle around a footprint's points (local metres). It has
