@@ -183,10 +183,20 @@ all tested:
   scheduler, and the full combination (mixed fleet + jammer + GNSS denial +
   LPI + payload). Each is plain JSON-shaped data — save/load compatible.
 - **Sim-to-real calibration loop** (*Calibration section*) — feed any CSV log
-  of RSSI vs distance from real hardware (`dist,rssi` or `x,y[,z],rssi`);
-  least-squares fits the path-loss exponent and reference power with RMSE/R²,
-  re-derives a field-calibrated radio preset whose model exponent equals your
-  measurement, and emits a Markdown validation report with per-band residuals.
+  of RSSI vs distance from real hardware (`dist,rssi` or `x,y[,z],rssi`;
+  headers may carry units such as `distance_m` or `RSSI (dBm)`, positions may
+  be `east`/`north`, cells may be quoted). Distances are metres and RSSI must
+  be dBm: device-scale RSSI such as MAVLink `RADIO_STATUS` 0..254 is refused.
+  Least squares fits the path-loss exponent and reference power with
+  RMSE/R² and n ± its 95% interval, re-derives a field-calibrated radio
+  preset whose model exponent equals your measurement, and emits a Markdown
+  validation report with per-band residuals. A fit is refused when the
+  distances span less than half a decade, the 95% interval on n is wider
+  than ±0.5, n is outside 1.2–6.5, or the 1 m power is outside −120 to
+  +40 dBm. Rows with a distance but no RSSI (blank, `lost`, `nan`, `-`) are
+  lost packets, fitted as censored below the radio's sensitivity, which
+  removes the edge-of-range bias; a log that drops lost packets cannot be
+  corrected, so keep them (or fit only distances with reliable reception).
   This is the loop that turns the simulator from plausible into validated.
 
 ## Tier-2 capabilities (the moat)
