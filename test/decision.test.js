@@ -61,8 +61,9 @@ test('Item 9: explainDroneDecision provides plain-English reasons and measuremen
   assert.strictEqual(expRtb.mode, 'rtb');
   assert.ok(expRtb.summary.includes('Returning to base: low battery'));
 
-  // 8. Landed mode
+  // 8. Landed mode (at base, the crew swapping the pack)
   d.mode = 'landed';
+  d.swapAt = s.time + 90;
   const expLanded = ctx.explainDroneDecision(s, d);
   assert.strictEqual(expLanded.mode, 'landed');
   assert.ok(expLanded.summary.includes('Landed on base pad'));
@@ -173,4 +174,23 @@ test('the hold explanation quotes the silence threshold the drone actually holds
   assert.strictEqual(d.mode, 'hold', 'setup: 125 s is past it');
   const exp = ctx.explainDroneDecision(s, d);
   assert.ok(/threshold 120(\.0)?\s?s/.test(exp.summary), exp.summary);
+});
+
+// A drone that set down at a stale last-known home has no crew to swap it
+// and never relaunches (ONB-01); the card must not promise a swap.
+test('a drone landed at a stale home is not explained as swapping on the base pad', () => {
+  const ctx = loadCore();
+  const SIK = R.RADIOS.find(r => r.id === 'sik-v3');
+  const Q450 = A.AIRFRAMES.find(a => a.id === 'q450');
+  const s = ctx.makeSwarm({ count: 1, seed: 42, radio: SIK, airframe: Q450, targetX: 600, targetY: 0 });
+  const d = s.drones[0];
+  s.c2.nextCmd = Infinity;
+  d.x = d.belX = 1500; d.y = d.belY = 0; d.vx = d.vy = 0;
+  d.mode = 'rtb';
+  s.base.x = 0; s.base.y = 3000; // operator relocates while the drone is deaf
+  while (s.time < 600 && d.mode === 'rtb') ctx.stepSwarm(s, 0.05);
+  assert.strictEqual(d.mode, 'landed', 'setup');
+  assert.strictEqual(d.swapAt, null, 'setup: no crew at the stale home');
+  const exp = ctx.explainDroneDecision(s, d);
+  assert.ok(!/swapping|base pad/.test(exp.summary), exp.summary);
 });

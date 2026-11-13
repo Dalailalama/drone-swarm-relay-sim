@@ -2638,6 +2638,9 @@ function explainDroneDecision(s, d) {
   let summary = '';
   if (d.mode === 'dead') {
     summary = 'Vehicle down (destroyed or battery exhausted)';
+  } else if (d.mode === 'landed' && d.swapAt == null) {
+    // Set down at a stale last-known home: no crew there, no relaunch.
+    summary = 'Landed at its last-known base — no ground crew there to swap the battery';
   } else if (d.mode === 'landed') {
     summary = 'Landed on base pad (swapping or waiting for launch)';
   } else if (d.mode === 'rtb' && !homeFlyable) {
