@@ -1734,7 +1734,7 @@
             '<div><b>Upstream:</b> ' + escHtml(exp.upstream) + '</div>' +
             '<div><b>Link margin:</b> ' + escHtml(marginStr) + '</div>' +
             '<div><b>C2 silence:</b> ' + escHtml(silenceStr) + '</div>' +
-            '<div><b>Airspeed:</b> ' + escHtml(spdStr) + '</div>' +
+            '<div><b>Ground speed:</b> ' + escHtml(spdStr) + '</div>' + // exp.speedMs carries the wind
             '<div><b>Battery:</b> ' + selected.batteryPct.toFixed(1) + '%</div>' +
             '<div><b>Energy:</b> ' + selected.energyWh.toFixed(1) + ' Wh</div>' +
           '</div>';

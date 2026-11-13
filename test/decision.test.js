@@ -137,3 +137,26 @@ test('a drone landed for a swap is shown as landed, not as down', () => {
   ui.ctx.__raf.pump(200);
   assert.ok(ui.el('droneDecisionCard').innerHTML.includes('is down'));
 });
+
+// explainDroneDecision's speedMs is GROUND speed (d.vx/vy carry the wind),
+// but the card printed it as "Airspeed": in a 10 m/s wind a drone holding
+// station read 10 m/s of airspeed as ~0, and one crabbing upwind the reverse.
+test('the decision card labels its speed as the quantity it shows', () => {
+  const { ctx, el, fire, querySelector } = loadUI();
+  el('windSpdRange').value = 10; fire('windSpdRange', 'input');
+  const s = ctx.sim.swarm;
+  while (s.time < 90) ctx.stepSwarm(s, 0.05);
+  querySelector('[data-speed="pause"]').click();       // freeze the drone while the panel refreshes
+  const air = d => Math.hypot(d.vx - s.wind.x, d.vy - s.wind.y), ground = d => Math.hypot(d.vx, d.vy);
+  const d = s.drones.find(x => x.mode === 'ok' && Math.abs(air(x) - ground(x)) > 1);
+  assert.ok(d, 'precondition: a flying drone whose airspeed and ground speed differ');
+  ctx.__raf.pump(200);
+  ctx.__raf.pump(200);                                 // the fleet rows exist after a panel refresh
+  el('fleetBody').fire('click', { target: el('fleetBody').querySelector('[data-id="' + d.id + '"]') });
+  ctx.__raf.pump(200);
+  ctx.__raf.pump(200);
+  const m = /<b>(Airspeed|Ground speed):<\/b> ([\d.]+) m\/s/.exec(el('droneDecisionCard').innerHTML);
+  assert.ok(m, 'card shows a speed: ' + el('droneDecisionCard').innerHTML);
+  const want = m[1] === 'Airspeed' ? air(d) : ground(d);
+  assert.ok(Math.abs(+m[2] - want) < 0.06, m[1] + ' ' + m[2] + ' m/s, but that quantity is ' + want.toFixed(2) + ' m/s');
+});
