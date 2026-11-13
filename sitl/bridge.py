@@ -1193,6 +1193,11 @@ def _keep_vehicle(v: Vehicle, websocket, origin: dict) -> None:
         v.service_id = None
         v.service_history.clear()
         v.service_action_history.clear()
+    elif v.service_phase not in ("landing", "landed", "swapping", "swapped"):
+        # Nor may the acks of a transaction the new session cannot pick up
+        # from telemetry (only landing to swapped, docs/PROTOCOL.md 3.1), e.g.
+        # a relaunch that completes after this init.
+        v.service_action_history.clear()
 
 
 async def _stop_all_vehicles() -> None:

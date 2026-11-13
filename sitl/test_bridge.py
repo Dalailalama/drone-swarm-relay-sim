@@ -2443,10 +2443,59 @@ async def scenario_failed_relaunch_redone_by_handshake():
     await h.close()
 
 
+async def scenario_reload_mid_relaunch_no_stale_ack():
+    """A page reloaded while a vehicle relaunches numbers its requests from 1
+    again and cannot pick that phase up from telemetry. The old transaction's
+    acks survived the new session's init, so once the vehicle was READY a land
+    reusing the old id was replayed as a duplicate and never flown."""
+    h = Harness()
+    old = h.client("old-tab")
+    await h.init(old, count=0, alt=30.0)
+    clock = Clock()
+    with patch.object(bridge, "_now", clock):
+        v = current_vehicle()
+        v.first_pass_done.set()
+        conn = v.conn
+
+        async def tick(armed, down, *acks):
+            clock.now += 0.1
+            for ack in acks:
+                conn.push(ack)
+            conn.push(hb_msg(armed=armed, custom_mode=GUIDED_MODE_ID))
+            conn.push(pos_msg(0.0, 0.0, down))
+            if not armed:
+                conn.push(ext_state_msg(1))
+            bridge._drain_messages(v)
+            await bridge._advance_init(v)
+
+        await _service(old, "land", "1")
+        await tick(False, -0.1)
+        for action in ("authorize", "complete", "relaunch"):
+            await _service(old, action, "1", alt=20.0)
+        assert v.service_phase == "relaunch", v.service_phase
+
+        bridge.client_disconnected(old)  # reload: the new tab inits the same fleet
+        new = h.client("new-tab")
+        await ready_reply(new, h.init(new, count=1, alt=30.0))
+        assert bridge.STATE.vehicles["DR-1"] is v and v.service_phase == "relaunch"
+        await tick(False, -0.1)
+        await tick(True, -0.1, ack_msg(MAV_CMD_COMPONENT_ARM_DISARM))
+        await tick(True, -20.0, ack_msg(MAV_CMD_NAV_TAKEOFF))
+        assert v.ready and v.service_phase is None, (v.init_state, v.service_phase)
+
+        lands = conn.count("land")
+        await _service(new, "land", "1")
+        ack = new.of_type("service_ack")[-1]
+        assert ack["accepted"] and not ack["duplicate"] and v.service_phase == "landing", (ack, v.service_phase)
+        assert conn.count("land") == lands + 1
+    await h.close()
+
+
 SCENARIOS = [
     ("NAV_LAND is re-sent until the autopilot ACKs it", scenario_land_resent_until_acked),
     ("a failed landing can be retried under a new request id", scenario_failed_landing_can_be_retried),
     ("a failed relaunch, once grounded, is redone through the handshake", scenario_failed_relaunch_redone_by_handshake),
+    ("a page reloaded mid-relaunch gets no stale duplicate ack for a reused request id", scenario_reload_mid_relaunch_no_stale_ack),
     ("--count overriding the init's count is reported in a status line", scenario_cli_count_override_reported),
     ("an init that drops an airborne vehicle lands it and watches it down", scenario_shrinking_init_lands_dropped_vehicle),
     ("re-init keeps a vehicle parked mid-swap parked; only the handshake relaunches it", scenario_reinit_keeps_parked_vehicle),

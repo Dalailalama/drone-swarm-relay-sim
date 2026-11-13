@@ -650,6 +650,48 @@ async def test_failed_relaunch_redone_by_handshake():
     assert run(lambda: v.ready), (v.service_phase, v.init_state)
 
 
+async def test_reload_mid_relaunch_no_stale_ack():
+    """Same as bridge.py: a page reloaded while a vehicle relaunches numbers
+    its requests from 1 again, so once the vehicle is READY a land reusing
+    the old transaction's id is flown, not replayed as a duplicate."""
+    w = mock_vehicles.WORLD = World()
+    old = MockWebSocket()
+    w.reset(1, alt=30.0)
+    w.controller = old
+    w.clients.add(old)
+    v = w.vehicles["DR-1"]
+
+    async def service(ws, action, **extra):
+        await mock_vehicles.handle_message(ws, json.dumps({
+            "type": "service", "id": "DR-1", "requestId": "1", "action": action, **extra}))
+        return json.loads(ws.sent[-1])
+
+    def run(pred, n=1000):
+        for _ in range(n):
+            w.physics_tick(0.05)
+            if pred():
+                return True
+        return False
+
+    assert run(lambda: v.ready)
+    assert (await service(old, "land", groundAlt=0.0))["accepted"]
+    assert run(lambda: v.service_phase == "landed")
+    for action in ("authorize", "complete", "relaunch"):
+        assert (await service(old, action, alt=20.0))["accepted"], action
+    assert v.service_phase == "relaunch"
+
+    w.clients.discard(old)  # reload: the new tab inits the same fleet
+    w.controller = None
+    new = MockWebSocket()
+    w.clients.add(new)
+    await mock_vehicles.handle_message(new, json.dumps({"type": "init", "count": 1, "alt": 30.0}))
+    assert w.vehicles["DR-1"] is v and v.service_phase == "relaunch"
+    assert run(lambda: v.ready and v.service_phase is None), (v.init_state, v.service_phase)
+
+    ack = await service(new, "land", groundAlt=0.0)
+    assert ack["accepted"] and not ack["duplicate"] and v.service_phase == "landing", (ack, v.service_phase)
+
+
 async def test_init_count_is_bounded():
     """An init's vehicle count comes off the network: a huge one is clamped
     instead of building millions of vehicles inside the event loop."""
@@ -754,6 +796,8 @@ SCENARIOS = [
     ("Mock: init vehicle count is bounded", test_init_count_is_bounded),
     ("Mock: a failed landing can be retried under a new request id", test_failed_landing_can_be_retried),
     ("Mock: a failed relaunch, once grounded, is redone through the handshake", test_failed_relaunch_redone_by_handshake),
+    ("Mock: a page reloaded mid-relaunch gets no stale duplicate ack for a reused request id",
+     test_reload_mid_relaunch_no_stale_ack),
     ("Mock: malformed messages are skipped without dropping the connection", test_malformed_messages_keep_connection),
 ]
 

@@ -571,6 +571,10 @@ class World:
                 v.service_id = None
                 v.service_history.clear()
                 v.service_action_history.clear()
+            elif v.service_phase not in ("landing", "landed", "swapping", "swapped"):
+                # Same as bridge.py: nor may the acks of a transaction the
+                # new session cannot pick up from telemetry.
+                v.service_action_history.clear()
             if isinstance(origin, dict):
                 v.origin = {
                     "frame": "common-local-origin",
