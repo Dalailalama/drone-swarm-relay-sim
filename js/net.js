@@ -610,10 +610,6 @@ function stepFades(s, dt) {
   }
 }
 
-function hopTimeSec(radio, bytes) {
-  return (bytes * 8) / (radio.airRateKbps * 1000) + NET.procDelaySec;
-}
-
 // --- Topology ---------------------------------------------------------------
 // Node ids: 'C2' plus drone ids. Positions come from the swarm's ground truth
 // (radio waves don't care what anyone believes).
@@ -1135,28 +1131,18 @@ if (typeof window !== 'undefined') {
   window.exportCaptureJSONL = exportCaptureJSONL;
 }
 
-// Hop attempt: the link must still exist when the packet actually crosses it,
-// then each transmission rolls against the packet-error curve. Returns number
-// of retries used (0 = first try), or -1 if all attempts failed.
+// Link-layer retries per hop (completePacketAttempt): each attempt rolls the
+// packet-error curve against the live margin at its own start.
 const HOP_RETRIES = 2; // SiK, DigiMesh etc. do link-layer retransmits like this
 const HOP_RETRY_GAP_SEC = 0.02; // listen-for-ACK gap between attempts
-
-function hopDelivered(s, fromId, toId) {
-  if (!linkUsable(s, fromId, toId)) return -1;
-  const p = pktSuccessProb(liveMarginDb(s, fromId, toId));
-  for (let t = 0; t <= HOP_RETRIES; t++) {
-    if (s.net.rng() < p) return t;
-  }
-  return -1;
-}
 
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     NET, VID, makeNet, capLog, sendBroadcast, stepBcasts,
-    txRadioOf, channelKeyOf, hopTimeSec, nodeIds, nodePos,
+    txRadioOf, channelKeyOf, nodeIds, nodePos,
     linkUsable, linkCost, routePath, c2Tree, pathToC2,
     sendPacket, deliverPacket, stepNet, exportCaptureJSONL, controlLossPct,
-    hopDelivered, HOP_RETRIES, interruptEndpointAttempts,
+    HOP_RETRIES, interruptEndpointAttempts,
     recordUserAction,
   };
 }

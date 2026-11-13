@@ -146,16 +146,6 @@ const droneBootSeq = new WeakMap();
 function afOf(s, d) { return d.af || s.airframe; }
 function droneRadio(d) { return d.radio || null; }
 
-// The radio a node transmits on. C2 is assumed to carry a matched companion
-// unit for every radio type in the field (two dongles on the mast is exactly
-// what real mixed-fleet ground stations do), so C2 pairs with whatever the
-// far end flies.
-function nodeRadioOf(s, id) {
-  if (id === 'C2') return null;
-  const d = nodePos(s, id);
-  return d ? droneRadio(d) : null;
-}
-
 function makeDrone(x, y, target, rng, airframe, radio, cls) {
   droneSeq += 1;
   const session = (droneBootSeq.get(rng) || 0) + 1;
@@ -1105,10 +1095,6 @@ function slotFromOrder(s, order) {
   };
 }
 
-function relaysRequired(D, span) {
-  return Math.max(0, Math.ceil(D / span) - 1);
-}
-
 // --- C2 ground station -------------------------------------------------------
 function c2Step(s) {
   // Ingest telemetry that physically arrived. Every received report is also
@@ -1855,22 +1841,6 @@ function buildSepGrid(s) {
     arr.push(d);
   }
   return grid;
-}
-
-function sepNeighbors(s, x, y) {
-  const cell = DRONE.separationM;
-  const gx = Math.floor(x / cell), gy = Math.floor(y / cell);
-  const out = [];
-  if (!s._sepGrid) return out;
-  for (let dx = -1; dx <= 1; dx++) {
-    for (let dy = -1; dy <= 1; dy++) {
-      const arr = s._sepGrid.get((gx + dx) + ',' + (gy + dy));
-      if (arr) {
-        for (let i = 0; i < arr.length; i++) out.push(arr[i]);
-      }
-    }
-  }
-  return out;
 }
 
 function stepDrone(s, d, dt) {
