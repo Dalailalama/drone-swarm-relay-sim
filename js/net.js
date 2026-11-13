@@ -2,6 +2,42 @@
 // information that didn't physically arrive as a packet over a live link.
 // Packets travel hop-by-hop: each hop costs real airtime (bytes / air rate)
 // plus a forwarding delay, and is only possible while that link has margin.
+//
+// Packet capture schema (exportCaptureJSONL; JSONL, one JSON object per line).
+// Line 1 is a header:
+//   {seq: -1, t: 0, ev: 'meta', version: 3, seed, radio, broadcast, settings,
+//    captureStartT, userActions, events, firstSeq, totalEvents, truncated}
+//   The capture is a rolling window of the last CAP_MAX (4000) events, not the
+//   whole run: firstSeq is the seq of the first event kept, totalEvents how
+//   many were logged, truncated whether older ones were discarded. Events
+//   before captureStartT (capture switched on late) were never logged; replay
+//   regenerates the run from seed + settings + userActions.
+// Every following line is {seq, t, ev, ...}, ev one of:
+//   send    {pid, kind, src, dst, hops, path}        kind: tlm|cmd|ack|vid
+//           a video chunk larger than the MTU is ONE send for the frame:
+//           {pid: frameId, kind: 'vid', src, dst, hops, path, frags, bytes}
+//   hop     {pid, kind, from, to, retries, marginDb}
+//   deliver {pid, kind, src, dst}     logged once the receiver is known alive
+//   drop    {reason, ...}             fields per reason below
+//   bcast   {seqNo, from, to, marginDb}   first reception of an order table
+//   Video fragments travel as packets of their own (pid 'pN'); their hop,
+//   deliver and drop events also carry frameId (the frame send's pid) and
+//   fragIdx, so every fragment joins its frame's send.
+// Drop reasons:
+//   no-route          no path at send time                {kind, src, dst}
+//   queue-latency     video chunk refused: backlog > 1 s  {kind, src, dst}
+//   link-fail         a hop failed all its retries        {pid, kind, from, to, marginDb}
+//   ttl-expired       aged out while queued (tlm 6 s, vid 3 s, else 10 s)
+//   dead-src          the sending node went down before its frame finished
+//   dead-dst          the receiving node went down before the frame landed
+//                     or before arrival (store-and-forward delay)
+//                     (these four: {pid, kind, from, to, marginDb?})
+//   bcast-superseded  a queued table copy replaced by a newer table  {from, seqNo}
+//   bcast-backlog     broadcast queue full, copy not queued          {from, seqNo}
+//   bcast-suppressed  a node cancelled its re-send: enough copies heard {from, seqNo}
+//   bcast-miss        an addressed drone never heard a closed C2 order round
+//                     {kind: 'bcast', to, seqNo} — counted like a lost order
+// The version is bumped whenever a line's shape changes.
 
 const NET = {
   procDelaySec: 0.02,   // per-hop forward/processing delay (store-and-forward)
@@ -121,6 +157,12 @@ function capLog(s, ev) {
   // O9: shift() per event is O(n) — trim in batches so the rolling window
   // costs amortized O(1) while consumers still see a plain ordered array.
   if (s.net.cap.length > CAP_MAX + 512) s.net.cap.splice(0, s.net.cap.length - CAP_MAX);
+}
+
+// A video fragment's events name their frame, so they join the frame's send.
+function fragTag(p, ev) {
+  if (p.frameId) { ev.frameId = p.frameId; ev.fragIdx = p.fragIdx; }
+  return ev;
 }
 
 // --- Hardware matching & Channel ID ------------------------------------------
@@ -319,7 +361,7 @@ function markVidFrameDropped(s, id) {
 function dropPacketBookkeeping(s, p, reason, from, to, marginDb) {
   countOutcome(s, p.kind, false);
   if (p.kind === 'vid') markVidFrameDropped(s, p.frameId || p.pid);
-  capLog(s, { ev: 'drop', reason, pid: p.pid, kind: p.kind, from, to, marginDb });
+  capLog(s, fragTag(p, { ev: 'drop', reason, pid: p.pid, kind: p.kind, from, to, marginDb }));
 }
 
 function packetExpired(s, p, at) {
@@ -824,6 +866,9 @@ function sendPacket(s, kind, src, dst, payload, bytesOverride) {
   if (kind === 'vid' && bytes > MTU) {
     const numFrags = Math.ceil(bytes / MTU);
     const frameId = 'vf' + (++s.net.vidFrameSeq);
+    // Send first, so a fragment dropped while being queued follows it in the trace.
+    capLog(s, { ev: 'send', pid: frameId, kind, src, dst, hops, path: path.join('>'), frags: numFrags, bytes });
+    let queued = 0;
     for (let i = 0; i < numFrags; i++) {
       const fragBytes = Math.min(MTU, bytes - i * MTU);
       const p = {
@@ -840,10 +885,10 @@ function sendPacket(s, kind, src, dst, payload, bytesOverride) {
       };
       if (preparePacketHop(s, p)) {
         s.net.packets.push(p);
+        queued++;
       }
     }
-    capLog(s, { ev: 'send', pid: frameId, kind, src, dst, frags: numFrags, bytes });
-    return true;
+    return queued > 0;
   }
 
   const pid = 'p' + s.net.pktSeq++;
@@ -855,14 +900,27 @@ function sendPacket(s, kind, src, dst, payload, bytesOverride) {
     tSent: s.time,
     tReady: s.time,
   };
-  if (preparePacketHop(s, p)) {
-    s.net.packets.push(p);
-  }
-  capLog(s, { ev: 'send', pid, kind, src, dst, hops: path.length - 1, path: path.join('>') });
+  // Send first: a stale route's dead first hop drops the packet while it is
+  // being queued, and that drop must follow its send in the trace (NET-07).
+  capLog(s, { ev: 'send', pid, kind, src, dst, hops, path: path.join('>') });
+  if (!preparePacketHop(s, p)) return false; // dropped: nothing queued
+  s.net.packets.push(p);
   return true;
 }
 
 function deliverPacket(s, p) {
+  if (p.dst !== 'C2') {
+    // Receiver must still be up at arrival (it may die during the
+    // store-and-forward delay after the last bit landed): otherwise this is
+    // a drop, and the trace shows it as one — never a bare 'deliver'.
+    const d = nodePos(s, p.dst);
+    const aliveAtArrive = d && (alive(d) || (d.endpointDeadAt != null && d.endpointDeadAt >= p.tArrive));
+    if (!aliveAtArrive) {
+      dropPacketBookkeeping(s, p, 'dead-dst', p.path[p.hop - 1], p.dst, p.marginDb);
+      return;
+    }
+  }
+  capLog(s, fragTag(p, { ev: 'deliver', pid: p.pid, kind: p.kind, src: p.src, dst: p.dst }));
   countOutcome(s, p.kind, true);
   if (p.kind === 'vid') {
     if (s.net.vidDropped.has(p.frameId || p.pid)) {
@@ -895,16 +953,7 @@ function deliverPacket(s, p) {
     // telemetry ingest — C2's belief state only updates from real reports.
     if (p.kind !== 'vid' && s.c2 && s.c2.inbox) s.c2.inbox.push(p);
   }
-  else {
-    const d = nodePos(s, p.dst);
-    const aliveAtArrive = d && (alive(d) || (d.endpointDeadAt != null && d.endpointDeadAt >= p.tArrive));
-    if (aliveAtArrive) d.inbox.push(p);
-    else {
-      const k = s.net.byKind[p.kind];
-      s.net.delivered--, k.delivered--;
-      countOutcome(s, p.kind, false);
-    }
-  }
+  else nodePos(s, p.dst).inbox.push(p);
 }
 
 function stepNet(s, dt) {
@@ -938,11 +987,10 @@ function stepNet(s, dt) {
     }
 
     const from = p.path[p.hop], to = p.path[p.hop + 1];
-    capLog(s, { ev: 'hop', pid: p.pid, kind: p.kind, from, to, retries: p.retries, marginDb: p.marginDb });
+    capLog(s, fragTag(p, { ev: 'hop', pid: p.pid, kind: p.kind, from, to, retries: p.retries, marginDb: p.marginDb }));
     p.hop++;
     if (p.hop >= p.path.length - 1) {
-      capLog(s, { ev: 'deliver', pid: p.pid, kind: p.kind, src: p.src, dst: p.dst });
-      deliverPacket(s, p);
+      deliverPacket(s, p); // logs 'deliver' (or the drop) itself
       continue;
     }
 
@@ -981,13 +1029,7 @@ function stepNet(s, dt) {
 }
 
 // Export the capture as JSONL (one JSON event per line) — a portable trace
-// any tool can parse. Schema per line:
-//   {seq, t, ev, ...}  where ev ∈ send|hop|deliver|drop|bcast
-//     send    {pid, kind, src, dst, hops, path}
-//     hop     {pid, kind, from, to, retries, marginDb}
-//     deliver {pid, kind, src, dst}
-//     drop    {pid?, kind, reason, from?, to?, marginDb?}  reason: no-route|link-fail
-//     bcast   {seqNo, from, to, marginDb}
+// any tool can parse. The schema is documented at the top of this file.
 // Mid-run UI actions are recorded ALWAYS, not only while capture is on: the
 // header describes t=0, so an action taken before capture was switched on
 // must still be in the file or the replay diverges (audit C-replay). They
@@ -1027,11 +1069,14 @@ function exportCaptureJSONL(s) {
     envFactor: s.envFactor,
     terrain: s.terrain ? (s.terrain.name || s.terrain.type || 'flat') : 'flat',
   };
+  const caps = (s.net && s.net.cap) ? s.net.cap : [];
+  const totalEvents = s.net ? s.net.capSeq : 0;
+  const firstSeq = caps.length ? caps[0].seq : totalEvents;
   const header = {
     seq: -1,
     t: 0,
     ev: 'meta',
-    version: 2,
+    version: 3,
     seed: s.seed,
     radio: s.radio ? s.radio.id : undefined,
     broadcast: !!s.broadcastC2,
@@ -1040,9 +1085,12 @@ function exportCaptureJSONL(s) {
     // late); replay regenerates them from the seed.
     captureStartT: s.captureStartT || 0,
     userActions: s.userActions ? [...s.userActions] : [],
-    events: (s.net && s.net.cap) ? s.net.cap.length : 0,
+    events: caps.length,
+    // The trace is a rolling window (CAP_MAX), not the whole run.
+    firstSeq,
+    totalEvents,
+    truncated: firstSeq > 0,
   };
-  const caps = (s.net && s.net.cap) ? s.net.cap : [];
   return [header, ...caps].map(e => JSON.stringify(e)).join('\n');
 }
 
