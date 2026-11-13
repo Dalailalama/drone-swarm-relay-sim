@@ -40,7 +40,7 @@ test('LoRa needs the datasheet SIR (SF10 demodulates 15 dB under noise), FSK kee
   // The red-zone radius uses the same requirement.
   const j = s.jammers[0];
   const n = ctx.pathLossExponent(LORA);
-  const want = Math.pow(10, (j.erpDbm - ctx.pl1m(LORA.freqMHz) - 15 - LORA.sensDbm) / (10 * n));
+  const want = Math.pow(10, (j.erpDbm + 2.15 + LORA.antGainDbi - ctx.pl1m(LORA.freqMHz) - 15 - LORA.sensDbm) / (10 * n));
   assert.ok(Math.abs(ctx.jammerDenialRadiusM(s, j) / want - 1) < 1e-9, 'denial radius must use SIR -15 dB');
 });
 
@@ -68,4 +68,29 @@ test('each receiver\'s interference degrades only the direction it hears (mixed 
   const got = ctx.liveMarginDb(s, a.id, b.id);
   assert.ok(want > 0, 'per-direction physics keeps this link alive');
   assert.ok(Math.abs(got - want) < 1e-9, 'liveMarginDb ' + got + ' must equal the per-direction min ' + want);
+});
+
+// Audit rf-physics/jammer-missing-rx-gain-erp: the signal path counts both
+// antennas (txDbm + G_tx + G_rx - PL) but the jammer path counted neither the
+// receive antenna nor the ERP -> EIRP conversion (ERP is dipole-referenced:
+// EIRP = ERP + 2.15 dB), so every jammer arrived 4-5 dB too weak.
+test('a jammer radiating a node\'s EIRP from the node\'s spot arrives exactly at that node\'s RSSI', () => {
+  const s = makeSw(SIK, []);
+  s.terrain = ctx.makeTerrain('flat');
+  const erp = SIK.txDbm + SIK.antGainDbi - 2.15; // same EIRP as a SiK node
+  s.jammers = [{ id: 'JX-1', x: 0, y: 0, erpDbm: erp, band: 'all', altM: 15, on: true }];
+  for (const d of [50, 300, 2000]) {
+    const floor = ctx.interferenceFloorDbm(s, { x: d, y: 0 }, 15, SIK);
+    const sig = R.rssiAt(SIK, 1, d);
+    assert.ok(Math.abs(floor - 10 - sig) < 1e-9,
+      'at ' + d + ' m the jammer arrives at ' + (floor - 10).toFixed(2) + ' dBm, the node at ' + sig.toFixed(2) + ' dBm');
+  }
+  // The drawn red-zone radius is the inDenialZone boundary (flat ground,
+  // receiver at the jammer's height, so the slant equals the ground range).
+  s.altitudeM = 15;
+  const j = { id: 'JX-2', x: 0, y: 0, erpDbm: 0, band: 'all', altM: 15, on: true };
+  s.jammers = [j];
+  const r = ctx.jammerDenialRadiusM(s, j);
+  assert.ok(ctx.inDenialZone(s, { x: r * 0.999, y: 0 }) && !ctx.inDenialZone(s, { x: r * 1.001, y: 0 }),
+    'denial radius ' + r.toFixed(1) + ' m must match the inDenialZone boundary');
 });

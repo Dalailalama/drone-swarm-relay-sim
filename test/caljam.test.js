@@ -38,14 +38,16 @@ for (const refA of [-20, -30, 5]) {
   test('regression: same-EIRP jammer at the TX spot lands exactly on the calibrated RSSI (A = ' + refA + ' dBm)', () => {
     const cal = calibrated(refA);
     const s = swarmWith(cal);
-    s.jammers = [{ x: 0, y: 0, erpDbm: cal.txDbm + cal.antGainDbi, band: 'all', altM: 15, on: true }];
+    // erpDbm is ERP (dipole-referenced): EIRP = ERP + 2.15 dB. The receive
+    // antenna counts for the jammer exactly as it does for the signal.
+    s.jammers = [{ x: 0, y: 0, erpDbm: cal.txDbm + cal.antGainDbi - 2.15, band: 'all', altM: 15, on: true }];
     const jAlt = ctx.terrainGroundAt(s.terrain, 0, 0) + 15;
     const rxAlt = ctx.terrainGroundAt(s.terrain, 500, 0) + 15;
     const floor = ctx.interferenceFloorDbm(s, { x: 500, y: 0 }, rxAlt, cal);
     const slant = Math.hypot(500, jAlt - rxAlt);
     const sig = R.rssiAt(cal, 1, slant);
-    assert.ok(Math.abs(floor - JAM_SNR_OFFSET_DB + cal.antGainDbi - sig) < 1e-9,
-      'jammer arrives at ' + (floor - JAM_SNR_OFFSET_DB + cal.antGainDbi).toFixed(2) +
+    assert.ok(Math.abs(floor - JAM_SNR_OFFSET_DB - sig) < 1e-9,
+      'jammer arrives at ' + (floor - JAM_SNR_OFFSET_DB).toFixed(2) +
       ' dBm vs the calibrated signal ' + sig.toFixed(2) + ' dBm from the same spot and EIRP');
   });
 }
@@ -63,6 +65,7 @@ test('datasheet presets keep the free-space 1 m loss in the jammer model', () =>
   const s = swarmWith(SIK);
   const j = { x: 0, y: 0, erpDbm: 20, band: 'all', altM: 15, on: true };
   const n = R.pathLossExponent(SIK);
-  const expect = Math.pow(10, (20 - R.pl1m(SIK.freqMHz) + JAM_SNR_OFFSET_DB - SIK.sensDbm) / (10 * n));
+  const eirpRx = 20 + 2.15 + SIK.antGainDbi; // ERP -> EIRP, plus the receive antenna
+  const expect = Math.pow(10, (eirpRx - R.pl1m(SIK.freqMHz) + JAM_SNR_OFFSET_DB - SIK.sensDbm) / (10 * n));
   assert.strictEqual(ctx.jammerDenialRadiusM(s, j), expect);
 });

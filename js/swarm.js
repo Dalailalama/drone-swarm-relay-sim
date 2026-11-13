@@ -837,6 +837,10 @@ function clampStepToBuildings(s, d, dt) {
 // demodulates below the interference, so its requirement is negative.
 const JAM_SNR_OFFSET_DB = 10;
 function jamSirDb(r) { return r && r.jamSirDb != null ? r.jamSirDb : JAM_SNR_OFFSET_DB; }
+// A source's `erpDbm` is ERP (referenced to a half-wave dipole); path loss
+// here is isotropic, so convert to EIRP first. The receiver then hears it
+// through its own antenna, exactly like a signal (txDbm + G_tx + G_rx - PL).
+const ERP_TO_EIRP_DB = 2.15;
 
 // One band representation everywhere (review finding #20): a jammer's band
 // may arrive as a number (MHz), a numeric string, 'all', or a legacy name.
@@ -899,7 +903,7 @@ function interferenceFloorDbm(s, rxPos, rxAlt, rxRadio) {
     if (losBlocked(s.terrain, j.x, j.y, jAlt, rxPos.x, rxPos.y, rxAlt)) continue; // terrain shadows it
     const slant = Math.hypot(ground, jAlt - rxAlt);
     const pl = pl1 + 10 * n * Math.log10(Math.max(1, slant / s.envFactor));
-    lin += Math.pow(10, (j.erpDbm - gainDb - pl) / 10);
+    lin += Math.pow(10, (j.erpDbm + ERP_TO_EIRP_DB + rad.antGainDbi - gainDb - pl) / 10);
   }
   return lin > 0 ? 10 * Math.log10(lin) + jamSirDb(rad) : -Infinity;
 }
@@ -959,7 +963,7 @@ function jammerDenialRadiusM(s, j) {
   const jf = jammerFreqMHz(j);
   if (Number.isNaN(jf) || (jf != null && Math.abs(jf - r.freqMHz) > 150)) return 0;
   const n = pathLossExponent(r);
-  const eff = j.erpDbm - agilityGainDb(s, r);
+  const eff = j.erpDbm + ERP_TO_EIRP_DB + r.antGainDbi - agilityGainDb(s, r);
   const exp = (eff - refLossDb(r) + jamSirDb(r) - r.sensDbm) / (10 * n);
   return s.envFactor * Math.pow(10, exp);
 }
