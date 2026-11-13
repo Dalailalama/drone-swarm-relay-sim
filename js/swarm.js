@@ -590,8 +590,13 @@ function planChain(s) {
     let k = idx(gIx, gIy);
     while (k !== undefined && k !== idx(sIx, sIy)) { cellsRev.push(k); k = from.get(k); }
     const pts = cellsRev.reverse().map(kk => pos(kk % nx, Math.floor(kk / nx)));
+    // The goal cell's centre gives way to the exact objective. With base and
+    // objective in ONE cell there is no goal entry to replace: overwriting
+    // the last point then erased the base and left path=[target], pathLen 0
+    // (audit C2-03).
+    if (pts.length) pts[pts.length - 1] = { x: s.target.x, y: s.target.y };
+    else pts.push({ x: s.target.x, y: s.target.y });
     pts.unshift({ x: s.base.x, y: s.base.y });
-    pts[pts.length - 1] = { x: s.target.x, y: s.target.y };
     const clearRun = (a, b) => {
       const n = Math.ceil(dist2d(a, b) / (cell / 2));
       for (let i = 1; i < n; i++) {
