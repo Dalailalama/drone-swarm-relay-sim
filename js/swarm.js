@@ -917,17 +917,23 @@ function interferencePenaltyDb(s, aPos, aAlt, bPos, bAlt, ra, rb) {
   const rA = ra || s.radio, rB = rb || s.radio;
   const fa = interferenceFloorDbm(s, aPos, aAlt, rA);
   const fb = interferenceFloorDbm(s, bPos, bAlt, rB);
-  return Math.max(0,
-    isNaN(fa) ? -Infinity : fa - rA.sensDbm,
-    isNaN(fb) ? -Infinity : fb - rB.sensDbm);
+  return Math.max(floorPenaltyDb(fa, rA), floorPenaltyDb(fb, rB));
 }
 
 // The same penalty for one receiver: its floor against its own sensitivity.
 function endPenaltyDb(s, pos, alt, radio) {
   if (!s.jammers || !s.jammers.length) return 0;
   const r = radio || s.radio;
-  const f = interferenceFloorDbm(s, pos, alt, r);
-  return Math.max(0, isNaN(f) ? -Infinity : f - r.sensDbm);
+  return floorPenaltyDb(interferenceFloorDbm(s, pos, alt, r), r);
+}
+
+// Noise and interference add in power: the effective sensitivity is
+// 10log10(10^(S/10) + 10^(F/10)), so the penalty is 10log10(1 + 10^((F-S)/10)):
+// 3.01 dB where the floor equals sensitivity (the drawn red-zone edge), and
+// never exactly 0 while a source is heard. No floor (or NaN) costs nothing.
+function floorPenaltyDb(f, r) {
+  if (!(f > -Infinity)) return 0;
+  return 10 * Math.log10(1 + Math.pow(10, (f - r.sensDbm) / 10));
 }
 
 // Is a position inside a denial zone — i.e. would a relay's receiver there be
@@ -952,7 +958,8 @@ function maxDenialRadiusM(s) {
 }
 
 // Radius at which a single source raises the floor to the radio's sensitivity
-// (flat-ground estimate) — the visible "denied zone" for the current radio,
+// (a 3 dB link penalty, as in inDenialZone; flat-ground estimate) — the
+// visible "denied zone" for the current radio,
 // shrunk by whatever anti-jam rejection that radio enjoys right now.
 function jammerDenialRadiusM(s, j) {
   if (j.on === false) return 0;

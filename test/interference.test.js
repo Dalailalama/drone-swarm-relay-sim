@@ -56,7 +56,10 @@ test('each receiver\'s interference degrades only the direction it hears (mixed 
   b.radio = SIK; b.x = 100; b.y = 0; b.altM = 30;
   s._marginCache = null;
   const altA = ctx.nodeAltAbsM(s, a.id, a), altB = ctx.nodeAltAbsM(s, b.id, b);
-  const pen = (pos, alt, r) => Math.max(0, ctx.interferenceFloorDbm(s, pos, alt, r) - r.sensDbm);
+  const pen = (pos, alt, r) => { // noise and interference add in power
+    const f = ctx.interferenceFloorDbm(s, pos, alt, r);
+    return f > -Infinity ? 10 * Math.log10(1 + Math.pow(10, (f - r.sensDbm) / 10)) : 0;
+  };
   const pa = pen(a, altA, RFD), pb = pen(b, altB, SIK);
   assert.strictEqual(pa, 0, 'the tower must shadow the jammer from the RFD end');
   assert.ok(pb > 30, 'the SiK end must be heavily jammed, got ' + pb);
@@ -93,4 +96,27 @@ test('a jammer radiating a node\'s EIRP from the node\'s spot arrives exactly at
   const r = ctx.jammerDenialRadiusM(s, j);
   assert.ok(ctx.inDenialZone(s, { x: r * 0.999, y: 0 }) && !ctx.inDenialZone(s, { x: r * 1.001, y: 0 }),
     'denial radius ' + r.toFixed(1) + ' m must match the inDenialZone boundary');
+});
+
+// Audit rf-physics/noise-plus-interference-dB-max: the receiver's own noise
+// (sensitivity) and the interference-derived floor add in milliwatts. A dB
+// max() read 0 dB below the floor and was 3.01 dB optimistic at F = S.
+test('noise and interference add in power: 3.01 dB when the floor equals sensitivity', () => {
+  const s = makeSw(SIK, []);
+  s.terrain = ctx.makeTerrain('flat');
+  const pos = { x: 400, y: 0 };
+  const j = { id: 'JX-1', x: 0, y: 0, erpDbm: 0, band: 'all', altM: 15, on: true };
+  s.jammers = [j];
+  const f0 = ctx.interferenceFloorDbm(s, pos, 15, SIK); // the floor is linear in erpDbm
+  for (const [above, want] of [[0, 3.0103], [-10, 0.4139], [20, 20.0432]]) {
+    j.erpDbm = SIK.sensDbm + above - f0;
+    const got = ctx.endPenaltyDb(s, pos, 15, SIK);
+    assert.ok(Math.abs(got - want) < 0.01, 'floor ' + above + ' dB vs sensitivity: penalty ' + got.toFixed(4) + ' dB, want ' + want);
+    const link = ctx.interferencePenaltyDb(s, pos, 15, { x: -400, y: 0 }, 15, SIK, SIK);
+    assert.ok(Math.abs(link - want) < 0.01, 'link penalty ' + link.toFixed(4) + ' dB, want ' + want);
+  }
+  j.on = false;
+  assert.strictEqual(ctx.endPenaltyDb(s, pos, 15, SIK), 0, 'no active source, no penalty');
+  j.on = true; j.band = 2400;
+  assert.strictEqual(ctx.endPenaltyDb(s, pos, 15, SIK), 0, 'out-of-band source, no penalty');
 });
