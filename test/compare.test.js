@@ -104,3 +104,24 @@ test('compare arrival statistics say how many seeds arrived, so 1-of-5 cannot re
     assert.ok(out.includes('5/5'), out);
   }
 });
+
+// audit swarm-onboard/TOOL-01: 'Uptime' read fleetConnSec (C2 reaches a
+// mission drone anywhere), so a scenario with 0% objective uptime showed 76%.
+test('compare Uptime is the objective-connected metric; fleet contact is its own column', () => {
+  const ctx = loadCore(['scenarios.js']);
+  const sc = resolveScenario('ddil-limited').scenario;
+  let S = null;
+  const wrapped = Object.create(ctx);
+  wrapped.stepSwarm = (s, dt) => { S = s; return ctx.stepSwarm(s, dt); };
+  const r = runScenarioSeed(wrapped, { id: 'u', title: 'u', scenario: sc }, sc.seed, 20);
+  // 20 s into a 3.7 km transit: C2 reaches the flock, nobody is on station.
+  assert.ok(S.stats.fleetConnSec > 0 && S.stats.connSec === 0, JSON.stringify(S.stats));
+  assert.strictEqual(r.uptimePct, 100 * S.stats.connSec / S.stats.tSec);
+  assert.strictEqual(r.fleetUptimePct, 100 * S.stats.fleetConnSec / S.stats.tSec);
+  const { calcStats, renderMarkdownDashboard, renderTextDashboard } = require('../tools/compare.js');
+  const row = { title: 'A', uptime: calcStats([0, 0]), fleetUptime: calcStats([90, 92]), arrival: calcStats([null, null]),
+    droppedPct: calcStats([1, 1]), energyWh: calcStats([2, 2]) };
+  const md = renderMarkdownDashboard([row], [1, 2], 40);
+  assert.ok(md.includes('Objective uptime') && md.includes('Fleet contact') && md.includes('91.0%'), md);
+  assert.ok(renderTextDashboard([row], [1, 2], 40).includes('91.0%'));
+});

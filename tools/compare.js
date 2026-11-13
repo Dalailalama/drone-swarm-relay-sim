@@ -160,14 +160,18 @@ function runScenarioSeed(ctx, scenarioObj, seed, durationSec) {
 
   const meanWhConsumed = totalWhConsumed / Math.max(1, s.drones.length);
 
-  const connSec = s.stats.fleetConnSec || s.stats.connSec || 0;
-  const uptimePct = 100 * connSec / Math.max(1e-9, s.stats.tSec);
+  // Uptime is the consumer metric (swarm.js finding #6): a live route from C2
+  // to a mission drone ON STATION at the objective. Reaching the flock
+  // anywhere en route is fleet contact, reported beside it, never instead.
+  const uptimePct = 100 * (s.stats.connSec || 0) / Math.max(1e-9, s.stats.tSec);
+  const fleetUptimePct = 100 * (s.stats.fleetConnSec || 0) / Math.max(1e-9, s.stats.tSec);
   const totalPkts = s.net.delivered + s.net.dropped;
   const droppedPct = 100 * s.net.dropped / Math.max(1, totalPkts);
 
   return {
     seed,
     uptimePct,
+    fleetUptimePct,
     arrivalTime: firstArrivalTime,
     droppedPct,
     meanWhConsumed,
@@ -192,6 +196,7 @@ function compareScenarios(scenarioSpecs, options = {}) {
     }
 
     const uptimes = seedRuns.map(r => r.uptimePct);
+    const fleetUptimes = seedRuns.map(r => r.fleetUptimePct);
     const arrivals = seedRuns.map(r => r.arrivalTime);
     const dropPcts = seedRuns.map(r => r.droppedPct);
     const energies = seedRuns.map(r => r.meanWhConsumed);
@@ -202,6 +207,7 @@ function compareScenarios(scenarioSpecs, options = {}) {
       seedsCount: seeds.length,
       runs: seedRuns,
       uptime: calcStats(uptimes),
+      fleetUptime: calcStats(fleetUptimes),
       arrival: calcStats(arrivals),
       droppedPct: calcStats(dropPcts),
       energyWh: calcStats(energies),
@@ -217,12 +223,15 @@ function compareScenarios(scenarioSpecs, options = {}) {
   };
 }
 
+// Rows built before fleet contact had its own column render it as '—'.
+const pctCell = (st, sep) => (st ? `${st.mean.toFixed(1)}% (±${st.sd.toFixed(1)}${sep})` : '—');
+
 function renderMarkdownDashboard(results, seeds, durationSec) {
   const rows = results.map(r => {
     const arrivalStr = r.arrival.count > 0
       ? `${r.arrival.mean.toFixed(1)} s (±${r.arrival.sd.toFixed(1)}), ${arrivedOf(r.arrival)}`
       : `N/A (${arrivedOf(r.arrival)})`;
-    return `| **${r.title}** | ${r.uptime.mean.toFixed(1)}% (±${r.uptime.sd.toFixed(1)}%) | ${arrivalStr} | ${r.droppedPct.mean.toFixed(1)}% (±${r.droppedPct.sd.toFixed(1)}%) | ${r.energyWh.mean.toFixed(2)} Wh (±${r.energyWh.sd.toFixed(2)}) |`;
+    return `| **${r.title}** | ${r.uptime.mean.toFixed(1)}% (±${r.uptime.sd.toFixed(1)}%) | ${pctCell(r.fleetUptime, '%')} | ${arrivalStr} | ${r.droppedPct.mean.toFixed(1)}% (±${r.droppedPct.sd.toFixed(1)}%) | ${r.energyWh.mean.toFixed(2)} Wh (±${r.energyWh.sd.toFixed(2)}) |`;
   });
 
   return [
@@ -230,12 +239,13 @@ function renderMarkdownDashboard(results, seeds, durationSec) {
     '',
     `Evaluation over **${results.length} scenarios** across **${seeds.length} identical seeds** (\`${seeds.join(', ')}\`) for **${durationSec}s** each.`,
     '',
-    '| Scenario | Uptime (Mean ± SD) | Arrival Time (Mean ± SD) | Packet Loss (Mean ± SD) | Energy Consumed (Mean ± SD) |',
-    '|---|---|---|---|---|',
+    '| Scenario | Objective uptime (Mean ± SD) | Fleet contact (Mean ± SD) | Arrival Time (Mean ± SD) | Packet Loss (Mean ± SD) | Energy Consumed (Mean ± SD) |',
+    '|---|---|---|---|---|---|',
     ...rows,
     '',
     '### Metric Definitions',
-    '- **Uptime**: % of mission time fleet maintains active C2 connectivity to ground station.',
+    '- **Objective uptime**: % of mission time C2 has a live route to a mission drone on station at the objective (the uptime the app, batch reports and after-action report show).',
+    '- **Fleet contact**: % of mission time C2 has a live route to any mission drone anywhere, en route included; not objective coverage.',
     '- **Arrival Time**: Seconds from takeoff until the first tactical drone arrives within objective perimeter (200m), over the seeds that arrived; k/N says how many did.',
     '- **Packet Loss**: Total link and routing drops as a percentage of total transmitted packets.',
     '- **Energy Consumed**: Mean per-drone battery consumption in Watt-hours over the mission.',
@@ -247,18 +257,19 @@ function renderMarkdownDashboard(results, seeds, durationSec) {
 function renderTextDashboard(results, seeds, durationSec) {
   const lines = [
     `\n=== Scenario Comparison Dashboard (${results.length} scenarios, ${seeds.length} seeds, ${durationSec}s each) ===\n`,
-    `${'Scenario'.padEnd(32)} ${'Uptime'.padEnd(16)} ${'Arrival'.padEnd(18)} ${'Loss'.padEnd(16)} ${'Energy/Dr'.padEnd(16)}`,
-    '-'.repeat(98),
+    `${'Scenario'.padEnd(32)} ${'Obj uptime'.padEnd(16)} ${'Fleet contact'.padEnd(16)} ${'Arrival'.padEnd(18)} ${'Loss'.padEnd(16)} ${'Energy/Dr'.padEnd(16)}`,
+    '-'.repeat(115),
   ];
 
   for (const r of results) {
     const name = r.title.length > 30 ? r.title.slice(0, 27) + '…' : r.title;
     const uptime = `${r.uptime.mean.toFixed(1)}% (±${r.uptime.sd.toFixed(1)})`;
+    const fleet = pctCell(r.fleetUptime, '');
     const arrived = `${r.arrival.count}/${r.arrival.total}`;
     const arrival = r.arrival.count > 0 ? `${r.arrival.mean.toFixed(1)}s (±${r.arrival.sd.toFixed(1)}) ${arrived}` : `N/A ${arrived}`;
     const loss = `${r.droppedPct.mean.toFixed(1)}% (±${r.droppedPct.sd.toFixed(1)})`;
     const energy = `${r.energyWh.mean.toFixed(1)}Wh (±${r.energyWh.sd.toFixed(1)})`;
-    lines.push(`${name.padEnd(32)} ${uptime.padEnd(16)} ${arrival.padEnd(18)} ${loss.padEnd(16)} ${energy.padEnd(16)}`);
+    lines.push(`${name.padEnd(32)} ${uptime.padEnd(16)} ${fleet.padEnd(16)} ${arrival.padEnd(18)} ${loss.padEnd(16)} ${energy.padEnd(16)}`);
   }
   lines.push('');
   return lines.join('\n');
