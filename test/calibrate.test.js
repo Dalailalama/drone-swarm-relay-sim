@@ -145,6 +145,24 @@ function fieldLog(g, count, dLo, dHi, n, A, sigma) {
   return out;
 }
 
+test('regression: CSV headers with units, north/east positions and quoted numerics parse', () => {
+  const body = ['10,-55', '25,-61', '50,-66', '120,-72', '300,-80', '700,-88'];
+  for (const header of ['distance_m,rssi_dbm', 'Distance (m),RSSI (dBm)', 'dist_m,rssi', 'range_m,rssi']) {
+    const p = C.parseFlightLogCsv([header].concat(body).join('\n'));
+    assert.strictEqual(p.samples.length, 6, header + ': ' + p.notes.join('; '));
+  }
+  const pos = C.parseFlightLogCsv(['east,north,rssi', '0,0,-40'].concat(
+    body.map(r => r.split(',')[0] + ',0,' + r.split(',')[1])).join('\n'));
+  assert.strictEqual(pos.samples.length, 6, 'east,north: ' + pos.notes.join('; '));
+  const quoted = C.parseFlightLogCsv(['"dist","rssi"'].concat(
+    body.slice(0, 5).map(r => r.split(',').map(c => '"' + c + '"').join(','))).join('\n'));
+  assert.strictEqual(quoted.samples.length, 5, 'quoted numerics: ' + quoted.notes.join('; '));
+  const km = C.parseFlightLogCsv(['dist,rssi', '1.5 km,-90', '200 m,-75', '300,-80'].join('\n'));
+  assert.ok(!km.samples.some(s => s.dM === 1.5), '"1.5 km" silently read as 1.5 m');
+  assert.ok(km.samples.some(s => s.dM === 200), '"200 m" is metres');
+  assert.ok(km.notes.some(n => /unit/.test(n)), km.notes.join('; '));
+});
+
 test('regression: 1000 samples at one single distance are degenerate, not a fit', () => {
   for (const dM of [150, 1234.5, 77.7]) {
     const g = gaussFrom(7);
@@ -163,6 +181,46 @@ test('regression: a narrow distance span cannot determine n (no noise-only prese
     if (fit.ok && Math.abs(fit.n - 2.7) > 1) wrongAccepted++;
   }
   assert.strictEqual(wrongAccepted, 0, wrongAccepted + ' narrow-span fits accepted with |n-2.7|>1');
+});
+
+test('regression: device-scale RSSI (SiK RADIO_STATUS 0..254) is refused as not-dBm', () => {
+  const g = gaussFrom(3);
+  const real = fieldLog(g, 200, 10, 2000, 2.7, -30, 3);
+  const rows = ['dist,rssi'].concat(real.map(s =>
+    s.dM.toFixed(1) + ',' + Math.max(0, Math.min(254, Math.round((s.rssiDbm + 127) * 1.9)))));
+  const parsed = C.parseFlightLogCsv(rows.join('\n'));
+  const fit = C.fitPathLoss(parsed.samples);
+  assert.strictEqual(fit.ok, false, 'raw units fitted as dBm: n=' + fit.n + ' A=' + fit.refPowerDbm);
+  assert.ok(/unit/i.test(fit.reason + ' ' + parsed.notes.join(' ')), fit.reason + ' / ' + parsed.notes);
+  // A positive-intercept dataset fed straight to the fit is refused too.
+  const shifted = real.map(s => ({ dM: s.dM, rssiDbm: s.rssiDbm + 220 }));
+  const f2 = C.fitPathLoss(shifted);
+  assert.strictEqual(f2.ok, false);
+  assert.ok(/unit/i.test(f2.reason), f2.reason);
+  // Real dBm data still fits.
+  const csv = ['dist,rssi'].concat(real.map(s => s.dM.toFixed(1) + ',' + s.rssiDbm.toFixed(1))).join('\n');
+  assert.ok(C.fitPathLoss(C.parseFlightLogCsv(csv).samples).ok);
+});
+
+test('regression: the environment verdict follows the re-derived range, not n alone', () => {
+  // Shallow slope but a 30 dB lower intercept: n < datasheet, range is SHORTER.
+  const weak = fieldLog(gaussFrom(11), 120, 10, 2000, 2.99, -60.1, 1);
+  const f1 = C.fitPathLoss(weak);
+  assert.ok(f1.ok, f1.reason);
+  assert.ok(f1.n < R.pathLossExponent(SIK) - 0.4, 'setup: slope is shallower than the datasheet model');
+  assert.ok(C.calibratePreset(f1, SIK).rangeLosM < SIK.rangeLosM);
+  const md1 = C.validationReportMd(f1, SIK, weak, null);
+  assert.ok(!md1.includes('SLOWER'), 'verdict says SLOWER while the range shrank');
+  assert.ok(md1.includes('FASTER'), md1);
+  // Mirror: steeper slope but a hot intercept — the range grows.
+  const hot = fieldLog(gaussFrom(12), 120, 10, 2000, 5.0, 40, 1);
+  const f2 = C.fitPathLoss(hot);
+  assert.ok(f2.ok, f2.reason);
+  assert.ok(f2.n > R.pathLossExponent(SIK) + 0.4, 'setup: slope is steeper than the datasheet model');
+  assert.ok(C.calibratePreset(f2, SIK).rangeLosM > SIK.rangeLosM);
+  const md2 = C.validationReportMd(f2, SIK, hot, null);
+  assert.ok(!md2.includes('FASTER'), 'verdict says FASTER while the range grew');
+  assert.ok(md2.includes('SLOWER'), md2);
 });
 
 test('wide-span fits pass and their 95% CI on n covers the truth', () => {

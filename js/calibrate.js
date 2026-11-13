@@ -10,8 +10,18 @@
 //
 // Method: log-distance path loss says RSSI(d) = A − 10·n·log10(d). That is
 // LINEAR in x = log10(d), so ordinary least squares gives both A (reference
-// power at 1 m, absorbing real TX power and antenna gains) and n directly,
-// with RMSE and R² to say how honest the fit is.
+// power at 1 m) and n directly, with RMSE and R² to say how honest the fit is.
+//
+// Convention: the calibrated preset keeps the datasheet txDbm and antGainDbi
+// as the hardware's own figures; the residual of A against them is treated
+// as CHANNEL loss, shared by every emitter on that channel — jammers included
+// (radios.js refLossDb). If the offset is really reduced TX power or cable
+// loss on your own radio, edit txDbm in the saved preset instead.
+//
+// Censoring: radios only log RSSI for packets they RECEIVE, so near the edge
+// of range the weak tail is missing, n is biased low and the re-derived range
+// comes out optimistic (~15% in a synthetic n=3 test flown to 1.3x range).
+// Fit on distances where reception is still reliable.
 
 // Node standalone (tests): pull in or re-create the few helpers this module
 // borrows from js/radios.js and js/render.js in the browser.
@@ -30,23 +40,34 @@ if (typeof fmtDist !== 'function') {
 // Accepted header aliases (case-insensitive):
 //   distance: dist | distance | d | range          (metres)
 //   signal:   rssi | rssi_dbm | rssi value | signal | dbm
-//   optional position instead of distance: x, y[, z] — origin = first row
+//   (a unit suffix is fine: distance_m, 'Distance (m)', 'RSSI (dBm)'; cells may be quoted)
+//   optional position instead of distance: x|east, y|north[, z] — origin = first row
 //   optional time: t | time | timestamp
 const CAL_ALIASES = {
   dist: ['dist', 'distance', 'd', 'range'],
   rssi: ['rssi', 'rssi_dbm', 'rssidbm', 'rssi_value', 'rssivalue', 'signal', 'dbm', 'signal_strength'],
-  x: ['x', 'e', 'east'], y: ['y', 'n?'], // y alias handled loosely below
+  x: ['x', 'e', 'east'], y: ['y', 'n', 'north'],
   z: ['z', 'alt', 'altitude', 'up'],
 };
 
+// Headers may carry units: 'distance_m', 'Distance (m)', 'RSSI (dBm)'.
+// Match the bare name first, then with a trailing unit suffix stripped.
 function findCol(header, aliases) {
-  const h = header.map(s => s.trim().toLowerCase().replace(/[^a-z_]/g, ''));
-  for (const a of aliases) {
-    const i = h.indexOf(a);
-    if (i >= 0) return i;
+  const h = header.map(s => s.trim().replace(/^"|"$/g, '').toLowerCase()
+    .replace(/\(.*?\)|\[.*?\]/g, '').replace(/[^a-z_]/g, '').replace(/_+$/, ''));
+  const bare = h.map(s => s.replace(/_?(m|dbm|meters?|metres?)$/, ''));
+  for (const names of [h, bare]) {
+    for (const a of aliases) {
+      const i = names.indexOf(a);
+      if (i >= 0) return i;
+    }
   }
   return -1;
 }
+
+// A numeric cell, optionally quoted and optionally suffixed with its own
+// unit (m / dBm). Any other suffix ('1.5 km') is NaN, never a truncation.
+const CAL_CELL_RE = /^([-+]?(?:\d+\.?\d*|\.\d+)(?:e[-+]?\d+)?)\s*(m|dbm)?$/i;
 
 // Returns { samples: [{dM, rssiDbm}], dropped, notes: [] } — never throws on
 // messy data; it skips junk rows and says what it skipped.
@@ -58,18 +79,25 @@ function parseFlightLogCsv(text) {
   const header = lines[0].split(',').map(s => s.trim());
   const iD = findCol(header, CAL_ALIASES.dist);
   const iR = findCol(header, CAL_ALIASES.rssi);
-  const iX = findCol(header, ['x', 'e', 'east']);
-  const iY = findCol(header, ['y']);
+  const iX = findCol(header, CAL_ALIASES.x);
+  const iY = findCol(header, CAL_ALIASES.y);
   let iZ = findCol(header, ['z', 'alt', 'altitude']);
   const hasPos = iR >= 0 && iX >= 0 && iY >= 0;
   if (iD < 0 && !hasPos) { out.notes.push('need a distance column (dist/d/range) or x,y columns'); return out; }
   if (iR < 0) { out.notes.push('need an RSSI column (rssi/dbm/signal)'); return out; }
   if (hasPos && iZ < 0) iZ = -1;
 
+  const UNIT_NOTE = 'dropped cells with an unknown unit (e.g. "1.5 km") — give distances in metres and RSSI in dBm';
   let ox = null, oy = null, oz = null;
   for (let li = 1; li < lines.length; li++) {
-    const cells = lines[li].split(',').map(s => s.trim());
-    const num = i => (i >= 0 && i < cells.length ? parseFloat(cells[i]) : NaN);
+    const cells = lines[li].split(',').map(s => s.trim().replace(/^"(.*)"$/, '$1').trim());
+    const num = i => {
+      if (i < 0 || i >= cells.length) return NaN;
+      const m = CAL_CELL_RE.exec(cells[i]);
+      if (m) return parseFloat(m[1]);
+      if (/^[-+]?[\d.]/.test(cells[i]) && !out.notes.includes(UNIT_NOTE)) out.notes.push(UNIT_NOTE);
+      return NaN;
+    };
     let dM = num(iD);
     if (hasPos) {
       const x = num(iX), y = num(iY);
@@ -88,6 +116,18 @@ function parseFlightLogCsv(text) {
     if (dM < 1) { out.dropped++; if (!out.notes.includes('dropped samples inside the 1 m noise floor')) out.notes.push('dropped samples inside the 1 m noise floor'); continue; }
     out.samples.push({ dM, rssiDbm: rssi });
   }
+  // Received power in dBm is negative; a positive median means device-scale
+  // RSSI (SiK/MAVLink RADIO_STATUS is 0..254), which would fit as nonsense.
+  if (out.samples.length) {
+    const sorted = out.samples.map(s => s.rssiDbm).sort((a, b) => a - b);
+    const med = sorted[sorted.length >> 1];
+    if (med > 0) {
+      out.notes.push('RSSI median is +' + med.toFixed(0) + ' — looks like device units (e.g. MAVLink RADIO_STATUS ' +
+        '0..254), not dBm; convert to dBm first (SiK: dBm ≈ raw/1.9 − 127)');
+      out.dropped += out.samples.length;
+      out.samples = [];
+    }
+  }
   if (!out.samples.length) out.notes.push('no usable samples');
   return out;
 }
@@ -97,6 +137,11 @@ function parseFlightLogCsv(text) {
 // of a decade, and a fit is only a calibration if its 95% CI on n is tight.
 const CAL_MIN_SPAN_DECADES = 0.5;
 const CAL_MAX_N_CI95 = 0.5;
+// The ONE acceptance window for a calibrated preset — main.js's preset
+// sanitizer uses these same bounds, so a fit that passes here is never
+// silently dropped on registration or scenario import.
+const CAL_N_RANGE = [1.2, 6.5];
+const CAL_REF_POWER_RANGE = [-120, 40];   // dBm at 1 m
 
 // Two-sided 95% Student-t quantile, Cornish-Fisher expansion in 1/df (within
 // ~1% of the table for df >= 3, which is all a 5-sample floor allows).
@@ -134,8 +179,17 @@ function fitPathLoss(samples) {
   const slope = sxy / sxx;                          // dB per decade
   const intercept = meanY - slope * xBar;           // RSSI at d = 1 m
   const expN = -slope / 10;
-  if (!(expN > 1) || !(expN < 8)) {
-    return { ok: false, reason: 'fitted exponent n=' + expN.toFixed(2) + ' outside physical range (1..8)' };
+  if (!(intercept <= CAL_REF_POWER_RANGE[1])) {
+    return { ok: false, reason: 'fitted reference power ' + intercept.toFixed(0) + ' dBm at 1 m is not physical — ' +
+      'the RSSI column is probably in device units (e.g. MAVLink RADIO_STATUS 0..254), not dBm' };
+  }
+  if (!(intercept >= CAL_REF_POWER_RANGE[0])) {
+    return { ok: false, reason: 'fitted reference power ' + intercept.toFixed(0) + ' dBm at 1 m is below ' +
+      CAL_REF_POWER_RANGE[0] + ' dBm — check the RSSI units and the distance column' };
+  }
+  if (!(expN >= CAL_N_RANGE[0]) || !(expN <= CAL_N_RANGE[1])) {
+    return { ok: false, reason: 'fitted exponent n=' + expN.toFixed(2) + ' outside physical range (' +
+      CAL_N_RANGE[0] + '..' + CAL_N_RANGE[1] + ')' };
   }
   // goodness of fit
   let ssRes = 0, ssTot = 0;
@@ -208,11 +262,18 @@ function validationReportMd(fit, basePreset, samples, parsed) {
   L.push('- **RMSE:** ' + fit.rmse.toFixed(1) + ' dB · **R²:** ' + fit.r2.toFixed(3));
   L.push('- **Datasheet model implied:** n = ' + pathLossExponent(basePreset).toFixed(2));
   const drift = fit.n - pathLossExponent(basePreset);
-  L.push('- **Environment verdict:** ' + (drift > 0.4 ? 'your environment attenuates FASTER than the datasheet assumption (clutter/foliage/antenna height).' :
-    drift < -0.4 ? 'your environment attenuates SLOWER than the datasheet assumption (open ground / elevation).'
+  L.push('- **Exponent drift:** ' + (drift >= 0 ? '+' : '') + drift.toFixed(2) +
+    ' (slope only — the intercept matters as much, so the verdict below uses the predicted range)');
+  // Verdict on what planning sees: slope AND intercept together, via the
+  // re-derived range against the datasheet's rated range.
+  const cal = calibratePreset(fit, basePreset);
+  const rangeRatio = cal.rangeLosM / basePreset.rangeLosM;
+  L.push('- **Environment verdict:** ' + (rangeRatio < 0.8 ? 'your environment attenuates FASTER than the datasheet assumption (clutter/foliage/antenna height) — the link reaches ' +
+    Math.round(rangeRatio * 100) + '% of the rated range.' :
+    rangeRatio > 1.25 ? 'your environment attenuates SLOWER than the datasheet assumption (open ground / elevation) — the link reaches ' +
+      Math.round(rangeRatio * 100) + '% of the rated range.'
       : 'close to the datasheet assumption — the stock preset is already honest here.'));
   L.push('');
-  const cal = calibratePreset(fit, basePreset);
   L.push('## Calibrated preset');
   L.push('- **Rated LOS range (re-derived):** ' + fmtDist(cal.rangeLosM) +
     ' (was ' + fmtDist(basePreset.rangeLosM) + ')');
@@ -245,5 +306,6 @@ function validationReportMd(fit, basePreset, samples, parsed) {
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     parseFlightLogCsv, fitPathLoss, calibratePreset, validationReportMd, CAL_ALIASES,
+    CAL_N_RANGE, CAL_REF_POWER_RANGE,
   };
 }

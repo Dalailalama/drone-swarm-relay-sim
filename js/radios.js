@@ -159,6 +159,15 @@ function pl1m(freqMHz) {
   return 32.44 + 20 * Math.log10(freqMHz) - 60;
 }
 
+// 1 m path loss of the channel this radio's model describes. Datasheet
+// presets: free space. Field-calibrated presets: whatever the fitted
+// intercept implies against the datasheet TX/antenna figures — that residual
+// is channel loss, shared by every emitter on it (jammers included).
+function refLossDb(radio) {
+  if (radio.refPowerDbm != null) return radio.txDbm + 2 * radio.antGainDbi - radio.refPowerDbm;
+  return pl1m(radio.freqMHz);
+}
+
 function pathLossExponent(radio) {
   if (radio.nFit != null) return radio.nFit;
   const budget = radio.txDbm + 2 * radio.antGainDbi - radio.sensDbm; // dB available
@@ -220,7 +229,7 @@ function pktSuccessProb(marginDb) {
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     RADIOS, ENVIRONMENTS, FADE_MARGIN_DB,
-    pl1m, pathLossExponent, rssiAt, linkMarginDb, usableRangeM,
+    pl1m, refLossDb, pathLossExponent, rssiAt, linkMarginDb, usableRangeM,
     chainThroughputKbps, pktSuccessProb, radioHorizonM,
   };
 }
