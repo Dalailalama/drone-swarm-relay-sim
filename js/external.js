@@ -356,7 +356,8 @@
   // Re-init the bridge to a new vehicle count (e.g. the count slider moved
   // mid-flight). Without this the sim would rebuild DR-1..DR-M while the
   // bridge still has DR-1..DR-N, so the extra drones get no telemetry and
-  // freeze. The bridge respawns to match and replies with a fresh 'ready'.
+  // freeze. The bridge fits its fleet to match (vehicles it still lists keep
+  // flying; dropped armed ones are landed) and replies with a fresh 'ready'.
   function externalReinit(getSwarm, count, altM) {
     if (!ExternalMode.ws || !ExternalMode.connected) return;
     ExternalMode.ready = false;
