@@ -28,6 +28,10 @@ const TILE_MIN_Z = 3, TILE_MAX_Z = 19;
 const TILE_CACHE_MAX = 400;          // ~25 MB worst case; evicted oldest-first
 const TILE_GRID_CAP = 18;            // sanity cap on tiles per axis per frame
 const TILE_EQUATOR_M = 156543.03392; // metres per tile pixel at z0 on the equator
+// Dark veil over the (light) OSM standard tiles, 2D map and 3D drape alike:
+// it keeps the console theme's cream labels at ~5:1 on OSM land (#f2efe9),
+// where the 30% veil tuned for CARTO's dark tiles left them at ~1.5:1.
+const TILE_VEIL = 'rgba(19,20,16,0.70)';
 // Local sim frame is x=East, y=South in metres, projected by js/osm.js's
 // shared geoMetresPerDeg (loaded first in the browser; required under Node).
 const tileGeoScale = typeof geoMetresPerDeg === 'function'
@@ -151,8 +155,8 @@ function drawTiles(ctx, cv, view, anchor) {
       ctx.drawImage(e.img, pNW.x, pNW.y, pSE.x - pNW.x, pSE.y - pNW.y);
     }
   }
-  // A light theme veil so the sim overlay keeps its contrast on the imagery.
-  ctx.fillStyle = 'rgba(19,20,16,0.30)';
+  // A dark theme veil so the sim overlay keeps its contrast on the imagery.
+  ctx.fillStyle = TILE_VEIL;
   ctx.fillRect(0, 0, cv.width, cv.height);
   return true;
 }
