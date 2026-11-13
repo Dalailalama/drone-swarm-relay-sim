@@ -2491,11 +2491,47 @@ async def scenario_reload_mid_relaunch_no_stale_ack():
     await h.close()
 
 
+async def scenario_resume_needs_guided_since_abort():
+    """An abort is confirmed only by a GUIDED heartbeat newer than the request
+    (the latest one may predate a NAV_LAND that already switched to LAND).
+    A resume sent before that confirmation went READY on the old heartbeat,
+    so a vehicle still in LAND was handed goals and then lost READY."""
+    h = Harness()
+    ws = h.client("controller")
+    await h.init(ws, count=0, alt=30.0)
+    clock = Clock()
+    with patch.object(bridge, "_now", clock):
+        v = current_vehicle()
+        conn = v.conn
+        await _service(ws, "land", "svc-1")
+        clock.now = 0.2
+        await _service(ws, "abort", "svc-1")
+        assert v.init_state == bridge.INIT_CONFIRM_ABORT, v.init_state
+        clock.now = 0.3
+        conn.push(pos_msg(-8.0, 12.0, -29.0))
+        bridge._drain_messages(v)
+        await _service(ws, "resume", "svc-1")
+        ack = ws.of_type("service_ack")[-1]
+        assert not ack["accepted"] and ack["code"] == "HOLD_NOT_READY", ack
+        assert not v.ready and v.init_state == bridge.INIT_CONFIRM_ABORT, v.init_state
+
+        clock.now = 0.4
+        conn.push(hb_msg(armed=True, custom_mode=GUIDED_MODE_ID))
+        bridge._drain_messages(v)
+        await bridge._advance_init(v)
+        assert v.init_state == bridge.INIT_ABORT_HOLD, v.init_state
+        await _service(ws, "resume", "svc-1")
+        ack = ws.of_type("service_ack")[-1]
+        assert ack["accepted"] and v.ready and v.init_state == bridge.INIT_READY, (ack, v.init_state)
+    await h.close()
+
+
 SCENARIOS = [
     ("NAV_LAND is re-sent until the autopilot ACKs it", scenario_land_resent_until_acked),
     ("a failed landing can be retried under a new request id", scenario_failed_landing_can_be_retried),
     ("a failed relaunch, once grounded, is redone through the handshake", scenario_failed_relaunch_redone_by_handshake),
     ("a page reloaded mid-relaunch gets no stale duplicate ack for a reused request id", scenario_reload_mid_relaunch_no_stale_ack),
+    ("resume waits for the abort's GUIDED confirmation, not the pre-abort heartbeat", scenario_resume_needs_guided_since_abort),
     ("--count overriding the init's count is reported in a status line", scenario_cli_count_override_reported),
     ("an init that drops an airborne vehicle lands it and watches it down", scenario_shrinking_init_lands_dropped_vehicle),
     ("re-init keeps a vehicle parked mid-swap parked; only the handshake relaunches it", scenario_reinit_keeps_parked_vehicle),

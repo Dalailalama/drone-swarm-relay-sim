@@ -1572,7 +1572,10 @@ async def handle_service(websocket, msg: dict) -> None:
 
     if action == "resume":
         if v.init_state in (INIT_ABORT_HOLD, INIT_CONFIRM_ABORT) or (v.service_phase == "aborted" and not v.service_grounded and v.armed):
-            if v.mode_confirmed and v.position_fresh and v.connected and v.armed:
+            # Still confirming the abort: as there, only a heartbeat newer than
+            # the request shows GUIDED is back, not one from before a NAV_LAND.
+            confirmed = v.init_state != INIT_CONFIRM_ABORT or (v.connected and v.last_heartbeat > v.abort_requested_at)
+            if confirmed and v.mode_confirmed and v.position_fresh and v.connected and v.armed:
                 v.service_phase = None
                 v.service_id = None
                 v.init_state = INIT_READY
