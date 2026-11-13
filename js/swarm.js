@@ -445,7 +445,7 @@ const C2_ANTENNA_M = 6; // ground station telemetry mast — BVLOS ops raise the
 // the terrain model — a ridge between two slots gets an extra relay ON it
 // rather than a dead hop across it.
 const PLAN = {
-  replanSec: 5, maxSlots: 12,
+  replanSec: 5,
   maxCells: 40000,  // search-grid bound: cells coarsen past it (a 40 m grid over 100 km took ~1 min; #27)
   gpsCost: 3,       // GNSS-denied cells cost this much more to cross — avoided, never walls (#27)
   failedHoldSec: 60, // an unchanged world re-searches a failed plan at most this often (#27)
@@ -624,7 +624,16 @@ function planChain(s) {
   const segs = [];
   let pathLen = 0;
   for (let i = 0; i < path.length - 1; i++) { const L = dist2d(path[i], path[i + 1]); segs.push(L); pathLen += L; }
-  const kSlots = Math.min(PLAN.maxSlots, Math.max(0, Math.ceil(pathLen / span) - 1));
+  // The chain is as long as the path needs (audit C2-01): a fixed 12-slot cap
+  // stretched a 23-relay route into hops past usable range and still called
+  // it feasible. The only real cap is the fleet manifest, less one airframe
+  // that has to stay on the mission (SCN-03). A route that needs more is
+  // flagged `capped` — it cannot close — and its slots stay at hop spacing
+  // from the base, so the relays C2 does have form a chain that holds.
+  const slotCap = Math.max(0, s.drones.length - 1);
+  const kRaw = Math.max(0, Math.ceil(pathLen / span) - 1);
+  const kSlots = Math.min(slotCap, kRaw);
+  let capped = kRaw > slotCap;
   const at = arc => {
     let rem = arc;
     for (let i = 0; i < segs.length; i++) {
@@ -637,14 +646,14 @@ function planChain(s) {
     return path[path.length - 1];
   };
   let slots = [];
-  for (let i = 0; i < kSlots; i++) slots.push(at(pathLen * (i + 1) / (kSlots + 1)));
+  for (let i = 0; i < kSlots; i++) slots.push(at(pathLen * (i + 1) / (kRaw + 1)));
 
   // Heterogeneous fleets: the wing's long hops span the backhaul, but the
   // FLOCK hangs off the last relay on the tactical radio's short legs — so
   // the plan always ends with a slot inside tactical reach of the objective.
   // Without this the chain "closes" on paper over wing-radio hops and then
   // can't hand off to short-range mission drones at all.
-  if (s.relayIdx && s.relayIdx.length) {
+  if (s.relayIdx && s.relayIdx.length && !capped) {
     const tactReach = usableRangeM(s.radio, s.envFactor) * s.deployFrac * 0.9;
     if (pathLen > tactReach) {
       const arcs = [];
@@ -660,6 +669,7 @@ function planChain(s) {
         slots.push(at(arc));
         prev = arc;
       }
+      if (slots.length > slotCap) { slots = slots.slice(0, slotCap); capped = true; }
     }
   }
 
@@ -667,18 +677,19 @@ function planChain(s) {
   // a relay on it instead of a dead hop over it. Re-walks until every hop is
   // clear, too short to split, or the slot cap is reached.
   const altOf = (p, isC2) => terrainGroundAt(s.terrain, p.x, p.y) + (isC2 ? C2_ANTENNA_M : s.altitudeM);
-  for (let pass = 0; pass < 2 && slots.length < PLAN.maxSlots; pass++) {
+  // A hop under 4x the separation radius is never bisected: its halves
+  // would fall under 2x separation, closer than two relays can both hold
+  // station. It also bounds the walk — a hop blocked by a building rather
+  // than by its length never clears, and splitting it again and again
+  // stacked slots at the building's edge (#15).
+  const hopBlocked = (a, b, fromC2) => dist2d(a, b) >= 4 * DRONE.separationM
+    && losBlocked(s.terrain, a.x, a.y, altOf(a, fromC2), b.x, b.y, altOf(b, false));
+  for (let pass = 0; pass < 2 && slots.length < slotCap; pass++) {
     const nodesL = [s.base, ...slots, s.target];
     let inserted = false;
-    for (let i = 0; i < nodesL.length - 1 && slots.length < PLAN.maxSlots; i++) {
+    for (let i = 0; i < nodesL.length - 1 && slots.length < slotCap; i++) {
       const a = nodesL[i], b = nodesL[i + 1];
-      // A hop under 4x the separation radius is never bisected: its halves
-      // would fall under 2x separation, closer than two relays can both hold
-      // station. It also bounds the walk — a hop blocked by a building rather
-      // than by its length never clears, and splitting it again and again
-      // stacked slots at the building's edge (#15).
-      if (dist2d(a, b) < 4 * DRONE.separationM) continue;
-      if (losBlocked(s.terrain, a.x, a.y, altOf(a, i === 0), b.x, b.y, altOf(b, false))) {
+      if (hopBlocked(a, b, i === 0)) {
         const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
         slots.splice(i === 0 ? 0 : i, 0, mid); // insert between a and b
         inserted = true;
@@ -688,8 +699,16 @@ function planChain(s) {
     if (inserted) pass--; // keep passing until clean or capped
     else break;
   }
+  // Densify that ran out of airframes with a ridge still cutting a hop is the
+  // same verdict as a route too long for the fleet: the chain cannot close.
+  if (!capped && slots.length >= slotCap) {
+    const nodesL = [s.base, ...slots, s.target];
+    for (let i = 0; i < nodesL.length - 1 && !capped; i++) capped = hopBlocked(nodesL[i], nodesL[i + 1], i === 0);
+  }
 
-  const plan = { slots, pathLen, tKey, worldKey, at: s.time, feasible: found };
+  // kNeeded is what the route asks for; slots is what the fleet can hold.
+  const kNeeded = capped ? Math.max(kRaw, slotCap + 1) : slots.length;
+  const plan = { slots, pathLen, kNeeded, capped, tKey, worldKey, at: s.time, feasible: found };
   s.c2.chainPlan = plan;
   return plan;
 }
@@ -1233,11 +1252,13 @@ function c2Step(s) {
 
   // Operator warning: mission demands more relays than the fleet can supply.
   // Drones will still try (and their failsafes will bring them back) — but
-  // the operator should know the plan doesn't close.
+  // the operator should know the plan doesn't close. The count is what the
+  // ROUTE needs, not the slots the fleet could fill (audit C2-01).
   const assets = Object.keys(known).filter(id => fresh(id)).length;
-  const infeasible = kNeeded >= assets && assets > 0;
+  const kRoute = plan.kNeeded != null ? plan.kNeeded : kNeeded;
+  const infeasible = kRoute >= assets && assets > 0;
   if (infeasible && !s.c2.infeasibleWarned) {
-    logEvent(s, 'C2 warning: target needs ' + kNeeded + ' relays but only ' + assets + ' drones in contact — link cannot close', 'error');
+    logEvent(s, 'C2 warning: target needs ' + kRoute + ' relays but only ' + assets + ' drones in contact — link cannot close', 'error');
     s.c2.infeasibleWarned = true;
   } else if (!infeasible) {
     s.c2.infeasibleWarned = false;
@@ -1252,6 +1273,12 @@ function c2Step(s) {
       fresh(id) && known[id].role === 'mission' &&
       known[id].battery >= RELAY.minBatteryPct && !s.c2.relays.includes(id) &&
       !s.c2.rescuers.includes(id) && !(s.c2.unfit[id] > s.time));
+    // The chain exists to serve the mission: never conscript the last drone
+    // in contact that is still flying it (SCN-03), or nothing is left on
+    // station for the relays to connect.
+    const onMission = Object.keys(known).filter(id => fresh(id) && known[id].role === 'mission' &&
+      !s.c2.relays.includes(id) && !s.c2.rescuers.includes(id)).length;
+    if (onMission <= 1) base.length = 0;
     const wing = base.filter(id => known[id].cls === 'relay');
     const candidates = wing.length ? wing : base;
     // Mixed fleet, launch phase: if wing units exist but haven't checked in
