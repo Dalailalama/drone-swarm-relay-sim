@@ -109,10 +109,12 @@ main { flex: 1; display: flex; min-height: 0; }
   display: flex;
   gap: 14px;
 }
-/* First-run tips; sits above the basemap credit so it never covers it. */
+/* First-run tips; sits above the basemap credit so it never covers it, and
+   above the canvas scale bar (label ink up to ~41px from the bottom, see
+   render.js drawScaleBar) so the distance stays readable at any width. */
 #mapHint {
   position: absolute;
-  left: 12px; bottom: 34px;
+  left: 12px; bottom: 46px;
   max-width: min(560px, calc(100% - 24px));
   background: rgba(26, 27, 22, 0.92);
   border: 1px solid var(--line);
