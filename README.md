@@ -266,8 +266,9 @@ Five features that make this hard to copy — all software-only, all tested:
   `node tools/server.js` (binds `127.0.0.1`; `--host <addr>` exposes it, and
   then only behind an authenticating reverse proxy; requests carrying a
   browser `Origin` get 403 unless allowed), then `POST /api/batch`. The
-  bundled example is an urban altitude sweep (SiK radios, 45/90/140 m AGL)
-  to copy for your own study; it is a template, not a result.
+  bundled example is an altitude sweep over a modelled city (SiK radios on
+  the suburban clutter factor, 45/90/140 m AGL) to copy for your own study;
+  it is a template, not a result.
   `node tools/compare.js` runs two or more scenarios on identical seeds and
   prints objective uptime, fleet contact and arrival side by side.
 
