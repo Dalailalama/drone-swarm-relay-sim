@@ -72,3 +72,22 @@ test('the relay wing always leaves at least one tactical drone, and the panel sa
   assert.strictEqual(el('wingRange').value, '3', 'a file asking for more wing than fleet is clamped');
   assert.strictEqual(el('wingOut').textContent, '3');
 });
+
+// A browser range input clamps its value to max, and the reset to defaults
+// had just set the wing's max to (10-drone fleet - 1) = 9. Setting the
+// file's relay wing BEFORE its fleet size clamped a 12-drone wing from a
+// 20-drone scenario to 9, so the loaded mission flew a different fleet
+// than the file describes.
+test('a loaded scenario keeps a relay wing larger than the default fleet allows', () => {
+  const { ctx, el, fire } = loadUI({ rangeClamp: true });
+  const sc = { version: 1, radio: 'sik-v3', env: 'open', airframe: 'q450', count: 20, hetero: true, relayWing: 12,
+    relayAirframe: 'x8', relayRadio: 'rfd900x', base: { x: 0, y: 0 }, target: { x: 500, y: -120 } };
+  el('loadScenarioInput').files = [makeFile('w12.json', JSON.stringify(sc))];
+  fire('loadScenarioInput', 'change');
+  assert.deepStrictEqual(ctx.__alerts, []);
+  assert.strictEqual(el('wingRange').value, '12', 'the wing slider shows the file\'s wing');
+  assert.strictEqual(el('wingOut').textContent, '12');
+  const s = ctx.sim.swarm;
+  assert.strictEqual(s.drones.length, 20);
+  assert.strictEqual(s.relayIdx.length, 12, 'the swarm flies the file\'s 12-drone wing');
+});

@@ -441,11 +441,14 @@
     }
     if (sc.env) { envSel.value = sc.env; env = ENVIRONMENTS.find(e => e.id === sc.env) || env; }
     if (sc.airframe) { airframeSel.value = sc.airframe; airframe = AIRFRAMES.find(a => a.id === sc.airframe) || airframe; }
-    if (sc.hetero != null) { heteroChk.checked = !!sc.hetero; updateHeteroRow(); }
+    // The fleet size first: the wing slider's max follows it (updateHeteroRow),
+    // and a range input clamps its value to the max it has when set.
+    if (sc.count != null) { countRange.value = sc.count; countOut.textContent = sc.count; }
+    if (sc.hetero != null) heteroChk.checked = !!sc.hetero;
+    updateHeteroRow();
     if (sc.relayWing != null) { wingRange.value = sc.relayWing; wingOut.textContent = sc.relayWing; }
     if (sc.relayAirframe) relayAirframeSel.value = sc.relayAirframe;
     if (sc.relayRadio) relayRadioSel.value = sc.relayRadio;
-    if (sc.count != null) { countRange.value = sc.count; countOut.textContent = sc.count; }
     if (sc.altitudeM != null) { altRange.value = sc.altitudeM; altOut.textContent = sc.altitudeM + ' m'; }
     if (sc.spacingPct != null) { spacingRange.value = sc.spacingPct; spacingOut.textContent = sc.spacingPct + '%'; }
     if (sc.distancePct != null) distRange.value = sc.distancePct;
