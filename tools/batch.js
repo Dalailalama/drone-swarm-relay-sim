@@ -48,6 +48,19 @@ const LIMITS = {
   maxGpsZones: 64,
 };
 
+// Wall time per unit of each budget, at the rates above (their caveats
+// apply): ~1 ms per drone-second, ~12 us per grid-cell replan.
+const MS_PER_DRONE_SEC = 1;
+const MS_PER_PLAN_CELL_REPLAN = 0.012;
+
+// The largest batch LIMITS admits, in estimated wall ms. The two budgets are
+// independent, so one batch can spend both. tools/server.js sizes its per-run
+// time budget from this, so a batch the limits admit is not killed part-way.
+function maxBatchWallMs() {
+  return LIMITS.maxTotalWorkDroneSec * MS_PER_DRONE_SEC
+    + LIMITS.maxTotalPlanCellReplans * MS_PER_PLAN_CELL_REPLAN;
+}
+
 // Active jammers (on !== false) — the term that multiplies per-tick RF cost.
 function activeJammers(cfg) {
   const j = cfg.features && Array.isArray(cfg.features.jammers) ? cfg.features.jammers : [];
@@ -366,7 +379,7 @@ function runBatch(rawCfg, progress) {
   return { rows, summary, md, csv };
 }
 
-module.exports = { runBatch, validateConfig, normalizeConfig, LIMITS };
+module.exports = { runBatch, validateConfig, normalizeConfig, LIMITS, maxBatchWallMs };
 
 // --- CLI ----------------------------------------------------------------------
 if (require.main === module) {

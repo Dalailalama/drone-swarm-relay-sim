@@ -186,6 +186,18 @@ test('audit: a cross-origin browser POST is refused with 403; the CLI binds loop
   }
 });
 
+// The header's usage line showed only [--port 8090]; the CLI also takes
+// --host, the one flag that decides who can reach an unauthenticated API.
+test('the server header usage line names every flag its CLI parses, with its default', () => {
+  const { DEFAULT_HOST } = require('../tools/server.js');
+  const src = fs.readFileSync(path.join(__dirname, '../tools/server.js'), 'utf8');
+  const usage = src.split(/\r?\n/).find(l => l.includes('node tools/server.js'));
+  const flags = [...src.matchAll(/arg\('(--[a-z-]+)', ([^)]+)\)/g)].map(m => m[1]);
+  assert.deepStrictEqual(flags.sort(), ['--host', '--port']);
+  for (const flag of flags) assert.ok(usage.includes('[' + flag + ' '), flag + ' missing from: ' + usage);
+  assert.ok(usage.includes('[--host ' + DEFAULT_HOST + ']'), usage);
+});
+
 test('regression #14: the server queues bounded work and rejects overflow with 429', async () => {
   const app = createApp({ workers: 1, queue: 1, timeoutMs: 60000 });
   await new Promise(r => app.listen(0, r));
@@ -212,6 +224,28 @@ test('regression #14: a run that exceeds the time budget is killed with 504', as
     const r = await post(port, { ...GOOD, durationSec: 600, count: 20 });
     assert.strictEqual(r.code, 504, 'over-budget run must be terminated, got ' + r.code);
     assert.ok(app.batchStats.timedOut >= 1, 'the worker must actually be terminated');
+  } finally {
+    app.close();
+  }
+});
+
+// LIMITS admits ~600 s of fleet time plus ~480 s of relay planning at the
+// rates batch.js was sized at, but the pool killed every run at a fixed
+// 5 min: a batch the validator accepted could hold a worker for 5 minutes
+// and then 504 with nothing the client could act on.
+test('the server time budget covers the largest batch the limits admit, and its 504 says what to do', async () => {
+  const wallMs = B.maxBatchWallMs();
+  assert.strictEqual(wallMs, B.LIMITS.maxTotalWorkDroneSec * 1 + B.LIMITS.maxTotalPlanCellReplans * 0.012);
+  const dflt = createApp();
+  assert.ok(dflt.batchTimeoutMs >= 2 * wallMs,
+    'time budget ' + dflt.batchTimeoutMs + ' ms vs ' + wallMs + ' ms for the largest admissible batch');
+  const app = createApp({ workers: 1, queue: 1, timeoutMs: 150 });
+  assert.strictEqual(app.batchTimeoutMs, 150);
+  await new Promise(r => app.listen(0, r));
+  try {
+    const r = await post(app.address().port, { ...GOOD, durationSec: 600, count: 20 });
+    assert.strictEqual(r.code, 504);
+    assert.match(JSON.parse(r.body).error, /150 ms time budget.*fewer runs.*tools\/batch\.js/);
   } finally {
     app.close();
   }

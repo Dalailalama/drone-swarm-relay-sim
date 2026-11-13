@@ -176,14 +176,47 @@ test('ddil-full tactical micros stay in contact and leave the base area', () => 
 // A jammer that "squats beside the corridor" must not deny the ground station
 // or the objective outright: ddil-full's 18 dBm source denied a 3.9 km disc of
 // the wing's band, so on most terrain seeds the chain had nowhere to go.
-test('no bundled jammer denies the base or the objective of its own scenario', () => {
+// Flat ground too: terrain only ever shadows a source, so a layout clear on
+// flat ground is clear on every seed. ddil-disrupted's 21 dBm source denied a
+// ~1.55 km disc ~1.1 km from its base, kept clear only by a hill on seed 4102:
+// on compare's seeds 101-105 the base or the objective was denied on four.
+const buildScenario = (p, terrain) => {
+  let S = null;
+  const wrapped = Object.create(ctx);
+  wrapped.makeSwarm = opts => (S = ctx.makeSwarm(opts));
+  runScenarioSeed(wrapped, { ...p, scenario: { ...p.scenario, terrain } }, p.scenario.seed, 0); // built as the page builds it, never stepped
+  return S;
+};
+
+test('no bundled jammer denies the base or the objective of its own scenario, on its seed or on flat ground', () => {
   for (const p of SCENARIO_PACK) {
     if (!(p.scenario.jammers || []).length) continue;
-    let S = null;
-    const wrapped = Object.create(ctx);
-    wrapped.makeSwarm = opts => (S = ctx.makeSwarm(opts));
-    runScenarioSeed(wrapped, p, p.scenario.seed, 0); // built as the page builds it, never stepped
-    assert.ok(!ctx.inDenialZone(S, S.base), p.id + ': base inside a denial zone');
-    assert.ok(!ctx.inDenialZone(S, S.target), p.id + ': objective inside a denial zone');
+    for (const terrain of [p.scenario.terrain, 'flat']) {
+      const S = buildScenario(p, terrain);
+      const at = p.id + ' on ' + terrain;
+      assert.ok(!ctx.inDenialZone(S, S.base), at + ': base inside a denial zone');
+      assert.ok(!ctx.inDenialZone(S, S.target), at + ': objective inside a denial zone');
+      if (terrain !== 'flat') continue;
+      for (const j of S.jammers) {
+        const r = ctx.jammerDenialRadiusM(S, j);
+        assert.ok(Math.hypot(j.x - S.base.x, j.y - S.base.y) > r, at + ': base inside the drawn disc of ' + j.x + ',' + j.y);
+        assert.ok(Math.hypot(j.x - S.target.x, j.y - S.target.y) > r, at + ': objective inside the drawn disc of ' + j.x + ',' + j.y);
+      }
+    }
   }
+});
+
+// ...while the emitters still block the direct corridor (the blurb): on flat
+// ground the straight chain's relay slot is denied, and C2's plan bends
+// around the denial instead of failing or flying through it.
+test('ddil-disrupted blocks the direct corridor on flat ground and the planned chain bends around it', () => {
+  const p = SCENARIO_PACK.find(x => x.id === 'ddil-disrupted');
+  const S = buildScenario(p, 'flat');
+  const B = S.base, T = S.target, L = Math.hypot(T.x - B.x, T.y - B.y);
+  assert.ok(ctx.inDenialZone(S, { x: (B.x + T.x) / 2, y: (B.y + T.y) / 2 }), 'the direct corridor is open');
+  const plan = ctx.planChain(S);
+  assert.ok(plan.feasible !== false && plan.slots.length > 0, 'no chain around the denial');
+  const off = q => Math.abs((q.x - B.x) * (T.y - B.y) - (q.y - B.y) * (T.x - B.x)) / L;
+  for (const q of plan.slots) assert.ok(!ctx.inDenialZone(S, q), 'slot ' + q.x.toFixed(0) + ',' + q.y.toFixed(0) + ' is jammed');
+  assert.ok(Math.max(...plan.slots.map(off)) > 200, 'the chain runs straight down the corridor');
 });

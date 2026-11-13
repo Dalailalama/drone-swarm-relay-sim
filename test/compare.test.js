@@ -54,9 +54,16 @@ test('compare honours a calibrated radioPreset instead of falling back to the st
   const base = resolveScenario('ddil-disrupted').scenario;
   const stock = R.RADIOS.find(r => r.id === base.radio);
   const preset = { ...stock, id: base.radio + '-calibrated', rangeLosM: stock.rangeLosM / 5, txDbm: stock.txDbm - 25 };
+  // The swarm must fly the preset itself. Delivered/dropped/uptime alone tied
+  // once ddil-disrupted's base left the denial zone: neither radio drops a
+  // packet in the first 40 s, though the weak preset plans a 9-relay chain.
+  let flown = null;
+  const wrapped = Object.create(ctx);
+  wrapped.makeSwarm = opts => { flown = opts.radio; return ctx.makeSwarm(opts); };
   const a = runScenarioSeed(ctx, { id: 'a', title: 'a', scenario: base }, 101, 40);
-  const b = runScenarioSeed(ctx, { id: 'b', title: 'b', scenario: { ...base, radio: preset.id, radioPreset: preset } }, 101, 40);
-  assert.notDeepStrictEqual([a.delivered, a.dropped, a.uptimePct], [b.delivered, b.dropped, b.uptimePct]);
+  const b = runScenarioSeed(wrapped, { id: 'b', title: 'b', scenario: { ...base, radio: preset.id, radioPreset: preset } }, 101, 40);
+  assert.deepStrictEqual(flown, preset);
+  assert.notDeepStrictEqual(a, b);
 });
 
 test('compare lays the city along the real base->target corridor and honours cityDensity 0', () => {
@@ -124,6 +131,22 @@ test('compare sizes its default duration from the missions, so the CLI defaults 
   assert.match(short.warnings.join(' '), /transit/);
   assert.strictEqual(censoredMedian([3, null, 1]), 3);
   assert.strictEqual(censoredMedian([3, null, null]), Infinity);
+});
+
+// With an even seed count and exactly half arrived, the upper middle value is
+// a censored "not yet", so the median is ">duration" — the definition said
+// that only happened below half.
+test('compare defines the ">duration" median as half or fewer arrived, as it computes it', () => {
+  const { censoredMedian, calcStats, renderMarkdownDashboard } = require('../tools/compare.js');
+  assert.strictEqual(censoredMedian([120, null]), Infinity);
+  assert.strictEqual(censoredMedian([120, 130, null, null]), Infinity);
+  assert.strictEqual(censoredMedian([120, 130, 140, null]), 135);
+  const row = { title: 'H', uptime: calcStats([50, 50]), arrival: calcStats([120, null]), droppedPct: calcStats([1, 1]), energyWh: calcStats([2, 2]) };
+  const md = renderMarkdownDashboard([row], [1, 2], 300);
+  assert.ok(md.includes('1/2 arrived, median >300 s'), md);
+  const def = md.split(/\r?\n/).find(l => l.startsWith('- **Arrival Time**'));
+  assert.ok(!/fewer than half/.test(def), def);
+  assert.match(def, /half or fewer/);
 });
 
 // Same seed => bit-identical run (the batch engine already refuses repeats):
