@@ -20,7 +20,7 @@ const Q450 = A.AIRFRAMES.find(a => a.id === 'q450');
 test('F11: tether learns upstream position only through delivered telemetry and orders', () => {
   const s = mk();
   const [d, up] = s.drones;
-  d.x = 100; d.y = 0;
+  d.x = d.belX = 100; d.y = d.belY = 0; // healthy GNSS: the tether steers by belief = truth
   up.x = 0; up.y = 0;
   d.order.upstream = up.id;
   d.upMarginEma = -20;
@@ -46,7 +46,7 @@ test('F11: tether learns upstream position only through delivered telemetry and 
 test('F11: missing or stale upstream observations hold a weak-link drone in place', () => {
   const s = mk();
   const d = s.drones[0];
-  d.x = 100; d.y = 0; d.upMarginEma = -20;
+  d.x = d.belX = 100; d.y = d.belY = 0; d.upMarginEma = -20;
   d.order.upstream = s.drones[1].id;
   assert.strictEqual(ctx.tetherGoal(s, d, { x: 200, y: 0 }).x, 100);
   d.neighborKnown[d.order.upstream] = { x: 0, y: 0, at: 0 };
@@ -63,7 +63,7 @@ for (const broadcastC2 of [false, true]) {
     const [d, up] = s.drones;
     s.broadcastC2 = broadcastC2;
     s.c2.nextCmd = Infinity;
-    d.x = 100; d.y = 0; up.x = 0; up.y = 0;
+    d.x = d.belX = 100; d.y = d.belY = 0; up.x = 0; up.y = 0;
     up.gpsDenied = true; up.belX = 0; up.belY = 0;
     d.nextTlm = up.nextTlm = 0;
     ctx.droneComms(s, d);

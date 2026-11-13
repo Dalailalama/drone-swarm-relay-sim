@@ -1835,10 +1835,13 @@ function tetherGoal(s, d, goal) {
   const m = d.upMarginEma;
 
   if (m >= slowDb) return goal;
+  // Goals live in the frame the drone steers in — its nav belief. Built on
+  // truth, a GNSS-denied drone chased a target that moved with it (ONB-03).
+  const me = { x: d.belX, y: d.belY };
   const staleAfter = Math.max(C2.staleSec, 3 * (tlmIntervalSec(s) + cmdIntervalSec(s, s.drones.length)));
-  if (!upPos || !Number.isFinite(upPos.at) || s.time - upPos.at > staleAfter) return { x: d.x, y: d.y };
+  if (!upPos || !Number.isFinite(upPos.at) || s.time - upPos.at > staleAfter) return me;
   // only throttle motion that takes us FARTHER from the upstream node
-  if (dist2d(goal, upPos) <= dist2d(d, upPos)) return goal;
+  if (dist2d(goal, upPos) <= dist2d(me, upPos)) return goal;
 
   if (m <= stopDb) {
     // link nearly gone: step back toward the upstream neighbor. The retreat
@@ -1847,11 +1850,19 @@ function tetherGoal(s, d, goal) {
     // at the threshold made fading drones lurch tens of metres and back (#18).
     if (!d.tethered) { d.tethered = true; logEvent(s, d.id + ' tether: link to ' + d.order.upstream + ' thin — closing up', 'warn'); }
     const k = 0.4 * Math.min(1, (stopDb - m) / 3);
-    return { x: d.x + (upPos.x - d.x) * k, y: d.y + (upPos.y - d.y) * k };
+    return { x: me.x + (upPos.x - me.x) * k, y: me.y + (upPos.y - me.y) * k };
   }
-  // in the slow band: freeze outbound progress proportionally
+  // In the slow band: throttle outbound SPEED proportionally. stepDrone flies
+  // at full speed until the goal is inside one braking distance, then at
+  // speed × (distance / braking distance) — so a goal f × that distance out
+  // is f × full speed. Scaling the distance to a goal kilometres away left
+  // it hundreds of metres out: full speed into the floor, then back (ONB-04).
   const f = (m - stopDb) / (slowDb - stopDb);
-  return { x: d.x + (goal.x - d.x) * f, y: d.y + (goal.y - d.y) * f };
+  const vG = groundSpeedAlong(afOf(s, d), s.wind, me, goal);
+  const reach = f * vG * vG / (2 * DRONE.accelMs2);
+  const gl = dist2d(me, goal);
+  const k = gl > reach ? reach / gl : 1;
+  return { x: me.x + (goal.x - me.x) * k, y: me.y + (goal.y - me.y) * k };
 }
 
 // --- Separation spatial grid ---------------------------------------------------
