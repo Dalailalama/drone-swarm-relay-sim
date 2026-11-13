@@ -20,6 +20,8 @@
 
 const takGeoScale = typeof geoMetresPerDeg === 'function'
   ? geoMetresPerDeg : require('./osm.js').geoMetresPerDeg;
+const takWrapLon = typeof geoWrapLon === 'function'
+  ? geoWrapLon : require('./osm.js').geoWrapLon;
 
 // haeM: height above ellipsoid of the LOCAL FRAME's zero-ground reference —
 // the vertical datum for every exported altitude (finding #26). null means
@@ -32,19 +34,21 @@ function makeTakAnchor(latDeg, lonDeg, xLocal, yLocal, haeM) {
 }
 
 // Sim frame: x east-positive, y SOUTH-positive (screen style). South is
-// negative latitude, hence the minus sign on y.
+// negative latitude, hence the minus sign on y. Longitude wraps at the
+// antimeridian both ways: exports stay inside point.xsd's -180..180, and a
+// mark just across the line imports metres away, not around the planet.
 function localToLatLon(anchor, x, y) {
   const k = takGeoScale(anchor.lat);
   return {
     lat: anchor.lat - (y - anchor.y) / k.lat,
-    lon: anchor.lon + (x - anchor.x) / k.lon,
+    lon: takWrapLon(anchor.lon + (x - anchor.x) / k.lon),
   };
 }
 
 function latLonToLocal(anchor, lat, lon) {
   const k = takGeoScale(anchor.lat);
   return {
-    x: anchor.x + (lon - anchor.lon) * k.lon,
+    x: anchor.x + takWrapLon(lon - anchor.lon) * k.lon,
     y: anchor.y - (lat - anchor.lat) * k.lat,
   };
 }

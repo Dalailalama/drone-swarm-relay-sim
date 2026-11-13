@@ -68,6 +68,19 @@ test('osmWayToBuilding uses the sim frame: x=East, y=South', () => {
   assert.ok(Math.abs(mid.x) < 1e-6 && Math.abs(mid.y) < 1e-6, 'centered box should sit at 0,0');
 });
 
+test('a building just across the antimeridian lands metres away, not around the planet', () => {
+  // Anchor at lon 179.999; the footprint runs from 179.9995 across 180 to
+  // -179.9995, as OSM stores it (its centre is on the line itself).
+  const geometry = [[-17.7, 179.9995], [-17.7, -179.9995], [-17.6998, -179.9995], [-17.6998, 179.9995], [-17.7, 179.9995]]
+    .map(([lat, lon]) => ({ lat, lon }));
+  const b = O.osmWayToBuilding({ type: 'way', geometry }, -17.7, 179.999);
+  const kLon = O.geoMetresPerDeg(-17.7).lon;
+  assert.ok(b, 'footprint survives');
+  assert.ok(Math.abs(b.w - 0.001 * kLon) < 0.01, 'w = ' + b.w.toFixed(2) + ' m');
+  assert.ok(Math.abs(b.x - 0.001 * kLon) < 0.01, 'x = ' + b.x.toFixed(2) + ' m (just east of the anchor)');
+  assert.strictEqual(O.geoWrapLon(72.87), 72.87, 'in-range longitudes are untouched');
+});
+
 // --- osmWayToBuilding: heights -----------------------------------------------
 
 test('mapped height wins over floor count and is not marked estimated', () => {

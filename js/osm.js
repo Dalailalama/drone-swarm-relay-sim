@@ -31,6 +31,12 @@ function geoMetresPerDeg(latDeg) {
     lon: GEO_WGS84_A / Math.sqrt(w) * Math.cos(phi) * Math.PI / 180,
   };
 }
+// Longitude folded into [-180, 180): applied to a difference it takes the
+// short way round, so a point just across the antimeridian is metres away,
+// not ~40,000 km. Exact (a no-op) for values already in range.
+function geoWrapLon(lonDeg) {
+  return lonDeg - 360 * Math.floor((lonDeg + 180) / 360);
+}
 const OSM_LEVEL_HEIGHT_M = 3.2;   // storey height when only a floor count is mapped
 const OSM_DEFAULT_HEIGHT_M = 9;   // untagged building: low-rise guess (~3 floors)
 const OSM_MAX_BUILDINGS = 6000;   // keep the biggest N; renderer & physics stay smooth
@@ -100,7 +106,7 @@ function osmMinAreaRect(pts) {
 function osmWayToBuilding(el, lat0, lon0) {
   if (!el || el.type !== 'way' || !el.geometry || el.geometry.length < 3) return null;
   const k = geoMetresPerDeg(lat0);
-  const box = osmMinAreaRect(el.geometry.map(g => ({ x: (g.lon - lon0) * k.lon, y: (lat0 - g.lat) * k.lat })));
+  const box = osmMinAreaRect(el.geometry.map(g => ({ x: geoWrapLon(g.lon - lon0) * k.lon, y: (lat0 - g.lat) * k.lat })));
   if (!box) return null;
   const { w, d } = box;
   if (!(w > 2 && d > 2)) return null; // slivers and bad geometry
@@ -227,7 +233,7 @@ async function osmFetchArea(lat, lon, radiusM) {
 // UMD-lite export so parsing is unit-testable under Node.
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
-    geoMetresPerDeg, osmParseHeight, osmWayToBuilding, osmParseBuildings, osmBuildingQuery, osmClearZones, osmParseLatLon,
+    geoMetresPerDeg, geoWrapLon, osmParseHeight, osmWayToBuilding, osmParseBuildings, osmBuildingQuery, osmClearZones, osmParseLatLon,
     OSM_LEVEL_HEIGHT_M, OSM_DEFAULT_HEIGHT_M, OSM_MAX_BUILDINGS,
   };
 }

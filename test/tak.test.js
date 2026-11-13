@@ -26,6 +26,22 @@ test('local metres <-> lat/lon round-trips inside a metre at 2 km scale', () => 
   assert.ok(east.lon > anchor.lon, 'x>0 (east) must increase longitude');
 });
 
+test('longitude wraps at the antimeridian both ways', () => {
+  const anchor = T.makeTakAnchor(-17.7, 179.99, 0, 0); // Fiji
+  const kLon = require('../js/osm.js').geoMetresPerDeg(anchor.lat).lon;
+  const east = T.localToLatLon(anchor, 5000, 0);
+  assert.ok(east.lon >= -180 && east.lon <= 180, 'exported lon ' + east.lon + ' is outside point.xsd range');
+  assert.ok(Math.abs(east.lon - (179.99 + 5000 / kLon - 360)) < 1e-9, 'wraps to the western hemisphere');
+  // A mark 0.02° east across the line is ~2.1 km east, not ~37,900 km west.
+  const mark = T.latLonToLocal(anchor, -17.7, -179.99);
+  assert.ok(Math.abs(mark.x - 0.02 * kLon) < 1e-3, 'imported x = ' + mark.x.toFixed(1) + ' m');
+  const back = T.latLonToLocal(anchor, east.lat, east.lon);
+  assert.ok(Math.hypot(back.x - 5000, back.y) < 1e-6, 'round trip across the line');
+  // And westward from an anchor just east of the line.
+  const west = T.localToLatLon(T.makeTakAnchor(-17.7, -179.99, 0, 0), -5000, 0);
+  assert.ok(west.lon > 179 && west.lon <= 180, 'lon ' + west.lon);
+});
+
 test('CoT atoms carry required attributes and escape callsigns', () => {
   const xml = T.cotEvent({
     uid: 'SIM-DR-1', cotType: T.TAK_TYPES.drone,
