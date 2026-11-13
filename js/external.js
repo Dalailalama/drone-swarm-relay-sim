@@ -1,7 +1,7 @@
 // External vehicle mode — the SITL bridge, browser side.
 //
 // Normally stepDrone integrates our own point-mass physics. In external mode
-// the drones are flown by REAL autopilot firmware (ArduPilot/PX4 SITL) or a
+// the drones are flown by REAL autopilot firmware (ArduCopter SITL) or a
 // mock vehicle server, reached over a WebSocket bridge:
 //
 //   this sim  <--WebSocket JSON-->  bridge.py  <--MAVLink/UDP-->  SITL

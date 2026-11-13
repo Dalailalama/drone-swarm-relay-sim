@@ -1989,7 +1989,113 @@ async def scenario_foreign_mavlink_source_ignored() -> None:
     assert v.acks.get(MAV_CMD_NAV_LAND) == MAV_RESULT_ACCEPTED
 
 
+async def scenario_ready_revoked_on_autopilot_mode_change():
+    """READY is revoked when the vehicle's own heartbeats leave GUIDED or disarm (failsafe)."""
+    h = Harness()
+    clock = Clock()
+    with patch.object(bridge, "_now", clock):
+        v = current_vehicle()
+        conn = v.conn
+        # One odd heartbeat is not enough evidence...
+        clock.now = 1.0
+        conn.push(hb_msg(armed=True, custom_mode=6))  # RTL
+        bridge._drain_messages(v)
+        await bridge._advance_init(v)
+        assert v.ready and v.init_state == bridge.INIT_READY, v.init_state
+        # ...two consecutive ones are.
+        clock.now = 2.0
+        conn.push(hb_msg(armed=True, custom_mode=6))
+        bridge._drain_messages(v)
+        await bridge._advance_init(v)
+        telem = v.to_telemetry()
+        assert telem["ready"] is False, telem
+        assert telem["state"] == "mode-lost:6", telem
+        sets_before = conn.count("set_mode")
+        # The autopilot (or pilot) took over: the bridge never re-requests GUIDED.
+        clock.now = 30.0
+        await bridge._advance_init(v)
+        assert conn.count("set_mode") == sets_before and conn.count("arm") == 0, conn.sent
+        # Landed and disarmed by its own failsafe: reported as such.
+        for t in (31.0, 32.0):
+            clock.now = t
+            conn.push(hb_msg(armed=False, custom_mode=9))
+            conn.push(ext_state_msg(1))
+            bridge._drain_messages(v)
+            await bridge._advance_init(v)
+        assert v.to_telemetry()["state"] == "disarmed", v.init_state
+        assert not v.ready
+    await h.close()
+
+
+async def scenario_px4_reported_unsupported():
+    """A PX4 heartbeat fails as unsupported-autopilot (ArduCopter only), never retried."""
+    h = Harness()
+    clock = Clock()
+    with patch.object(bridge, "_now", clock):
+        conn = conn_for(14550)
+        conn.mode_map = {"MANUAL": 65536, "OFFBOARD": 393216, "RTL": 84148224}  # px4_map: no GUIDED
+        v = bridge.Vehicle(id="DR-1", index=0, port=14550, conn=conn)
+        bridge.STATE.vehicles[v.id] = v
+        conn.push(FakeMsg("HEARTBEAT", base_mode=0, custom_mode=0, autopilot=12))  # MAV_AUTOPILOT_PX4
+        bridge._drain_messages(v)
+        await bridge._advance_init(v)
+        assert v.init_state == "failed:unsupported-autopilot", v.init_state
+        assert not v.ready
+        clock.now = 60.0
+        conn.push(FakeMsg("HEARTBEAT", base_mode=0, custom_mode=0, autopilot=12))
+        bridge._drain_messages(v)
+        await bridge._advance_init(v)
+        assert v.init_state == "failed:unsupported-autopilot", v.init_state
+        assert conn.count("set_mode") == 0 and conn.count("arm") == 0, conn.sent
+    await h.close()
+
+
+async def scenario_relaunch_failure_stays_parked():
+    """A relaunch whose arm is denied parks the vehicle (service 'failed'); the bridge never re-arms it itself."""
+    h = Harness()
+    clock = Clock()
+    with patch.object(bridge, "_now", clock):
+        conn = conn_for(14550)
+        v = bridge.Vehicle(id="DR-1", index=0, port=14550, conn=conn, guided_mode_id=GUIDED_MODE_ID)
+        bridge.STATE.vehicles[v.id] = v
+        conn.push(hb_msg(armed=False, custom_mode=GUIDED_MODE_ID))
+        conn.push(pos_msg(0.0, 0.0, 0.0))
+        bridge._drain_messages(v)
+        v.service_id, v.service_phase, v.takeoff_alt = "svc-1", "relaunch", 20.0
+        await bridge._enter_confirm_arm(v, clock.now)
+        conn.push(ack_msg(MAV_CMD_COMPONENT_ARM_DISARM, MAV_RESULT_DENIED))
+        bridge._drain_messages(v)
+        await bridge._advance_init(v)
+        assert v.init_state == "failed:arm", v.init_state
+        for step in range(1, 40):  # 20 s, well past RETRY_COOLDOWN_S, link healthy
+            clock.now = step * 0.5
+            conn.push(hb_msg(armed=False, custom_mode=GUIDED_MODE_ID))
+            conn.push(pos_msg(0.0, 0.0, 0.0))
+            bridge._drain_messages(v)
+            await bridge._advance_init(v)
+        assert conn.count("arm") == 1, conn.sent
+        assert v.service_phase == "failed" and not v.ready, (v.service_phase, v.init_state)
+    await h.close()
+
+
+async def scenario_reinit_airborne_no_takeoff():
+    """Init of a vehicle already flying at the takeoff altitude: no NAV_TAKEOFF (ArduCopter refuses it in flight)."""
+    h = Harness()
+    ws = h.client("browser-1")
+    h.telemetry()
+    ap = h.autopilot(14550, takeoff_result=4)  # MAV_RESULT_FAILED, as ArduCopter answers a takeoff in flight
+    ap.alt, ap.armed, ap.mode = 30.0, True, GUIDED_MODE_ID
+    reply = await ready_reply(ws, h.init(ws, count=1, alt=30.0))
+    assert ready_entry(reply, "DR-1") == {"id": "DR-1", "ready": True, "state": "ready"}, (reply, ws.statuses())
+    assert conn_for(14550).count("takeoff") == 0, conn_for(14550).sent
+    await h.close()
+
+
 SCENARIOS = [
+    ("A2: init of an airborne vehicle at altitude is READY without NAV_TAKEOFF", scenario_reinit_airborne_no_takeoff),
+    ("A2: a failed relaunch stays parked and is never re-armed by the bridge", scenario_relaunch_failure_stays_parked),
+    ("A2: a PX4 vehicle is reported unsupported, not failed:mode, and never retried", scenario_px4_reported_unsupported),
+    ("A2: READY revoked when an autopilot failsafe leaves GUIDED or disarms", scenario_ready_revoked_on_autopilot_mode_change),
     ("#12: not READY at lift-off; READY at the takeoff altitude", scenario_ready_needs_takeoff_altitude),
     ("#12: a long steady climb is not failed by the step timeout", scenario_long_climb_not_timed_out),
     ("#12: a climb stalled below takeoff altitude fails the takeoff step", scenario_stalled_climb_fails_takeoff),

@@ -1,4 +1,8 @@
-"""bridge.py - browser WebSocket <-> ArduPilot/PX4 SITL MAVLink bridge.
+"""bridge.py - browser WebSocket <-> ArduCopter (ArduPilot) SITL MAVLink bridge.
+
+ArduCopter only: the init sequence needs GUIDED, which PX4 does not have
+(PX4 would need OFFBOARD with a setpoint stream), so a PX4 heartbeat is
+reported as failed:unsupported-autopilot and never armed.
 
 This is the "real" half of the pair (see mock_vehicles.py for the
 no-firmware stand-in that speaks the identical WebSocket protocol).
@@ -139,7 +143,7 @@ from websockets.asyncio.server import serve
 from websockets.asyncio.server import broadcast
 from websockets.exceptions import ConnectionClosed
 
-# pymavlink is required for all MAVLink communication with ArduPilot/PX4
+# pymavlink is required for all MAVLink communication with ArduCopter
 # SITL (or real autopilots). It is NOT a dependency of mock_vehicles.py.
 # If this import fails: `pip install pymavlink` (see requirements.txt).
 from pymavlink import mavutil
@@ -183,6 +187,10 @@ INIT_CONFIRM_TAKEOFF = "confirm-takeoff"
 INIT_READY = "ready"
 INIT_CONFIRM_ABORT = "confirm-abort"
 INIT_ABORT_HOLD = "abort-hold"
+INIT_MODE_LOST_PREFIX = "mode-lost:"  # + custom_mode: READY revoked, vehicle left GUIDED on its own
+INIT_DISARMED = "disarmed"  # READY revoked, vehicle disarmed on its own (e.g. failsafe landing)
+READY_REVOKE_HEARTBEATS = 2  # consecutive non-GUIDED/disarmed heartbeats that revoke READY
+MAV_AUTOPILOT_PX4 = 12  # HEARTBEAT.autopilot of PX4 firmware (unsupported, see module docstring)
 FAILED_PREFIX = "failed:"  # + step name, e.g. "failed:arm", "failed:no-heartbeat"
 
 # --- MAVLink constants that need explaining -------------------------------
@@ -270,8 +278,12 @@ class Vehicle:
 
     # --- link/telemetry state, updated by this vehicle's drain -------------
     last_heartbeat: Optional[float] = None  # monotonic seconds, or None if never seen
+    autopilot: Optional[int] = None  # latest HEARTBEAT.autopilot (MAV_AUTOPILOT_*)
     base_mode: int = 0  # latest HEARTBEAT.base_mode (carries MAV_MODE_FLAG_SAFETY_ARMED)
     custom_mode: Optional[int] = None  # latest HEARTBEAT.custom_mode (ArduPilot flight mode id)
+    heartbeat_seq: int = 0  # HEARTBEATs drained so far; READY re-checks each new one
+    ready_checked_seq: int = 0  # heartbeat_seq the READY re-check last looked at
+    ready_bad_streak: int = 0  # consecutive post-READY heartbeats not GUIDED+armed
     guided_mode_id: Optional[int] = None  # from conn.mode_mapping()["GUIDED"], resolved after heartbeat
     acks: dict = field(default_factory=dict)  # MAV_CMD id -> latest COMMAND_ACK result
     autopilot_src: Optional[tuple] = None  # (sysid, compid) of the vehicle's autopilot, once heard
@@ -570,8 +582,11 @@ def _drain_messages(vehicle: Vehicle) -> None:
         if mtype == "HEARTBEAT":
             vehicle.last_heartbeat = _now()
             vehicle.base_mode = int(getattr(msg, "base_mode", 0) or 0)
+            autopilot = getattr(msg, "autopilot", None)
+            vehicle.autopilot = None if autopilot is None else int(autopilot)
             custom = getattr(msg, "custom_mode", None)
             vehicle.custom_mode = None if custom is None else int(custom)
+            vehicle.heartbeat_seq += 1
         elif mtype == "LOCAL_POSITION_NED":
             x, y, alt = ned_to_sim(msg.x, msg.y, msg.z)
             vehicle.x, vehicle.y, vehicle.alt = x, y, alt
@@ -612,6 +627,14 @@ def _enter_step(vehicle: Vehicle, state: str, now: float) -> None:
 
 async def _enter_confirm_mode(vehicle: Vehicle, now: float) -> None:
     """Resolve the GUIDED mode id and ask for it."""
+    if vehicle.autopilot == MAV_AUTOPILOT_PX4:
+        await _fail(
+            vehicle,
+            "unsupported-autopilot",
+            f"vehicle {vehicle.id}: PX4 autopilot is not supported (ArduCopter only: no GUIDED mode); not arming",
+            now,
+        )
+        return
     if vehicle.guided_mode_id is None:
         try:
             # mode_mapping() needs the heartbeat (it keys off the vehicle
@@ -680,6 +703,10 @@ async def _fail(vehicle: Vehicle, step: str, message: str, now: float) -> None:
     vehicle.init_state = FAILED_PREFIX + step
     vehicle.ready = False
     vehicle.failed_at = now
+    if vehicle.service_phase == "relaunch":
+        # A failed relaunch parks the vehicle (as the mock does): only a fresh
+        # browser-driven service handshake may arm it again, never a retry.
+        vehicle.service_phase = "failed"
     await _vehicle_status(vehicle, message)
     vehicle.first_pass_done.set()
 
@@ -717,6 +744,8 @@ async def _recover_if_possible(vehicle: Vehicle, now: float) -> None:
         return  # nothing to talk to yet; keep polling for a heartbeat
     if vehicle.service_phase in ("failed", "aborted") or vehicle.init_state == FAILED_PREFIX + "abort":
         return
+    if vehicle.init_state == FAILED_PREFIX + "unsupported-autopilot":
+        return  # retrying cannot help: the firmware has no GUIDED mode
     # A vehicle that only just started talking is retried immediately (that
     # heartbeat IS the thing we were waiting for); anything else backs off,
     # so a vehicle failing its pre-arm checks isn't hammered every 20 ms.
@@ -731,12 +760,31 @@ async def _advance_init(vehicle: Vehicle) -> None:
     now = _now()
     state = vehicle.init_state
 
-    if state == INIT_READY:
-        # Confirmed airborne; the task stays alive purely to drain telemetry.
-        # A later heartbeat loss is reported through `connected` (the browser
-        # has its own freeze/dead ladder for that) and deliberately does NOT
-        # re-run the sequence: a vehicle already in the air must not be
-        # re-armed or re-commanded to take off.
+    if state == INIT_READY or state == INIT_DISARMED or state.startswith(INIT_MODE_LOST_PREFIX):
+        # Confirmed airborne; the task stays alive to drain telemetry and to
+        # re-check READY against each new heartbeat. A heartbeat loss is
+        # reported through `connected` (the browser has its own freeze/dead
+        # ladder for that). An autopilot failsafe (RTL/LAND) or a disarm seen
+        # on READY_REVOKE_HEARTBEATS consecutive heartbeats revokes READY, so
+        # C2 stops counting on it. Neither ever re-runs the sequence: a
+        # vehicle in the air must not be re-armed or re-commanded to take
+        # off, and GUIDED is not re-requested -- the autopilot or pilot took over.
+        if vehicle.heartbeat_seq != vehicle.ready_checked_seq:
+            vehicle.ready_checked_seq = vehicle.heartbeat_seq
+            if vehicle.mode_confirmed and vehicle.armed:
+                vehicle.ready_bad_streak = 0
+            else:
+                vehicle.ready_bad_streak += 1
+            if vehicle.ready_bad_streak >= READY_REVOKE_HEARTBEATS:
+                lost = INIT_DISARMED if not vehicle.armed else f"{INIT_MODE_LOST_PREFIX}{vehicle.custom_mode}"
+                if lost != state:
+                    vehicle.init_state = lost
+                    vehicle.ready = False
+                    await _vehicle_status(
+                        vehicle,
+                        f"vehicle {vehicle.id}: READY revoked - heartbeat reports mode {vehicle.custom_mode}, "
+                        f"armed={vehicle.armed} (autopilot failsafe or pilot takeover); not re-commanding",
+                    )
         return
 
     if state == INIT_CONFIRM_ABORT:
@@ -874,11 +922,22 @@ async def _advance_init(vehicle: Vehicle) -> None:
                 now,
             )
         elif _accepted(result) and vehicle.connected and vehicle.armed:
-            await _vehicle_status(
-                vehicle,
-                f"vehicle {vehicle.id}: armed (ACK + heartbeat armed flag), commanding takeoff to {vehicle.takeoff_alt:g} m",
-            )
-            await _enter_confirm_takeoff(vehicle, now)
+            # Already flying (an init while airborne): ArduCopter refuses
+            # NAV_TAKEOFF in flight, so branch like _resume_sequence does.
+            if vehicle.airborne and vehicle.at_takeoff_alt:
+                await _become_ready(vehicle, now)
+            elif vehicle.airborne:
+                await _vehicle_status(
+                    vehicle,
+                    f"vehicle {vehicle.id}: armed and airborne at {vehicle.alt:.1f} m, climbing to {vehicle.takeoff_alt:g} m before ready",
+                )
+                await _enter_climb_setpoint(vehicle, now)
+            else:
+                await _vehicle_status(
+                    vehicle,
+                    f"vehicle {vehicle.id}: armed (ACK + heartbeat armed flag), commanding takeoff to {vehicle.takeoff_alt:g} m",
+                )
+                await _enter_confirm_takeoff(vehicle, now)
         elif elapsed >= INIT_STEP_TIMEOUT_S:
             await _fail(
                 vehicle,
@@ -1454,7 +1513,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Bridge between a browser drone-swarm sim (WebSocket/JSON) and "
-            "real ArduPilot/PX4 SITL vehicles (MAVLink/UDP). Requires "
+            "real ArduCopter SITL vehicles (MAVLink/UDP). Requires "
             "pymavlink; see requirements.txt."
         )
     )
