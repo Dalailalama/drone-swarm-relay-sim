@@ -103,6 +103,27 @@ test('compare arrival statistics say how many seeds arrived, so 1-of-5 cannot re
     assert.ok(out.includes('1/5'), out);
     assert.ok(out.includes('5/5'), out);
   }
+  // The censored median ranks 1-of-5 behind 5-of-5 without reading the k/N.
+  assert.ok(md.includes('median 150.0 s') && md.includes('median >300 s'), md);
+  assert.ok(txt.includes('med 150.0s') && txt.includes('med >300s'), txt);
+});
+
+test('compare sizes its default duration from the missions, so the CLI defaults can arrive; a short one warns', () => {
+  const { minDurationSec, censoredMedian } = require('../tools/compare.js');
+  const A = require('../js/airframes.js');
+  for (const id of ['ddil-disrupted', 'ddil-full']) {
+    const sc = resolveScenario(id).scenario;
+    const transitSec = Math.hypot(sc.target.x - sc.base.x, sc.target.y - sc.base.y) / A.AIRFRAMES.find(a => a.id === sc.airframe).maxSpeedMs;
+    assert.ok(minDurationSec(resolveScenario(id)) >= 2 * transitSec, id);
+  }
+  // No seeds: nothing runs, only the duration is resolved.
+  const dflt = compareScenarios(['ddil-disrupted', 'ddil-full'], { seeds: [] });
+  assert.ok(dflt.durationSec >= minDurationSec(resolveScenario('ddil-full')), String(dflt.durationSec));
+  assert.deepStrictEqual(dflt.warnings, []);
+  const short = compareScenarios(['ddil-limited'], { seeds: [101], durationSec: 15 });
+  assert.match(short.warnings.join(' '), /transit/);
+  assert.strictEqual(censoredMedian([3, null, 1]), 3);
+  assert.strictEqual(censoredMedian([3, null, null]), Infinity);
 });
 
 // audit swarm-onboard/TOOL-01: 'Uptime' read fleetConnSec (C2 reaches a
