@@ -1,7 +1,8 @@
 // Physics unit tests — run with:  node --test test/
 // These pin down the model's calibration promises so a PR can't silently
 // break them: rated range ↔ zero margin, fade reserve, horizon math,
-// momentum-theory endurance staying inside published real-world figures.
+// momentum-theory endurance staying inside each class's band, the micro's
+// pinned to its cited spec.
 
 const { test } = require('node:test');
 const assert = require('node:assert');
@@ -60,16 +61,34 @@ test('chain throughput divides by hop count', () => {
   assert.strictEqual(R.chainThroughputKbps(radio, 4), radio.airRateKbps / 4);
 });
 
-test('momentum-theory endurance lands inside published real-world figures', () => {
+test('momentum-theory endurance (usable pack) stays inside each class\'s band', () => {
   // x8 band moved down with the coaxial shared-disc correction (audit EN-1):
   // the old [38, 55] only held while 8 coaxial rotors counted as 8 free discs.
-  const expected = { micro: [28, 42], q450: [17, 27], x8: [30, 42] }; // minutes
+  // micro: the DJI Mini 4 Pro's 30 min full-pack hover x the 80% usable
+  // fraction = 24 min (audit EN-2). q450 and x8 name no single reference
+  // aircraft, so theirs are class-plausibility bands, not cited figures.
+  const expected = { micro: [22, 26], q450: [17, 27], x8: [30, 42] }; // minutes
   for (const af of A.AIRFRAMES) {
     const e = A.hoverEnduranceMin(af);
     const [lo, hi] = expected[af.id];
     assert.ok(e >= lo && e <= hi,
       af.id + ': computed ' + e.toFixed(1) + ' min, expected ' + lo + '-' + hi);
   }
+});
+
+test('micro preset is the DJI Mini 4 Pro on its real disc and pack, and hovers for the published 30 min (audit EN-2)', () => {
+  // https://www.dji.com/mini-4-pro/specs: takeoff weight < 249 g; Intelligent
+  // Flight Battery 2590 mAh x 7.32 V = 18.96 Wh; "Max Hovering Time: 30
+  // minutes", windless, from 100% battery to 0%. Stock 6030F props: 6.0 in
+  // diameter, so r ~= 0.076 m.
+  const af = A.AIRFRAMES.find(a => a.id === 'micro');
+  assert.ok(af.massKg <= 0.249, 'micro mass ' + af.massKg);
+  assert.ok(Math.abs(af.rotorRadiusM - 0.076) <= 0.076 * 0.1,
+    'micro rotor radius ' + af.rotorRadiusM + ' m, 6030F props are r ~= 0.076 m');
+  assert.ok(Math.abs(af.batteryWh - 18.96) < 0.005, 'micro pack ' + af.batteryWh + ' Wh, spec is 18.96 Wh');
+  const fullPackHoverMin = af.batteryWh / A.hoverPowerW(af) * 60;
+  assert.ok(Math.abs(fullPackHoverMin - 30) <= 2,
+    'micro full-pack hover ' + fullPackHoverMin.toFixed(1) + ' min, DJI spec is 30 min');
 });
 
 test('forward flight power: equals hover at 0, rises toward max speed', () => {
@@ -90,7 +109,7 @@ test('coaxial presets share one disc per stack and pay the coaxial interference 
     const r2 = Math.PI * af.rotorRadiusM * af.rotorRadiusM;
     assert.ok(Math.abs(A.discAreaM2(af) - af.nRotors / 2 * r2) < 1e-12, af.id + ': one swept disc per coaxial stack');
     const T = af.massKg * 9.81;
-    const isolated = Math.pow(T, 1.5) / Math.sqrt(2 * A.AIR_RHO * af.nRotors * r2) / A.POWERTRAIN_EFF;
+    const isolated = Math.pow(T, 1.5) / Math.sqrt(2 * A.AIR_RHO * af.nRotors * r2) / (af.powertrainEff || A.POWERTRAIN_EFF);
     const sharedDisc = isolated * Math.SQRT2;
     const h = A.hoverPowerW(af);
     // Between the ideal isolated-rotor case (no wake interaction) and the

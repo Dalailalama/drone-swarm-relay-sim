@@ -3,14 +3,15 @@
 // Hover power comes from actuator-disc momentum theory:
 //     P_ideal = (m·g)^(3/2) / sqrt(2·rho·A_total)
 // divided by a lumped efficiency (prop figure of merit × motor × ESC ≈ 0.55
-// for a decent hobby-grade multirotor). Forward flight adds parasite drag as
-// a cubic term. Endurance is NOT a preset number — it falls out of
-// battery Wh / hover W, and lands within a couple of minutes of the real
-// aircrafts' published figures, which is the point.
+// for a decent hobby-grade multirotor; a preset can carry its own
+// powertrainEff). Forward flight adds parasite drag as a cubic term.
+// Endurance is NOT a preset number — it falls out of battery Wh / hover W.
+// The micro is calibrated to a published spec (DJI Mini 4 Pro, 30 min hover);
+// the q450 and X8 are class-typical builds with no single reference aircraft.
 
 const AIR_RHO = 1.225;      // kg/m^3, sea level
 const G = 9.81;
-const POWERTRAIN_EFF = 0.55; // prop FM x motor x ESC, hobby grade
+const POWERTRAIN_EFF = 0.55; // default prop FM x motor x ESC, hobby grade
 const BATT_USABLE_FRAC = 0.80; // land before the pack is truly empty
 // Coaxial stacks: both rotors sweep ONE disc, and the lower rotor works in the
 // upper's contracted wake. Momentum theory (Leishman, Principles of Helicopter
@@ -25,9 +26,13 @@ const AIRFRAMES = [
     id: 'micro',
     name: 'Sub-250 g micro quad',
     massKg: 0.249,
-    rotorRadiusM: 0.05,
+    rotorRadiusM: 0.076,    // 6030F props, 6.0 in
     nRotors: 4,
-    batteryWh: 18.9,        // ~2450 mAh 2S Li-ion pack
+    batteryWh: 18.96,       // 2590 mAh x 7.32 V Li-ion
+    // Whole-aircraft figure fitted to the spec's 30 min hover (100% to 0%):
+    // https://www.dji.com/mini-4-pro/specs. Small props and motors are less
+    // efficient, and camera, gimbal and video link draw from the same pack.
+    powertrainEff: 0.24,
     maxSpeedMs: 13,
     note: 'DJI-Mini-class. Legal-to-fly-anywhere weight, surprisingly long legs, but a kite in any real wind.',
   },
@@ -63,7 +68,7 @@ function discAreaM2(af) {
 function hoverPowerW(af) {
   const thrustN = af.massKg * G;
   const pIdeal = Math.pow(thrustN, 1.5) / Math.sqrt(2 * AIR_RHO * discAreaM2(af));
-  return pIdeal * (af.coaxial ? COAX_KAPPA_INT : 1) / POWERTRAIN_EFF;
+  return pIdeal * (af.coaxial ? COAX_KAPPA_INT : 1) / (af.powertrainEff || POWERTRAIN_EFF);
 }
 
 // Electrical power at a given airspeed. Mild dip at low speed (translational
