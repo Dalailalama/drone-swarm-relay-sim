@@ -1,7 +1,7 @@
 {
   "label": "Urban altitude sweep — does height buy uptime?",
   "radio": "sik-v3",
-  "env": "urban",
+  "env": "suburban",
   "airframe": "q450",
   "terrain": "urban",
   "cityDensity": 55,
