@@ -16,7 +16,7 @@ const RADIOS = [
     antGainDbi: 2,        // stock duck antenna, each end
     airRateKbps: 64,
     rangeLosM: 300,       // Holybro spec: ~300 m with stock antennas
-    note: 'The default MAVLink telemetry radio. Cheap (~$40/pair), 300 m stock — antenna upgrades stretch it to a few km.',
+    note: 'The default MAVLink telemetry radio. Cheap (~$60/pair, Holybro list price), 300 m stock — antenna upgrades stretch it to a few km.',
     source: 'https://docs.holybro.com/radio/sik-telemetry-radio-v3',
   },
   {
@@ -41,7 +41,7 @@ const RADIOS = [
     sensDbm: -98,         // at 1 Mbps
     antGainDbi: 2,
     airRateKbps: 1000,
-    rangeLosM: 300,       // community open-field tests: ~200-480 m
+    rangeLosM: 300,       // community open-field tests: ~200-480 m (Espressif: 200 m)
     note: 'Hobby-swarm favorite: a $5 chip on every drone, connectionless broadcast, trivially meshes. Short legs though.',
     source: 'https://www.espressif.com/en/solutions/low-power-solutions/esp-now',
   },
@@ -51,10 +51,10 @@ const RADIOS = [
     freqMHz: 2400,
     air: 'elrs',
     txDbm: 20,
-    sensDbm: -108,        // SX1280 LoRa mode, 150 Hz packet rate
+    sensDbm: -108,        // SX1280 LoRa mode, 250 Hz packet rate (150 Hz: -112 dBm)
     antGainDbi: 2,
-    airRateKbps: 5,       // usable MAVLink telemetry throughput, not RF rate
-    rangeLosM: 10000,     // routinely proven 10+ km at 100 mW / 150 Hz
+    airRateKbps: 7,       // MAVLink at 250 Hz: ~590 B/s down + ~300 B/s up, not RF rate
+    rangeLosM: 10000,     // routinely proven 10+ km at 100 mW / 250 Hz
     hopGainDb: 12,        // estimate: FHSS across the band — inherent jam resistance
     note: 'RC-control link repurposed for C2. Astonishing range per milliwatt, frequency-hopping by design, but only a few kbps of telemetry fits through.',
     source: 'https://www.expresslrs.org/info/signal-health/',
@@ -80,7 +80,7 @@ const RADIOS = [
   {
     id: 'xbee900',
     name: 'XBee-PRO 900HP',
-    freqMHz: 900,
+    freqMHz: 915,         // 902-928 MHz band centre
     air: 'digimesh',
     txDbm: 24,            // 250 mW
     sensDbm: -101,        // at 200 kbps

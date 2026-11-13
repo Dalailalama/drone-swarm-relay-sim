@@ -11,10 +11,10 @@ calibration anchor for the path-loss model.
 |---|---|---|---|---|---|---|
 | Holybro SiK V3 telemetry | 915 MHz | 20 dBm | −105 dBm | 64 kbps | 300 m | [Holybro V3 spec](https://docs.holybro.com/radio/sik-telemetry-radio-v3) |
 | RFD900x long range | 915 MHz | 30 dBm | −93 dBm | 224 kbps | 40 km | [x-Series datasheet V2.0](https://rfdesign.com.au/wp-content/uploads/x-Series-Datasheet-V2.0.pdf), [modems](https://rfdesign.com.au/modems/) |
-| ESP32 ESP-NOW (2.4 GHz) | 2.4 GHz | 20 dBm | −98 dBm | 1 Mbps | 300 m | [Espressif](https://www.espressif.com/en/solutions/low-power-solutions/esp-now) |
-| ExpressLRS 2.4 GHz (100 mW) | 2.4 GHz | 20 dBm | −108 dBm | ~5 kbps telemetry | 10 km | [ExpressLRS docs](https://www.expresslrs.org/info/signal-health/) |
+| ESP32 ESP-NOW (2.4 GHz) | 2.4 GHz | 20 dBm | −98 dBm | 1 Mbps | 300 m (community estimate) | [Espressif](https://www.espressif.com/en/solutions/low-power-solutions/esp-now) |
+| ExpressLRS 2.4 GHz (100 mW) | 2.4 GHz | 20 dBm | −108 dBm (250 Hz) | ~7 kbps telemetry (250 Hz) | 10 km | [ExpressLRS docs](https://www.expresslrs.org/info/signal-health/) |
 | LoRa SX1276 (EU868, SF10) | 869 MHz | 20 dBm | −132 dBm | ~1 kbps | 5 km | [Semtech SX1276](https://www.semtech.com/products/wireless-rf/lora-connect/sx1276) |
-| XBee-PRO 900HP | 900 MHz | 24 dBm | −101 dBm | 200 kbps | 6.5 km | [Digi](https://www.digi.com/products/embedded-systems/digi-xbee/rf-modules/sub-1-ghz-rf-modules/xbee-pro-900hp) |
+| XBee-PRO 900HP | 902–928 MHz | 24 dBm | −101 dBm | 200 kbps | 6.5 km | [Digi](https://www.digi.com/products/embedded-systems/digi-xbee/rf-modules/sub-1-ghz-rf-modules/xbee-pro-900hp) |
 | Silvus StreamCaster 4400E (MN-MIMO) | 2.2 GHz | 33 dBm | −102 dBm (5 MHz BW) | 40 Mbps (estimate) | 20 km (estimate) | [SC4400E datasheet](https://silvustechnologies.com/hubfs/Sr%20Silvus2026/PDF/StreamCaster-4400-SC4400E-Enhanced-Datasheet.pdf), [product page](https://silvustechnologies.com/products/streamcaster-4400/) |
 | Doodle Labs Mesh Rider (2.4 GHz) | 2.45 GHz | 30 dBm (estimate) | −101 dBm (estimate) | 20 Mbps (estimate) | 12 km (estimate) | [Doodle Labs](https://doodlelabs.com/products/mesh-rider-radios/) |
 | Rajant Kinetic Mesh (ES1) | 2.4 GHz | 29 dBm | −96 dBm (estimate) | 30 Mbps (estimate) | 8 km (estimate) | [ES1 spec sheet](https://secure.rajant.com/publicFiles/1479), [ES1 series](https://rajant.com/products/es1-series/) |
@@ -31,16 +31,23 @@ Notes and judgment calls:
   and the datasheet's stock 3 dBi dipoles. RFDesign quotes the range as
   "40+km (depending on antennas, and settings)" — not tied to dipoles or to
   an air rate, so 40 km at 224 kbps is the optimistic end of that claim.
-- **ESP-NOW**: Espressif doesn't publish an official range; 200–480 m open
-  field is the consistently reproduced community figure at 1 Mbps. The
-  preset uses 300 m.
+- **ESP-NOW**: Espressif's ESP-NOW page says devices 200 m apart in open
+  space "can be controlled easily"; 200–480 m open field is the
+  consistently reproduced community figure at 1 Mbps. The preset's 300 m is
+  a community estimate above the vendor's 200 m.
 - **ExpressLRS**: the RF link is an RC control link; `airRateKbps` here is
-  usable MAVLink telemetry throughput, not the raw LoRa chip rate.
+  usable MAVLink telemetry throughput, not the raw LoRa chip rate. The
+  preset is the 250 Hz LoRa mode: −108 dBm is the signal-health page's
+  250 Hz figure (150 Hz is −112 dBm), and the
+  [MAVLink capacity table](https://www.expresslrs.org/software/mavlink/)
+  gives ~590 B/s down + ~300 B/s up at 250 Hz, about 7 kbps.
 - **LoRa EU868**: the 10% duty cycle models the 869.4–869.65 MHz sub-band.
   Range at SF10 near the ground is heavily antenna- and siting-dependent;
   5 km is a typical open-field result, not a ceiling.
-- **XBee-PRO 900HP**: Digi rates 6.5 km (4 mi) LOS with 2.1 dBi dipoles and
-  up to 15.5 km with high-gain antennas at the 10 kbps rate.
+- **XBee-PRO 900HP**: Digi rates 6.5 km (4 mi) LOS at 200 kbps with 2.1 dBi
+  dipoles, 14 km (9 mi) at 10 kbps with the same dipoles, and up to 45 km
+  (28 mi) with high-gain antennas. It hops across 902–928 MHz; the preset
+  models it at the 915 MHz band centre.
 - **Silvus StreamCaster 4400E**: the SC4400E datasheet gives −102 dBm at
   5 MHz bandwidth (−108 dBm at 1.25 MHz, optional) and "up to 100 Mbps
   (adaptive)"; TX 33 dBm is 2 W per chain of the SC4480's 8 W. A 40 Mbps
