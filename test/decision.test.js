@@ -156,3 +156,21 @@ test('the RTB explanation prices the home leg from the nav belief the drone deci
   assert.ok(exp.requiredWh >= d.energyWh,
     'the card says it needs ' + exp.requiredWh.toFixed(1) + ' Wh with ' + d.energyWh.toFixed(1) + ' Wh left, yet it turned for home');
 });
+
+// A drone holds after 3 order rounds of silence at the cadence C2 announced
+// (never under FAILSAFE.holdSec); on a slow link that is far past 8 s.
+test('the hold explanation quotes the silence threshold the drone actually holds at', () => {
+  const ctx = loadCore();
+  const s = ctx.makeSwarm({ count: 1, seed: 101, radio: R.RADIOS[0], airframe: A.AIRFRAMES[0] });
+  const d = s.drones[0];
+  d.linkCadence = { tlmSec: 30, cmdSec: 40 }; // a slow link: one order round every 40 s
+  s.time = 300;
+  d.lastC2 = s.time - 100;
+  ctx.droneComms(s, d);
+  assert.strictEqual(d.mode, 'ok', 'setup: 100 s is inside the 120 s tolerance');
+  d.lastC2 = s.time - 125;
+  ctx.droneComms(s, d);
+  assert.strictEqual(d.mode, 'hold', 'setup: 125 s is past it');
+  const exp = ctx.explainDroneDecision(s, d);
+  assert.ok(/threshold 120(\.0)?\s?s/.test(exp.summary), exp.summary);
+});

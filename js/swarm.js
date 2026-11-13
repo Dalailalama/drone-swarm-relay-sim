@@ -154,6 +154,12 @@ function droneCadence(d) {
   return d.linkCadence || { tlmSec: C2.tlmIntervalSec, cmdSec: C2.cmdIntervalSec };
 }
 
+// C2 silence before the drone holds: three announced order rounds, never
+// under FAILSAFE.holdSec (like PX4's COM_DL_LOSS_T).
+function holdAfterSec(d) {
+  return Math.max(FAILSAFE.holdSec, 3 * droneCadence(d).cmdSec);
+}
+
 let droneSeq = 0;
 const droneBootSeq = new WeakMap();
 
@@ -1832,7 +1838,7 @@ function droneComms(s, d) {
   // Link-loss failsafe ladder. Timeouts scale with the expected command rate
   // (like PX4's COM_DL_LOSS_T) so a slow duty-limited link isn't mistaken for
   // a dead one — the rate C2 last advertised, not one read off its plan.
-  const holdAfter = Math.max(FAILSAFE.holdSec, 3 * droneCadence(d).cmdSec);
+  const holdAfter = holdAfterSec(d);
   const rtlAfter = d.order.role === 'relay'
     ? Math.max(FAILSAFE.rtlRelaySec, 3 * holdAfter)
     : Math.max(FAILSAFE.rtlMissionSec, 2 * holdAfter);
@@ -2643,7 +2649,7 @@ function explainDroneDecision(s, d) {
   } else if (d.mode === 'relink') {
     summary = 'Regaining link (attempt ' + (d.relinkAttempt || 1) + '/' + FAILSAFE.relinkAttempts + '): retreating to last-known good link point';
   } else if (d.mode === 'hold') {
-    summary = 'Holding position: C2 link lost (' + silenceSec.toFixed(1) + 's silence, threshold ' + FAILSAFE.holdSec + 's)';
+    summary = 'Holding position: C2 link lost (' + silenceSec.toFixed(1) + 's silence, threshold ' + holdAfterSec(d).toFixed(1) + 's)';
   } else if (d.tethered) {
     summary = 'Tethered: upstream margin to ' + (d.order.upstream || 'neighbor') + ' degraded to ' + (d.upMarginEma != null ? d.upMarginEma.toFixed(1) : '?') + ' dB — throttling outward motion to protect chain';
   } else if (d.order && d.order.role === 'relay') {
