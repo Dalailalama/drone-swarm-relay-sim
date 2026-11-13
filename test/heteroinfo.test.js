@@ -46,3 +46,29 @@ test('a loaded hetero scenario describes the file\'s wing and tactical radios', 
   assert.match(el('heteroInfo').innerHTML, /ESP-NOW/);
   assert.match(el('heteroInfo').innerHTML, /different radio protocol\/band/);
 });
+
+// Audit finding ui-render/relay-wing-exceeds-fleet: the wing slider (max 15)
+// ignored the fleet size, so count 3 + wing 15 flew three wing drones and no
+// tactical ones while the panel still said "Relay wing 15" and described the
+// tactical radio.
+test('the relay wing always leaves at least one tactical drone, and the panel says how many of each', () => {
+  const { ctx, el, fire } = heteroOn();
+  el('countRange').value = '3'; fire('countRange', 'input'); fire('countRange', 'change');
+  assert.ok(+el('wingRange').max <= 2, 'wing slider max ' + el('wingRange').max + ' for a fleet of 3');
+  assert.ok(+el('wingRange').value <= 2);
+  assert.strictEqual(el('wingOut').textContent, el('wingRange').value);
+  const s = ctx.sim.swarm;
+  const wing = [...s.drones].filter(d => d.radio && d.radio.id !== s.radio.id).length;
+  assert.strictEqual(wing, +el('wingRange').value, 'the swarm flies the wing the slider shows');
+  assert.ok(s.drones.length - wing >= 1, 'at least one tactical drone');
+  assert.match(el('heteroInfo').innerHTML, new RegExp('<b>Tactical:</b> ' + (s.drones.length - wing) + ' × '), el('heteroInfo').innerHTML);
+  el('countRange').value = '12'; fire('countRange', 'input');
+  assert.strictEqual(el('wingRange').max, '11', 'a bigger fleet frees the slider again');
+
+  const sc = { version: 1, radio: 'sik-v3', env: 'open', airframe: 'q450', count: 4, hetero: true, relayWing: 15,
+    relayAirframe: 'x8', relayRadio: 'rfd900x', base: { x: 0, y: 0 }, target: { x: 500, y: -120 } };
+  el('loadScenarioInput').files = [makeFile('w.json', JSON.stringify(sc))];
+  fire('loadScenarioInput', 'change');
+  assert.strictEqual(el('wingRange').value, '3', 'a file asking for more wing than fleet is clamped');
+  assert.strictEqual(el('wingOut').textContent, '3');
+});

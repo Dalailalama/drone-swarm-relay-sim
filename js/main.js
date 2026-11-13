@@ -567,6 +567,7 @@
   countRange.addEventListener('input', () => {
     countOut.textContent = countRange.value;
     el('scaleNote').style.display = +countRange.value >= 60 ? 'block' : 'none';
+    updateHeteroRow(); // the wing's ceiling and the composition follow the fleet size
   });
   countRange.addEventListener('change', () => {
     // resetSwarm ends with syncExternalBridge(), which already re-inits the
@@ -591,8 +592,15 @@
   }
 
   // --- Mixed fleet (heterogeneous swarms) -------------------------------------
+  const WING_MAX = +wingRange.max;
   function updateHeteroRow() {
     heteroRow.style.display = heteroChk.checked ? 'block' : 'none';
+    // The wing never takes the whole fleet: at least one tactical drone stays
+    // (audit ui-render/relay-wing-exceeds-fleet — a wing >= the fleet flew no
+    // tactical drones while the panel still described them).
+    const wingMax = Math.max(1, Math.min(WING_MAX, +countRange.value - 1));
+    wingRange.max = String(wingMax);
+    if (+wingRange.value > wingMax) wingRange.value = String(wingMax);
     if (!heteroChk.checked) return;
     const waf = AIRFRAMES.find(a => a.id === relayAirframeSel.value);
     const wr = RADIOS.find(r => r.id === relayRadioSel.value);
@@ -600,14 +608,14 @@
     if (waf && wr) {
       const bandOk = bandCompatible(wr, radio);
       heteroInfo.innerHTML =
-        '<b>Relay wing:</b> ' + escHtml(waf.name) + ' (~' + Math.round(hoverEnduranceMin(waf)) +
+        '<b>Relay wing:</b> ' + wingRange.value + ' × ' + escHtml(waf.name) + ' (~' + Math.round(hoverEnduranceMin(waf)) +
         ' min hover) on <b>' + escHtml(wr.name) + '</b> — usable ' + fmtDist(usableRangeM(wr, env.factor)) +
         (bandOk ? '' : ' <b style="color:var(--lost)">· different radio protocol/band from the tactical radio: the wing can bridge C2↔wing and wing↔wing, but tactical drones only link to their own kind</b>') +
-        '.<br><b>Tactical:</b> ' + escHtml(airframe.name) + ' on ' + escHtml(radio.name) + ' — usable ' + fmtDist(usableRangeM(radio, env.factor)) + '.';
+        '.<br><b>Tactical:</b> ' + (+countRange.value - +wingRange.value) + ' × ' + escHtml(airframe.name) + ' on ' + escHtml(radio.name) + ' — usable ' + fmtDist(usableRangeM(radio, env.factor)) + '.';
     }
   }
   heteroChk.addEventListener('change', () => { updateHeteroRow(); resetSwarm(); });
-  wingRange.addEventListener('input', () => { wingOut.textContent = wingRange.value; });
+  wingRange.addEventListener('input', updateHeteroRow);
   wingRange.addEventListener('change', () => { if (heteroChk.checked) resetSwarm(); });
   relayAirframeSel.addEventListener('change', () => { updateHeteroRow(); if (heteroChk.checked) resetSwarm(); });
   relayRadioSel.addEventListener('change', () => { updateHeteroRow(); if (heteroChk.checked) resetSwarm(); });
