@@ -93,3 +93,27 @@ test('.gitignore covers batch reports and local Python venvs', () => {
   const lines = fs.readFileSync(path.join(ROOT, '.gitignore'), 'utf8').split(/\r?\n/).map(l => l.trim());
   for (const p of ['out/', '.venv/', 'venv/']) assert.ok(lines.includes(p), '.gitignore should list ' + p);
 });
+
+// pages-ungated: the live demo was branch-served by the built-in Pages
+// builder, which ran in parallel with CI, so a commit that failed tests went
+// live anyway — and ran Jekyll over the whole tree for nothing.
+test('the Pages deploy runs only for a main push after every CI job passed, with write scopes on that job alone', () => {
+  const dep = job('deploy-pages');
+  const needs = (dep.match(/\n    needs:\s*\[([^\]]*)\]/) || [])[1];
+  assert.ok(needs, 'deploy-pages must declare needs');
+  for (const j of ['whitespace-and-lint', 'test-javascript', 'test-python']) {
+    assert.ok(needs.split(',').map(s => s.trim()).includes(j), 'deploy-pages must wait for ' + j);
+  }
+  const cond = (dep.match(/\n    if:\s*([^\n]+)/) || [])[1] || '';
+  assert.match(cond, /github\.event_name == 'push'/, 'never deploy a pull request');
+  assert.match(cond, /github\.ref == 'refs\/heads\/main'/, 'deploy main only');
+  assert.match(dep, /\n    permissions:\n(      [\w-]+: \w+\n)*      pages: write\n/, 'pages: write on the deploy job');
+  assert.match(dep, /\n      id-token: write\n/, 'id-token: write on the deploy job');
+  assert.match(dep, /uses: actions\/upload-pages-artifact@v\d+/);
+  assert.match(dep, /uses: actions\/deploy-pages@v\d+/);
+  assert.match(CI, /\npermissions:\n  contents: read\n/, 'the top-level token stays read-only');
+  for (const j of ['whitespace-and-lint', 'test-javascript', 'test-python']) {
+    assert.ok(!/pages: write|id-token: write/.test(job(j)), j + ' must not get Pages write scopes');
+  }
+  assert.ok(fs.existsSync(path.join(ROOT, '.nojekyll')), '.nojekyll: the site is plain static files, no Jekyll pass');
+});
