@@ -189,3 +189,25 @@ test('decline log reports battery % against the drone\'s own airframe, not the f
     assert.strictEqual(pct, Math.round(25 / A.usableWh(X8) * 100), e.msg);
   }
 });
+
+// The page always passes the relay-radio selector (RFD900x by default), even
+// with the relay wing off. No drone carries that radio, yet the routing span
+// prefilter widened to its range and C2 sent a second broadcast on it when
+// it could not hear the tactical radio — so a page run and its capture replay
+// (which drops the unflown radio) diverged, and an ESP-NOW fleet lost half
+// its deliveries to a radio nobody flies.
+test('a relay radio that no drone flies (wing 0) changes nothing', () => {
+  const run = (radio, extra) => {
+    const s = ctx.makeSwarm(Object.assign({
+      count: 6, airframe: A.AIRFRAMES.find(a => a.id === 'q450'), radio,
+      envFactor: 0.2, shadowSigmaDb: 6.5, targetX: 420, targetY: -160, altitudeM: 60, seed: 77,
+      jammers: [{ x: 210, y: -60, erpDbm: 18, band: 'all', altM: 15, on: true }],
+    }, extra));
+    while (s.time < 90) ctx.stepSwarm(s, 0.05);
+    return s.net.delivered + ' ' + s.drones.map(d => d.x + ',' + d.y).join(';');
+  };
+  for (const radio of [SIK, ESP]) {
+    assert.strictEqual(run(radio, { relayWing: 0, relayAirframe: X8, relayRadio: RFD }), run(radio, {}),
+      radio.id + ' fleet diverged because of an unflown relay radio');
+  }
+});

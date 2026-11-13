@@ -195,6 +195,7 @@ function makeDrone(x, y, target, rng, airframe, radio, cls) {
 
 function makeSwarm(opts) {
   droneSeq = 0;
+  const wingOn = !!(opts.relayWing > 0 && opts.relayAirframe && opts.relayRadio);
   const s = {
     base: {
       x: (opts.base && opts.base.x != null) ? opts.base.x : (opts.baseX != null ? opts.baseX : 0),
@@ -217,10 +218,11 @@ function makeSwarm(opts) {
     shadowSigmaDb: opts.shadowSigmaDb || 0,
     // Heterogeneous fleet (js/fleet.js): relayWing drones carry the heavy
     // radio + endurance airframe and hold the chain; the rest fly tactical.
-    relayAirframe: opts.relayAirframe || null,
-    relayRadio: opts.relayRadio || null,
-    relayIdx: (opts.relayWing > 0 && opts.relayAirframe && opts.relayRadio)
-      ? relayClassIndices(opts.count, opts.relayWing) : [],
+    // Only a flown wing has them: the page passes its selectors even with the
+    // wing off, and an unflown radio must not widen routing or draw airtime.
+    relayAirframe: wingOn ? opts.relayAirframe : null,
+    relayRadio: wingOn ? opts.relayRadio : null,
+    relayIdx: wingOn ? relayClassIndices(opts.count, opts.relayWing) : [],
     terrain: opts.terrain || makeTerrain('flat'),
     jammers: opts.jammers ? opts.jammers.map(j => ({ ...j })) : [],
     gpsZones: opts.gpsZones ? opts.gpsZones.map(z => ({ ...z })) : [],
