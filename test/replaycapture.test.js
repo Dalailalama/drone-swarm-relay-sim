@@ -206,4 +206,3 @@ test('C-replay: an action taken before capture is switched on still replays', ()
   assert.ok(meta.captureStartT > 0, 'the header must say when packet capture began');
   assertReplayMatches(s, rep);
 });
-
