@@ -76,13 +76,20 @@ GUIDED_MODE_ID = 4  # ArduCopter's GUIDED custom_mode
 class FakeMsg:
     """A MAVLink message: a type name plus whatever fields it carries."""
 
-    def __init__(self, mtype: str, **fields):
+    def __init__(self, mtype: str, src: tuple = (1, 1), **fields):
         self._mtype = mtype
+        self._src = src  # (sysid, compid): the vehicle's autopilot by default
         for k, v in fields.items():
             setattr(self, k, v)
 
     def get_type(self) -> str:
         return self._mtype
+
+    def get_srcSystem(self) -> int:
+        return self._src[0]
+
+    def get_srcComponent(self) -> int:
+        return self._src[1]
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return f"<{self._mtype} {self.__dict__}>"
@@ -93,6 +100,8 @@ def hb_msg(armed: bool = False, custom_mode: int = 0) -> FakeMsg:
         "HEARTBEAT",
         base_mode=(MAV_MODE_FLAG_SAFETY_ARMED if armed else 0),
         custom_mode=custom_mode,
+        type=2,       # MAV_TYPE_QUADROTOR
+        autopilot=3,  # MAV_AUTOPILOT_ARDUPILOTMEGA
     )
 
 
@@ -130,6 +139,9 @@ class FakeMav:
     ):
         self.conn.sent.append(("setpoint", {"north": north, "east": east, "down": down,
                                             "frame": frame, "mask": type_mask}))
+
+    def heartbeat_send(self, mav_type, autopilot, base_mode, custom_mode, system_status, *rest):
+        self.conn.sent.append(("gcs_heartbeat", (mav_type, autopilot, system_status)))
 
 
 class FakeConn:
@@ -723,6 +735,9 @@ async def scenario_goals_ownership() -> None:
     sp = c1.details("setpoint")[0]
     assert sp["north"] == -4.0 and sp["east"] == 10.0 and sp["down"] == -25.0, sp
     assert sp["frame"] == MAV_FRAME_LOCAL_NED and sp["mask"] == bridge.POSITION_TARGET_TYPEMASK, sp
+    # ArduPilot's documented position-only mask: ignore vx..afz (8..256) and
+    # yaw/yaw_rate (1024, 2048), keep x/y/z, and leave FORCE_SET (512) clear.
+    assert sp["mask"] == 0b110111111000 == 3576 and not sp["mask"] & 512, sp
 
     bridge.client_disconnected(ws1)
     ws3 = h.client("browser-3")
@@ -1288,6 +1303,20 @@ async def scenario_c04_airborne_and_grounded_abort():
         # Ensure hold setpoint was dispatched
         assert conn.count("setpoint") >= 1
 
+        # ...and re-sent at most every STEP_RESEND_DT, not on every 20 ms
+        # poll (an identical target at 50/s floods a telemetry radio)
+        holds = conn.count("setpoint")
+        for _ in range(10):
+            await bridge._advance_init(v)
+        assert conn.count("setpoint") == holds, f"hold target re-sent {conn.count('setpoint') - holds}x within one poll window"
+        clock.now = 0.5 + bridge.STEP_RESEND_DT
+        conn.push(hb_msg(armed=True, custom_mode=GUIDED_MODE_ID))
+        conn.push(pos_msg(-8.0, 12.0, -20.0))
+        bridge._drain_messages(v)
+        await bridge._advance_init(v)
+        await bridge._advance_init(v)
+        assert conn.count("setpoint") == holds + 1, "the hold target is refreshed once per STEP_RESEND_DT"
+
         # While in abort-hold, regular goals are ignored
         sent_before = len(conn.sent)
         await dispatch_goals(ws)
@@ -1376,8 +1405,9 @@ async def scenario_c04_airborne_and_grounded_abort():
         sp1 = conn.details("setpoint")[0]
         assert sp1["north"] == -20.0 and sp1["east"] == 15.0 and sp1["down"] == -18.0
 
-        # Further ticks retain the captured hold target despite drift
-        clock.now += 0.1
+        # Further ticks retain the captured hold target despite drift (the
+        # target is refreshed once per STEP_RESEND_DT, not on every poll)
+        clock.now += bridge.STEP_RESEND_DT
         conn.push(pos_msg(-19.0, 16.0, -18.2))
         bridge._drain_messages(v)
         await bridge._advance_init(v)
@@ -1872,6 +1902,91 @@ async def scenario_foreign_origin_rejected() -> None:
         assert check(Conn(), Req(origin)) is None, origin
 
 
+async def scenario_init_count_bounded() -> None:
+    """An init's count comes off the network: a huge one is clamped (with a
+    status) instead of building a vehicle and UDP task per requested unit."""
+    h = Harness()
+    ws = h.client("browser-1")
+    task = h.init(ws, count=5000, alt=40.0)
+    try:
+        assert await wait_until(lambda: len(bridge.STATE.vehicles) > 0), "init built no vehicles"
+        assert len(bridge.STATE.vehicles) <= 256, len(bridge.STATE.vehicles)
+        assert ws.said("exceeds limit"), ws.statuses()
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        await h.close()
+
+
+async def scenario_malformed_messages_keep_connection() -> None:
+    """Shape-invalid JSON is logged and skipped; it must not end the
+    connection (1011) and with it drop the controller."""
+    h = Harness()
+
+    class StreamWebsocket(FakeWebsocket):
+        def __init__(self, name, raws):
+            super().__init__(name)
+            self.raws = raws
+
+        async def __aiter__(self):
+            for raw in self.raws:
+                yield raw
+
+    bad = ["[]", "42", '{"type":"goals","goals":[1]}', '{"type":"goals","goals":null}',
+           '{"type":"init","count":"three"}', '{"type":"service","id":["DR-1"],"requestId":"r","action":"land"}']
+    ws = StreamWebsocket("browser-1", bad + [json.dumps({"type": "init", "count": 0, "alt": 40.0})])
+    try:
+        await bridge.make_handler(None, 14550)(ws)
+        assert ws.of_type("ready"), f"the init after the malformed messages was never handled: {ws.messages}"
+    finally:
+        await h.close()
+
+
+async def scenario_gcs_heartbeat_sent() -> None:
+    """The bridge is the vehicle's GCS: once it has heard the vehicle it sends a
+    GCS HEARTBEAT (~1 Hz), so ArduPilot's GCS-loss failsafe can engage when
+    the bridge dies. Without one, gcs_last_seen_ms stays 0 and it never does."""
+    h = Harness()
+    ws = h.client("browser-1")
+    h.autopilot(14550, target_alt=30.0)
+    init_task = h.init(ws, count=1, alt=30.0)
+    try:
+        assert await wait_until(lambda: conn_for(14550).count("gcs_heartbeat") >= 1, timeout=3.0), \
+            f"no GCS HEARTBEAT sent to the vehicle: {conn_for(14550).kinds()}"
+        mav_type, autopilot, state = conn_for(14550).details("gcs_heartbeat")[0]
+        assert (mav_type, autopilot, state) == (6, 8, 4), "MAV_TYPE_GCS / MAV_AUTOPILOT_INVALID / MAV_STATE_ACTIVE"
+    finally:
+        init_task.cancel()
+        await asyncio.gather(init_task, return_exceptions=True)
+        await h.close()
+
+
+async def scenario_foreign_mavlink_source_ignored() -> None:
+    """ArduPilot routes a GCS's (Mission Planner, MAVProxy) HEARTBEAT and
+    COMMAND_ACKs onto the bridge's link; they must not overwrite the
+    vehicle's armed/mode state or answer the bridge's commands."""
+    conn = FakeConn("udpin:localhost:14990")
+    v = bridge.Vehicle(id="DR-1", index=0, port=14990, conn=conn)
+    conn.push(hb_msg(armed=True, custom_mode=GUIDED_MODE_ID))
+    bridge._drain_messages(v)
+    assert v.base_mode & MAV_MODE_FLAG_SAFETY_ARMED and v.custom_mode == GUIDED_MODE_ID
+    seen = v.last_heartbeat
+    gcs_hb = FakeMsg("HEARTBEAT", src=(255, 190), base_mode=0, custom_mode=0, type=6, autopilot=8)
+    conn.push(gcs_hb)
+    conn.push(FakeMsg("HEARTBEAT", src=(2, 1), base_mode=0, custom_mode=0, type=2, autopilot=3))
+    conn.push(FakeMsg("COMMAND_ACK", src=(255, 190), command=MAV_CMD_NAV_LAND, result=4))
+    conn.push(FakeMsg("LOCAL_POSITION_NED", src=(2, 1), x=900.0, y=900.0, z=-5.0))
+    bridge._drain_messages(v)
+    assert v.base_mode & MAV_MODE_FLAG_SAFETY_ARMED, "a GCS/other-vehicle heartbeat disarmed the vehicle's state"
+    assert v.custom_mode == GUIDED_MODE_ID, "a foreign heartbeat changed the vehicle's mode"
+    assert v.last_heartbeat == seen, "a foreign heartbeat refreshed the vehicle's link"
+    assert MAV_CMD_NAV_LAND not in v.acks, "a GCS's COMMAND_ACK answered the bridge's command"
+    assert v.last_position is None, "another system's position was taken as the vehicle's"
+    conn.push(ack_msg(MAV_CMD_NAV_LAND))
+    bridge._drain_messages(v)
+    assert v.acks.get(MAV_CMD_NAV_LAND) == MAV_RESULT_ACCEPTED
+
+
 SCENARIOS = [
     ("#12: not READY at lift-off; READY at the takeoff altitude", scenario_ready_needs_takeoff_altitude),
     ("#12: a long steady climb is not failed by the step timeout", scenario_long_climb_not_timed_out),
@@ -1901,6 +2016,10 @@ SCENARIOS = [
     ("ownership: a second client's init is refused while the controller is connected", scenario_second_client_blocked),
     ("ownership: goals from a non-controller are not forwarded", scenario_goals_ownership),
     ("CSWSH: a foreign web Origin is refused at the handshake", scenario_foreign_origin_rejected),
+    ("init: a huge vehicle count is clamped", scenario_init_count_bounded),
+    ("malformed messages are skipped without dropping the connection", scenario_malformed_messages_keep_connection),
+    ("the bridge sends a GCS HEARTBEAT once it hears the vehicle", scenario_gcs_heartbeat_sent),
+    ("MAVLink from a GCS or another system id is ignored", scenario_foreign_mavlink_source_ignored),
 ]
 
 

@@ -86,6 +86,9 @@ jobs:
       - name: Run Automated Failure Scenarios test suite
         run: python -B sitl/test_failure_scenarios.py
 
+      - name: Run TAK bridge test suite
+        run: python -B sitl/test_tak_bridge.py
+
       - name: Run end-to-end acceptance against the executable mock
         run: python -B sitl/run_acceptance.py --mode mock --report "$RUNNER_TEMP/acceptance_mock.json" --logs-dir "$RUNNER_TEMP/acceptance-logs"
 

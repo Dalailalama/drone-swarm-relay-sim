@@ -551,6 +551,34 @@ async def test_foreign_origin_rejected_at_handshake():
             pass
 
 
+async def test_init_count_is_bounded():
+    """An init's vehicle count comes off the network: a huge one is clamped
+    instead of building millions of vehicles inside the event loop."""
+    w = World()
+    ids = w.reset(5000, 30.0)
+    assert 0 < len(ids) <= 256 and len(w.vehicles) == len(ids), len(ids)
+    assert w.reset(-3, 30.0) == [] and not w.vehicles
+
+
+async def test_malformed_messages_keep_connection():
+    """Shape-invalid JSON is logged and skipped; it must not end the
+    connection (1011) and with it drop the controller."""
+    mock_vehicles.WORLD = World()
+
+    class StreamWebSocket(MockWebSocket):
+        async def __aiter__(self):
+            for raw in self.raws:
+                yield raw
+
+    bad = ["[]", "42", '{"type":"goals","goals":[1]}', '{"type":"goals","goals":null}',
+           '{"type":"init","count":"three"}', '{"type":"service","id":["DR-1"],"requestId":"r","action":"land"}']
+    ws = StreamWebSocket()
+    ws.raws = bad + [json.dumps({"type": "init", "count": 1, "alt": 30.0})]
+    await mock_vehicles.handler(ws)
+    assert any(json.loads(m).get("type") == "ready" for m in ws.sent), \
+        "the init after the malformed messages was never handled"
+
+
 SCENARIOS = [
     ("Mock: startup, physics tick, and telemetry schema", test_startup_physics_telemetry),
     ("Mock: origin coordinates not double-offset in apply_goals", test_origin_coordinates_not_double_offset),
@@ -561,6 +589,8 @@ SCENARIOS = [
     ("Mock: service ACKs, retryable rejection recovery, and duplicate suppression", test_service_acks_and_idempotency),
     ("Mock: two consecutive complete service cycles", test_two_consecutive_complete_service_cycles),
     ("Mock: foreign web Origin rejected at the handshake", test_foreign_origin_rejected_at_handshake),
+    ("Mock: init vehicle count is bounded", test_init_count_is_bounded),
+    ("Mock: malformed messages are skipped without dropping the connection", test_malformed_messages_keep_connection),
 ]
 
 

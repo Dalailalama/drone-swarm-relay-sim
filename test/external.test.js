@@ -214,7 +214,7 @@ asyncio.run(run())
   ui.ctx.externalPushGoals(s);
   const goals = ws.sent.map(JSON.parse).filter(m => m.type === 'goals').at(-1);
   assert.deepStrictEqual(goals.goals, [{ id: d.id, x: 10, y: 4, alt: 120 }]);
-  assert.deepStrictEqual(exchange(goals).setpoints, [{ north: -4, east: 10, down: -120, frame: 1, mask: 4088 }]);
+  assert.deepStrictEqual(exchange(goals).setpoints, [{ north: -4, east: 10, down: -120, frame: 1, mask: 3576 }]);
   sendTelemetry(ws, 3, [response.samples[2]]);
   ui.ctx.externalPullPositions(s);
   assert.deepStrictEqual([d.x, d.y, d.altM], [1010, 504, 0]);

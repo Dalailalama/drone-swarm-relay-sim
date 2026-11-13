@@ -149,6 +149,10 @@ from ws_origin import add_origin_argument, make_origin_check
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("bridge")
 
+# Upper bound on an init's vehicle count. The count arrives over the network,
+# and each vehicle costs a UDP socket and an asyncio task, so it is clamped
+# (headroom over the UI's 120-drone slider; base port + 10*255 stays < 65536).
+MAX_VEHICLES = 256
 TELEMETRY_HZ = 10.0
 TELEMETRY_DT = 1.0 / TELEMETRY_HZ
 POSITION_STALE_S = 3.0
@@ -187,10 +191,10 @@ FAILED_PREFIX = "failed:"  # + step name, e.g. "failed:arm", "failed:no-heartbea
 # message's fields to *ignore*. We only ever want to command position
 # (x, y, z), so we set the bits for velocity (vx,vy,vz), acceleration
 # (afx,afy,afz), yaw and yaw_rate to "ignore", leaving position bits clear
-# (i.e. "use them"). The value 0b0000111111111000 (= 4088 decimal) is the
-# conventional "position-only" mask used throughout the ArduPilot/dronekit
-# ecosystem's own example scripts for exactly this purpose.
-POSITION_TARGET_TYPEMASK = 0b0000111111111000
+# (i.e. "use them"). Bit 512 is FORCE_SET ("acceleration is a force"), not
+# an ignore bit, so it stays clear: 0b0000110111111000 (= 3576 decimal) is
+# ArduPilot's documented "Use Position" mask for GUIDED mode.
+POSITION_TARGET_TYPEMASK = 0b0000110111111000
 
 # MAV_CMD_SET_MESSAGE_INTERVAL (id 511) lets us ask the autopilot to stream
 # LOCAL_POSITION_NED faster than its default rate, so our 10 Hz telemetry
@@ -198,6 +202,24 @@ POSITION_TARGET_TYPEMASK = 0b0000111111111000
 # altitude to confirm a climb against.  param1 = message id to configure,
 # param2 = desired interval in microseconds (0 = default rate, -1 = disable).
 MAV_CMD_SET_MESSAGE_INTERVAL = 511
+
+# The bridge is each vehicle's GCS, so it sends a GCS HEARTBEAT at 1 Hz once
+# it has heard the vehicle (before that, udpin has no address to send to).
+# ArduPilot only arms its GCS-loss failsafe (FS_GCS_ENABLE) after it has seen
+# a GCS heartbeat from SYSID_MYGCS (255, pymavlink's default source system);
+# without one a dead bridge leaves the vehicle holding its last target forever.
+GCS_HEARTBEAT_DT = 1.0
+MAV_TYPE_GCS = 6
+MAV_AUTOPILOT_INVALID = 8
+MAV_STATE_ACTIVE = 4
+
+# ArduPilot forwards traffic between its links, so a GCS (Mission Planner,
+# MAVProxy), gimbal, ADS-B receiver or companion on another port reaches the
+# bridge too. Only the vehicle's own autopilot -- locked from the first
+# heartbeat that looks like one (pymavlink's probably_vehicle_heartbeat, plus
+# compid MAV_COMP_ID_AUTOPILOT1) -- may update its state or answer commands.
+NON_VEHICLE_MAV_TYPES = (6, 18, 26, 27)  # GCS, ONBOARD_CONTROLLER, GIMBAL, ADSB
+MAV_COMP_ID_AUTOPILOT1 = 1
 LOCAL_POSITION_NED_INTERVAL_US = int(1_000_000 / TELEMETRY_HZ)
 
 MAVLINK_MSG_ID_EXTENDED_SYS_STATE = 245
@@ -252,6 +274,7 @@ class Vehicle:
     custom_mode: Optional[int] = None  # latest HEARTBEAT.custom_mode (ArduPilot flight mode id)
     guided_mode_id: Optional[int] = None  # from conn.mode_mapping()["GUIDED"], resolved after heartbeat
     acks: dict = field(default_factory=dict)  # MAV_CMD id -> latest COMMAND_ACK result
+    autopilot_src: Optional[tuple] = None  # (sysid, compid) of the vehicle's autopilot, once heard
     # Latest known position, already converted into the *sim* coordinate frame.
     x: float = 0.0
     y: float = 0.0
@@ -536,6 +559,14 @@ def _drain_messages(vehicle: Vehicle) -> None:
         if msg is None:
             return
         mtype = msg.get_type()
+        src = (msg.get_srcSystem(), msg.get_srcComponent())
+        if (mtype == "HEARTBEAT" and vehicle.autopilot_src is None
+                and src[1] == MAV_COMP_ID_AUTOPILOT1
+                and getattr(msg, "type", None) not in NON_VEHICLE_MAV_TYPES
+                and getattr(msg, "autopilot", None) != MAV_AUTOPILOT_INVALID):
+            vehicle.autopilot_src = src
+        if src != vehicle.autopilot_src:
+            continue  # another system routed onto this link (see NON_VEHICLE_MAV_TYPES)
         if mtype == "HEARTBEAT":
             vehicle.last_heartbeat = _now()
             vehicle.base_mode = int(getattr(msg, "base_mode", 0) or 0)
@@ -751,8 +782,13 @@ async def _advance_init(vehicle: Vehicle) -> None:
                 f"vehicle {vehicle.id}: abort hold lost (heartbeat reports mode {vehicle.custom_mode}), re-requesting GUIDED",
             )
             return
-        if vehicle.conn is not None and vehicle.connected and vehicle.mode_confirmed and vehicle.position_fresh:
+        # GUIDED position targets don't time out, so refresh the hold every
+        # STEP_RESEND_DT rather than on every poll (50/s would flood a
+        # telemetry radio).
+        if vehicle.conn is not None and vehicle.connected and vehicle.mode_confirmed and vehicle.position_fresh \
+                and now - vehicle.step_sent_at >= STEP_RESEND_DT:
             _send_hold_target(vehicle)
+            vehicle.step_sent_at = now
         return
 
     if state == "aborted" or vehicle.service_phase == "aborted":
@@ -920,10 +956,15 @@ async def vehicle_task(vehicle: Vehicle) -> None:
     vehicle.step_sent_at = vehicle.step_started_at
     await _vehicle_status(vehicle, f"vehicle {vehicle.id}: listening for heartbeat on udp:{vehicle.port} ...")
 
+    gcs_heartbeat_at = None
     while True:
         try:
             _drain_messages(vehicle)
             await _advance_init(vehicle)
+            if vehicle.last_heartbeat is not None and (
+                    gcs_heartbeat_at is None or _now() - gcs_heartbeat_at >= GCS_HEARTBEAT_DT):
+                vehicle.conn.mav.heartbeat_send(MAV_TYPE_GCS, MAV_AUTOPILOT_INVALID, 0, 0, MAV_STATE_ACTIVE)
+                gcs_heartbeat_at = _now()
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # pragma: no cover - defensive: one bad poll must not kill the vehicle
@@ -1039,7 +1080,10 @@ async def handle_init(websocket, msg: dict, cli_count: Optional[int], base_port:
         if not await _may_control(websocket, acquire=True) or not _owns_control(websocket):
             return
 
-        count = cli_count if cli_count is not None else int(msg.get("count", 0))
+        requested = cli_count if cli_count is not None else int(msg.get("count", 0))
+        count = max(0, min(requested, MAX_VEHICLES))
+        if requested > MAX_VEHICLES:
+            await send_status(websocket, f"bridge: requested {requested} vehicles exceeds limit {MAX_VEHICLES}; clamping")
         alt = float(msg.get("alt", 50))
         supplied_origin = msg.get("origin", {"frame": "common-local-origin", "x": 0.0, "y": 0.0, "groundM": 0.0})
         if not isinstance(supplied_origin, dict) or supplied_origin.get("frame") != "common-local-origin":
@@ -1359,7 +1403,16 @@ def make_handler(cli_count: Optional[int], base_port: int):
         client_connected(websocket)
         try:
             async for raw in websocket:
-                await handle_message(websocket, raw, cli_count, base_port)
+                try:
+                    await handle_message(websocket, raw, cli_count, base_port)
+                except ConnectionClosed:
+                    raise
+                except Exception as e:
+                    # A shape-invalid message (a list, a non-numeric count, a
+                    # null goals list...) must not end the connection (1011)
+                    # and with it drop the controller: skip it and say so.
+                    log.warning("ignoring malformed message %r: %r", str(raw)[:200], e)
+                    await send_status(websocket, "bridge: ignored a malformed message")
         except ConnectionClosed:
             pass
         finally:
