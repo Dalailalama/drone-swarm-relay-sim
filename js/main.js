@@ -1539,7 +1539,8 @@
       : '—';
     chanLine.textContent = 'Channel busy ' + (swarm.net.utilization * 100).toFixed(1) + '% with C2 traffic'
       + (radio.dutyCycle ? ' · ' + (radio.dutyCycle * 100) + '% legal duty cycle' : '');
-    kpiClock.textContent = fmtSimClock(swarm.time);
+    kpiClock.textContent = fmtSimClock(swarm.time)
+      + (!paused && achievedRate && Math.abs(achievedRate - rateScale) > 0.05 * rateScale ? ' · ' + Math.round(achievedRate) + '×' : '');
 
     if (!status.aliveCount) {
       statusPill.textContent = 'Swarm down';
@@ -1813,6 +1814,13 @@
   let panelAccum = 0;
   let simAccum = 0;
   const FIXED_SIM_STEP_SEC = SIM_DT_SEC; // ONE step policy across browser/batch/bench (finding #28)
+  // A frame steps a whole number of steps within STEP_BUDGET_MS; a backlog
+  // the CPU cannot clear is dropped, never carried (no spiral, no lag after a
+  // speed change), and the clock KPI shows the achieved rate whenever it
+  // falls short of the selected one (audit ui-render/speed-120x-capped: a
+  // flat 1 sim-s/frame cap made 120× about 57× at 60 Hz, silently).
+  const STEP_BUDGET_MS = 10;
+  let rateSim = 0, rateWall = 0, achievedRate = 0, rateScale = 0;
   let frameErrorMsg = null; // last frame failure already shown to the operator
   function frame(now) {
     try {
@@ -1825,11 +1833,17 @@
         // driving the drones; force 1x so sim time tracks the wall clock.
         const scale = (typeof externalActive === 'function' && externalActive()) ? 1 : timeScale;
         simAccum += realDt * scale;
-        if (simAccum > 1.0) simAccum = 1.0;
-        while (simAccum >= FIXED_SIM_STEP_SEC) {
+        const want = Math.floor(simAccum / FIXED_SIM_STEP_SEC + 1e-9);
+        const t0 = performance.now();
+        let done = 0;
+        while (done < want && (done === 0 || performance.now() - t0 < STEP_BUDGET_MS)) {
           status = stepSwarm(swarm, FIXED_SIM_STEP_SEC);
-          simAccum -= FIXED_SIM_STEP_SEC;
+          done++;
         }
+        simAccum = done < want ? 0 : Math.max(0, simAccum - done * FIXED_SIM_STEP_SEC);
+        if (scale !== rateScale) { rateScale = scale; rateSim = rateWall = achievedRate = 0; }
+        rateSim += done * FIXED_SIM_STEP_SEC; rateWall += realDt;
+        if (rateWall >= 1) { achievedRate = rateSim / rateWall; rateSim = rateWall = 0; }
       }
       if (!status) status = chainStatus(swarm);
 
