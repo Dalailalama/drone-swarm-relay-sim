@@ -37,7 +37,7 @@ const FAILSAFE = {
   holdSec: 8,          // silence before a drone freezes in place
   rtlMissionSec: 30,   // silence before a mission drone retreats to regain link
   rtlRelaySec: 90,     // relays hold much longer — they ARE the link
-  relinkWaitSec: 35,   // listen time at each relink attempt point
+  relinkWaitSec: 35,   // listen time floor at each relink attempt point (see relinkListenSec)
   relinkArriveM: 40,   // "close enough" to an attempt point
   relinkAttempts: 3,   // tries before giving up and flying home to C2
   relinkStepFrac: 0.7, // each failed attempt falls back this fraction of usable range toward base
@@ -163,6 +163,14 @@ function droneCadence(d) {
 // under FAILSAFE.holdSec (like PX4's COM_DL_LOSS_T).
 function holdAfterSec(d) {
   return Math.max(FAILSAFE.holdSec, 3 * droneCadence(d).cmdSec);
+}
+
+// Listen time at a relink point, by the same rule: three announced order
+// rounds, never under FAILSAFE.relinkWaitSec. A fixed 35 s on a slow unicast
+// link was shorter than one round, so the drone moved on before C2 could
+// even reach it.
+function relinkListenSec(d) {
+  return Math.max(FAILSAFE.relinkWaitSec, 3 * droneCadence(d).cmdSec);
 }
 
 let droneSeq = 0;
@@ -1240,6 +1248,9 @@ function c2Step(s) {
         ackSeqs.push(pt.seq);
         if (pt.seq <= applied.floor || applied.seen.has(pt.seq)) continue;
         applied.seen.add(pt.seq);
+        // Logged without a GNSS fix: dead reckoning, ACKed but never painted,
+        // as for a denied live report (C2-08).
+        if (pt.gps === 'denied') continue;
         covMark(s, pt.x, pt.y, 'bad', 3);
         freshSamples++;
       }
@@ -1738,6 +1749,11 @@ function droneComms(s, d) {
     const changed = sig !== (d.order.role + '/' + Math.round(cg.x) + ',' + Math.round(cg.y));
     if (changed && !orderFeasible(s, d, o) &&
         (orderFeasible(s, d, d.order) || orderEnergyWh(s, d, o) > orderEnergyWh(s, d, d.order))) {
+      // Already flying home on RTB: the order is not taken, but there is
+      // nothing to decline — no log line per order on the way home, no latch.
+      // RTB stops telemetry and a relaunch clears the latch, so C2 never
+      // heard of these declines anyway.
+      if (d.mode === 'rtb') continue;
       d.rejectedRole = o.role;
       if (d.rejectedSig !== sig) {
         d.rejectedSig = sig;
@@ -1783,7 +1799,7 @@ function droneComms(s, d) {
       let maxSeq = 0;
       for (let i = 0; i < d.deadLog.length; i++) {
         const sample = d.deadLog[i];
-        list.push({ x: sample.x, y: sample.y, seq: sample.seq });
+        list.push({ x: sample.x, y: sample.y, seq: sample.seq, gps: sample.gps });
         if (sample.seq > maxSeq) maxSeq = sample.seq;
       }
       if (list.length > 0) {
@@ -1804,7 +1820,8 @@ function droneComms(s, d) {
       deadLogSession: d.deadLogSession,
       posAt: s.time,
       // Riding samples aren't free: each packed {x, y, seq} row costs real
-      // bytes on the air on top of the base telemetry frame (finding #17).
+      // bytes on the air on top of the base telemetry frame (finding #17);
+      // the one-bit gps flag rides in a spare bit of seq.
     }, NET.tlmBytes + 8 + (unacked ? unacked.length * 10 : 0));
   }
 
@@ -1836,6 +1853,9 @@ function droneComms(s, d) {
         // truth would be data the vehicle doesn't possess.
         x: d.gpsDenied ? d.belX : d.x + GPS_SIGMA_M * gaussian(s.net.rng),
         y: d.gpsDenied ? d.belY : d.y + GPS_SIGMA_M * gaussian(s.net.rng),
+        // ...and says so, as the live report does: C2 must not paint a
+        // dead-reckoned sample RF-bad (C2-08, black-box path).
+        gps: d.gpsDenied ? 'denied' : 'ok',
       });
     }
   }
@@ -1867,7 +1887,7 @@ function droneComms(s, d) {
     // in — a truth test never fired while GNSS-denied (audit ONB-02).
     if (d.relinkUntil === null &&
         Math.hypot(d.belX - d.relinkGoalX, d.belY - d.relinkGoalY) < FAILSAFE.relinkArriveM) {
-      d.relinkUntil = s.time + FAILSAFE.relinkWaitSec;
+      d.relinkUntil = s.time + relinkListenSec(d);
     }
     // A point it can't get to (inside a tower, upwind of what it can beat)
     // still expires, so the ladder always moves on.
@@ -1895,11 +1915,18 @@ function droneComms(s, d) {
   }
 }
 
-// Deadline for reaching the current relink point: generous transit time at
-// full airspeed from where the drone believes it is, plus the listen time.
+// Deadline for reaching the current relink point: generous transit time from
+// where the drone believes it is, plus the listen time. Transit is flown at
+// the ground speed the wind leaves along the leg, as the energy feasibility
+// flies it: sized on airspeed, a reachable point in a strong headwind expired
+// before the drone got there. A leg that can't be flown keeps the airspeed
+// allowance, so the ladder still moves on.
 function relinkGiveUpAt(s, d) {
-  const legM = Math.hypot(d.relinkGoalX - d.belX, d.relinkGoalY - d.belY);
-  return s.time + FAILSAFE.relinkTransitFactor * legM / afOf(s, d).maxSpeedMs + FAILSAFE.relinkWaitSec;
+  const af = afOf(s, d);
+  const here = { x: d.belX, y: d.belY }, goal = { x: d.relinkGoalX, y: d.relinkGoalY };
+  const legM = dist2d(here, goal);
+  const g = groundSpeedAlong(af, s.wind, here, goal);
+  return s.time + FAILSAFE.relinkTransitFactor * legM / (g >= 0.5 ? g : af.maxSpeedMs) + relinkListenSec(d);
 }
 
 function updateBattery(s, d, dt, vAirMs) {
