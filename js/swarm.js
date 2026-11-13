@@ -1247,6 +1247,9 @@ function c2Step(s) {
         ackSeqs.push(pt.seq);
         if (pt.seq <= applied.floor || applied.seen.has(pt.seq)) continue;
         applied.seen.add(pt.seq);
+        // Logged without a GNSS fix: dead reckoning, ACKed but never painted,
+        // as for a denied live report (C2-08).
+        if (pt.gps === 'denied') continue;
         covMark(s, pt.x, pt.y, 'bad', 3);
         freshSamples++;
       }
@@ -1790,7 +1793,7 @@ function droneComms(s, d) {
       let maxSeq = 0;
       for (let i = 0; i < d.deadLog.length; i++) {
         const sample = d.deadLog[i];
-        list.push({ x: sample.x, y: sample.y, seq: sample.seq });
+        list.push({ x: sample.x, y: sample.y, seq: sample.seq, gps: sample.gps });
         if (sample.seq > maxSeq) maxSeq = sample.seq;
       }
       if (list.length > 0) {
@@ -1811,7 +1814,8 @@ function droneComms(s, d) {
       deadLogSession: d.deadLogSession,
       posAt: s.time,
       // Riding samples aren't free: each packed {x, y, seq} row costs real
-      // bytes on the air on top of the base telemetry frame (finding #17).
+      // bytes on the air on top of the base telemetry frame (finding #17);
+      // the one-bit gps flag rides in a spare bit of seq.
     }, NET.tlmBytes + 8 + (unacked ? unacked.length * 10 : 0));
   }
 
@@ -1843,6 +1847,9 @@ function droneComms(s, d) {
         // truth would be data the vehicle doesn't possess.
         x: d.gpsDenied ? d.belX : d.x + GPS_SIGMA_M * gaussian(s.net.rng),
         y: d.gpsDenied ? d.belY : d.y + GPS_SIGMA_M * gaussian(s.net.rng),
+        // ...and says so, as the live report does: C2 must not paint a
+        // dead-reckoned sample RF-bad (C2-08, black-box path).
+        gps: d.gpsDenied ? 'denied' : 'ok',
       });
     }
   }
