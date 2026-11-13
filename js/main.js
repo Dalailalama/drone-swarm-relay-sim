@@ -1171,6 +1171,15 @@
   const takExportBtn = el('takExportBtn'), takImportBtn = el('takImportBtn'), takImportInput = el('takImportInput');
   const takClearBtn = el('takClearBtn'), takList = el('takList');
   const takWsInput = el('takWs'), takConnectBtn = el('takConnectBtn'), takStatus = el('takStatus');
+  const takUid = el('takUid');
+  // This page's own CoT uid prefix, drawn once (see makeTakUidPrefix):
+  // browser randomness, never the sim's seeded RNG.
+  const takSessionBytes = new Uint8Array(3);
+  if (window.crypto && window.crypto.getRandomValues) window.crypto.getRandomValues(takSessionBytes);
+  else for (let i = 0, t = Date.now(); i < 3; i++) takSessionBytes[i] = t >>> (8 * i);
+  const takSessionPrefix = makeTakUidPrefix(takSessionBytes);
+  takUid.value = takSessionPrefix;
+  const takUidPrefix = () => takUid.value.trim() || takSessionPrefix;
 
   function takAnchor() {
     // A loaded real area pins the exact geographic anchor; otherwise the
@@ -1196,7 +1205,7 @@
 
   takExportBtn.addEventListener('click', () => {
     if (!swarm) return;
-    const xml = buildCotFromSwarm(swarm, takAnchor());
+    const xml = buildCotFromSwarm(swarm, takAnchor(), null, takUidPrefix());
     download(xml.join('\n'), 'cot-snapshot-T' + Math.floor(swarm.time) + 's.xml', 'application/xml');
     logEvent(swarm, 'ATAK: exported ' + xml.length + ' CoT atoms', 'info');
   });
@@ -1249,7 +1258,7 @@
   let takWs = null, takTimer = null;
   function takStreamOnce() {
     if (!swarm || !takWs || takWs.readyState !== WebSocket.OPEN) return;
-    takWs.send(buildCotFromSwarm(swarm, takAnchor(), Date.now() / 1000).join('\n'));
+    takWs.send(buildCotFromSwarm(swarm, takAnchor(), Date.now() / 1000, takUidPrefix()).join('\n'));
   }
   takConnectBtn.addEventListener('click', () => {
     if (takWs) {

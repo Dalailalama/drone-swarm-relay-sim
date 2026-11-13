@@ -76,6 +76,29 @@ test('snapshot covers every alive drone plus GCS, objective and hazards', () => 
   assert.ok(blob.includes('GZ-1'), 'gps zone exported');
 });
 
+test('each simulator instance streams its own CoT uids (no overwrite on a shared TAK net)', () => {
+  // MITRE base schema: uid is globally unique and the newest event for a uid
+  // overwrites all earlier ones — two tabs with fixed uids flicker one set.
+  const s = ctx.makeSwarm({
+    count: 3, airframe: A.AIRFRAMES.find(a => a.id === 'q450'),
+    radio: R.RADIOS.find(r => r.id === 'sik-v3'),
+    envFactor: 1, targetX: 600, targetY: 0, altitudeM: 60, seed: 46,
+    jammers: [{ id: 'JX-1', x: 300, y: 0, erpDbm: 24, band: 'all', altM: 15, on: true }],
+    gpsZones: [{ id: 'GZ-1', x: 500, y: 0, rM: 100, on: true }],
+  });
+  const anchor = T.makeTakAnchor(38.8977, -77.0365);
+  const uids = prefix => ctx.buildCotFromSwarm(s, anchor, 0, prefix).map(a => a.match(/uid="([^"]*)"/)[1]);
+  const a = T.makeTakUidPrefix([0x12, 0xab, 0x00]), b = T.makeTakUidPrefix([0x12, 0xab, 0x01]);
+  assert.strictEqual(a, 'SIM-12ab00');
+  assert.notStrictEqual(a, b);
+  const ua = uids(a), ub = uids(b);
+  assert.strictEqual(ua.length, 7, 'GCS, 3 drones, objective, jammer, GPS zone');
+  assert.ok(ua.every(u => u.startsWith(a + '-')), ua.join(' '));
+  assert.ok(ua.every(u => !ub.includes(u)), 'two instances must not share a single uid');
+  assert.deepStrictEqual(uids(a), ua, 'the same instance keeps stable uids');
+  assert.ok(ua.includes(a + '-DR-1') && ua.includes(a + '-GCS') && ua.includes(a + '-TGT'));
+});
+
 test('export -> import round-trip preserves identity and position', () => {
   const s = ctx.makeSwarm({
     count: 3, airframe: A.AIRFRAMES.find(a => a.id === 'micro'),

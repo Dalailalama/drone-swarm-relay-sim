@@ -106,9 +106,20 @@ function unesc(s) {
     .replace(/&amp;/g, '&');
 }
 
+// CoT uid is "a globally unique name" and the newest event for a uid
+// overwrites every earlier one (MITRE base schema), so fixed SIM-* uids made
+// two simulator tabs or operators on one TAK net overwrite each other's
+// tracks. Each page draws a prefix from browser randomness once at load
+// (UI only; the sim stays seeded): bytes → "SIM-12ab00".
+function makeTakUidPrefix(bytes) {
+  return 'SIM-' + Array.from(bytes, v => (v & 255).toString(16).padStart(2, '0')).join('');
+}
+
 // The full picture, straight off a live swarm object. Returns an array of
-// atom strings (callers join with \n for file or wire).
-function buildCotFromSwarm(s, anchor, nowSec) {
+// atom strings (callers join with \n for file or wire). uidPrefix names this
+// instance on the TAK net (default 'SIM').
+function buildCotFromSwarm(s, anchor, nowSec, uidPrefix) {
+  const pre = (uidPrefix || 'SIM') + '-';
   const out = [];
   const put = (uid, cotType, x, y, hae, callsign, extra) => {
     const ll = localToLatLon(anchor, x, y);
@@ -125,30 +136,30 @@ function buildCotFromSwarm(s, anchor, nowSec) {
   const groundAt = (x, y) => (typeof terrainGroundAt === 'function' && s.terrain)
     ? terrainGroundAt(s.terrain, x, y) : 0;
   const haeOf = absAltM => (anchor.haeM != null ? anchor.haeM + absAltM : null);
-  put('SIM-GCS', TAK_TYPES.gcs, s.base.x, s.base.y,
+  put(pre + 'GCS', TAK_TYPES.gcs, s.base.x, s.base.y,
     haeOf(groundAt(s.base.x, s.base.y) + 2), 'C2 GROUND STATION',
     { remarks: 'relay chain hops=' + (s.c2 && s.c2.relays ? s.c2.relays.length : 0) });
   for (const d of s.drones) {
     if (!alive(d)) continue;
     const aglM = d.altM != null ? d.altM : s.altitudeM; // external telemetry AGL wins
-    put('SIM-' + d.id, TAK_TYPES.drone, d.x, d.y,
+    put(pre + d.id, TAK_TYPES.drone, d.x, d.y,
       haeOf(groundAt(d.x, d.y) + aglM),
       d.id + ' ' + roleOf(d),
       { remarks: 'bat ' + d.batteryPct.toFixed(0) + '% mode ' + d.mode, staleSec: 20, ceM: 10 });
   }
-  put('SIM-TGT', TAK_TYPES.objective, s.target.x, s.target.y,
+  put(pre + 'TGT', TAK_TYPES.objective, s.target.x, s.target.y,
     haeOf(groundAt(s.target.x, s.target.y)), 'OBJECTIVE',
     { remarks: 'mission objective' });
   for (const j of (s.jammers || [])) {
     const r = jammerDenialRadiusM(s, j);
     if (!(r > 0)) continue;
-    put('SIM-' + j.id, TAK_TYPES.hazard, j.x, j.y,
+    put(pre + j.id, TAK_TYPES.hazard, j.x, j.y,
       haeOf(groundAt(j.x, j.y) + (j.altM || 0)), 'RF DENIAL ' + j.id.replace('JX-', ''),
       { radiusM: r, remarks: 'denial ~' + Math.round(r) + ' m @ ' + j.erpDbm + ' dBm', staleSec: 60 });
   }
   for (const z of (s.gpsZones || [])) {
     if (z.on === false) continue;
-    put('SIM-' + z.id, TAK_TYPES.hazard, z.x, z.y,
+    put(pre + z.id, TAK_TYPES.hazard, z.x, z.y,
       haeOf(groundAt(z.x, z.y)), 'GPS DENIED ' + z.id.replace('GZ-', ''),
       { radiusM: z.rM, remarks: 'GNSS denied zone r=' + Math.round(z.rM) + ' m', staleSec: 60 });
   }
@@ -212,6 +223,6 @@ function parseCoTFile(text) {
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     makeTakAnchor, localToLatLon, latLonToLocal,
-    TAK_TYPES, cotEvent, buildCotFromSwarm, parseCoTFile,
+    TAK_TYPES, cotEvent, makeTakUidPrefix, buildCotFromSwarm, parseCoTFile,
   };
 }
