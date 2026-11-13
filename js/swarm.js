@@ -1191,9 +1191,16 @@ function c2Step(s) {
   for (const id of Object.keys(known)) {
     const f = fresh(id);
     if (s.c2.wasFresh[id] && !f) {
-      logEvent(s, 'C2 lost telemetry from ' + id, 'warn');
-      s.c2.lost[id] = { x: known[id].x, y: known[id].y, at: s.time };
-      covMark(s, known[id].x, known[id].y, 'bad', 2); // weaker than a dead log, but evidence
+      if (known[id].role === 'rtb' || known[id].role === 'landed') {
+        // It said it was going home, and homebound drones stop beaconing:
+        // silence is expected, not a comms loss. Booking it lost painted its
+        // position RF-bad and sent rescuers after it (audit C2-04).
+        logEvent(s, 'C2: ' + id + ' out of contact on its way home (RTB, expected)', 'info');
+      } else {
+        logEvent(s, 'C2 lost telemetry from ' + id, 'warn');
+        s.c2.lost[id] = { x: known[id].x, y: known[id].y, at: s.time };
+        covMark(s, known[id].x, known[id].y, 'bad', 2); // weaker than a dead log, but evidence
+      }
     }
     if (!s.c2.wasFresh[id] && f) {
       logEvent(s, 'C2 regained telemetry from ' + id, 'info');
