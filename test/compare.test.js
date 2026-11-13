@@ -158,10 +158,8 @@ test('compare Uptime is the objective-connected metric; fleet contact is its own
 // (8 micros at 70 m, 250 kbps video, no relay wing for hetero, and video off
 // for the videoOn spelling the page also reads), so the same file ran a
 // different experiment in compare than on the page.
-test('compare fills fields a scenario file omits with the page defaults', () => {
+function pageAndCompareShapes(sc) {
   const { loadUI, makeFile } = require('./helpers/dom.js');
-  const sc = { version: 1, radio: 'rfd900x', env: 'open', terrain: 'flat', seed: 11,
-    base: { x: 0, y: 0 }, target: { x: 900, y: -200 }, hetero: true, videoOn: true };
   const { ctx: ui, el, fire } = loadUI();
   el('loadScenarioInput').files = [makeFile('partial.json', JSON.stringify(sc))];
   fire('loadScenarioInput', 'change');
@@ -176,5 +174,23 @@ test('compare fills fields a scenario file omits with the page defaults', () => 
     wing: s.relayIdx.length, relayAirframe: s.relayAirframe && s.relayAirframe.id, relayRadio: s.relayRadio && s.relayRadio.id,
     videoOn: s.videoOn, videoKbps: s.videoKbps, windX: s.wind.x, windY: s.wind.y, corridor: s.corridorRouting, broadcast: s.broadcastC2,
   });
-  assert.deepStrictEqual(shape(S), shape(ui.sim.swarm));
+  return { compare: shape(S), page: shape(ui.sim.swarm) };
+}
+
+test('compare fills fields a scenario file omits with the page defaults', () => {
+  const sc = { version: 1, radio: 'rfd900x', env: 'open', terrain: 'flat', seed: 11,
+    base: { x: 0, y: 0 }, target: { x: 900, y: -200 }, hetero: true, videoOn: true };
+  const { compare, page } = pageAndCompareShapes(sc);
+  assert.deepStrictEqual(compare, page);
+});
+
+// The page's default wing of 4 is capped below the fleet (updateHeteroRow:
+// at least one tactical drone stays). Filled in uncapped, a 3-drone hetero
+// file flew every drone as a relay in compare and a 2-drone wing on the page.
+test('compare caps the relay wing below a small fleet, as the page does', () => {
+  const sc = { version: 1, radio: 'rfd900x', env: 'open', terrain: 'flat', seed: 11,
+    base: { x: 0, y: 0 }, target: { x: 900, y: -200 }, count: 3, hetero: true };
+  const { compare, page } = pageAndCompareShapes(sc);
+  assert.strictEqual(page.wing, 2, 'setup: the page keeps one tactical drone');
+  assert.deepStrictEqual(compare, page);
 });

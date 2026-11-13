@@ -24,6 +24,7 @@ const PAGE_DEFAULTS = {
   airframe: A.AIRFRAMES[1].id, count: 10, altitudeM: 50, spacingPct: 80,
   relayWing: 4, relayAirframe: 'x8', relayRadio: 'rfd900x', videoKbps: 500,
 };
+const PAGE_WING_MAX = 15; // index.html's wing slider max
 
 // Median over ALL runs with a missing value read as "not yet" (+Infinity) —
 // the censored reading for time-to-arrive: a seed that never arrived is
@@ -136,9 +137,13 @@ function runScenarioSeed(ctx, scenarioObj, seed, durationSec) {
   const relayRadio = relayRadioId ? resolveRadio(relayRadioId, sc.relayRadioPreset, 'relay radio') : null;
   const terrain = buildCompareTerrain(ctx, sc, seed);
   const b = posOf(sc.base, 0, 0), t = posOf(sc.target, 2000, -500);
+  const count = sc.count ?? PAGE_DEFAULTS.count;
+  // The page never lets the wing take the whole fleet (main.js
+  // updateHeteroRow): at least one tactical drone stays.
+  const wingMax = Math.max(1, Math.min(PAGE_WING_MAX, count - 1));
 
   const s = ctx.makeSwarm({
-    count: sc.count ?? PAGE_DEFAULTS.count,
+    count,
     airframe,
     altitudeM: sc.altitudeM ?? PAGE_DEFAULTS.altitudeM,
     deployFrac: (sc.spacingPct ?? PAGE_DEFAULTS.spacingPct) / 100,
@@ -158,7 +163,7 @@ function runScenarioSeed(ctx, scenarioObj, seed, durationSec) {
     shadowSigmaDb: env.shadowSigmaDb,
     seed,
     terrain,
-    relayWing: sc.hetero ? (sc.relayWing ?? PAGE_DEFAULTS.relayWing) : 0,
+    relayWing: sc.hetero ? Math.min(sc.relayWing ?? PAGE_DEFAULTS.relayWing, wingMax) : 0,
     relayAirframe,
     relayRadio,
     jammers: sc.jammers || [],
