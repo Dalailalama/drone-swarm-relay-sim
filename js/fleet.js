@@ -7,8 +7,8 @@
 // Link physics stay honest: every radio wave belongs to a frequency. Two
 // nodes can only form a link when their radios are band-compatible, and a
 // mixed link's budget is computed per DIRECTION — each end transmits with
-// its own power/antenna over its own calibrated path-loss curve, and the
-// link is only as good as the worse direction (ACKs and retries need both).
+// its own power/antenna over the link's one (reciprocal) path-loss law, and
+// the link is only as good as the worse direction (ACKs and retries need both).
 //
 // Pure functions live here so they're unit-testable under Node without a
 // browser or a swarm instance. Everything consumes the same radio objects
@@ -30,14 +30,25 @@ function bandCompatible(ra, rb) {
   return same && Math.abs(ra.freqMHz - rb.freqMHz) <= BAND_COMPAT_MHZ;
 }
 
+// One air path has one propagation law. Each preset's `n` is a range-
+// calibration fit, not channel physics, so a mixed link takes the larger
+// (conservative) of the two exponents in BOTH directions and its path loss
+// stays reciprocal. Identical radios keep their own exponent exactly.
+function channelExponent(ra, rb) {
+  if (ra === rb) return pathLossExponent(ra);
+  return Math.max(pathLossExponent(ra), pathLossExponent(rb));
+}
+
 // Received strength at the RX end when TX transmits: TX's power and its own
-// calibrated path-loss exponent/frequency, antenna gains summed from both ends.
+// calibrated frequency/intercept over the link's shared exponent, antenna
+// gains summed from both ends.
 function rssiDirectionalDb(tx, rx, envFactor, dMetres) {
   const d = Math.max(1, dMetres / envFactor);
+  const n = channelExponent(tx, rx);
   if (tx.refPowerDbm != null) {
-    return tx.refPowerDbm - 10 * pathLossExponent(tx) * Math.log10(d) + (rx.antGainDbi - tx.antGainDbi);
+    return tx.refPowerDbm - 10 * n * Math.log10(d) + (rx.antGainDbi - tx.antGainDbi);
   }
-  const pl = pl1m(tx.freqMHz) + 10 * pathLossExponent(tx) * Math.log10(d);
+  const pl = pl1m(tx.freqMHz) + 10 * n * Math.log10(d);
   return tx.txDbm + tx.antGainDbi + rx.antGainDbi - pl;
 }
 
@@ -69,7 +80,7 @@ function relayClassIndices(count, want) {
 // UMD-lite export so the physics is unit-testable under Node.
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
-    BAND_COMPAT_MHZ, bandCompatible, rssiDirectionalDb,
+    BAND_COMPAT_MHZ, bandCompatible, channelExponent, rssiDirectionalDb,
     mixedLinkMarginDb, relayClassIndices,
   };
 }

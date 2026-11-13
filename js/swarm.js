@@ -886,11 +886,14 @@ function agilityGainDb(s, radio) {
 // Elevated noise floor (dBm, in sensitivity-equivalent terms) that all active
 // interference sources impose on a receiver at rxPos/rxAlt. -Infinity if none.
 // rxRadio carries the receiver's anti-jam capability (spectrum agility).
-function interferenceFloorDbm(s, rxPos, rxAlt, rxRadio) {
+// nOverride is a link's shared exponent (channelExponent), so on a mixed link
+// the jammer and the partner's signal cross the air by one law; without it
+// the receiver's own fit applies (the per-position spectrum survey).
+function interferenceFloorDbm(s, rxPos, rxAlt, rxRadio, nOverride) {
   const jams = s.jammers;
   if (!jams || !jams.length) return -Infinity;
   const rad = rxRadio || s.radio;
-  const n = pathLossExponent(rad);
+  const n = nOverride != null ? nOverride : pathLossExponent(rad);
   const pl1 = refLossDb(rad); // calibrated presets: the measured channel, not free space
   const gainDb = agilityGainDb(s, rad);
   let lin = 0;
@@ -911,20 +914,23 @@ function interferenceFloorDbm(s, rxPos, rxAlt, rxRadio) {
 // How much interference degrades this link, in dB (>=0). Each end's floor is
 // compared against THAT end's own sensitivity; the worst end wins. Radios ra
 // and rb are the transmit-side radios of each node (their receivers share the
-// hardware), or null for swarm-wide defaults.
+// hardware), or null for swarm-wide defaults. Evaluated per link (the link's
+// shared exponent), not as a per-position field.
 function interferencePenaltyDb(s, aPos, aAlt, bPos, bAlt, ra, rb) {
   if (!s.jammers || !s.jammers.length) return 0;
   const rA = ra || s.radio, rB = rb || s.radio;
-  const fa = interferenceFloorDbm(s, aPos, aAlt, rA);
-  const fb = interferenceFloorDbm(s, bPos, bAlt, rB);
+  const n = channelExponent(rA, rB);
+  const fa = interferenceFloorDbm(s, aPos, aAlt, rA, n);
+  const fb = interferenceFloorDbm(s, bPos, bAlt, rB, n);
   return Math.max(floorPenaltyDb(fa, rA), floorPenaltyDb(fb, rB));
 }
 
-// The same penalty for one receiver: its floor against its own sensitivity.
-function endPenaltyDb(s, pos, alt, radio) {
+// The same penalty for one receiver: its floor against its own sensitivity
+// (n: the link's shared exponent, when the receiver is one end of a link).
+function endPenaltyDb(s, pos, alt, radio, n) {
   if (!s.jammers || !s.jammers.length) return 0;
   const r = radio || s.radio;
-  return floorPenaltyDb(interferenceFloorDbm(s, pos, alt, r), r);
+  return floorPenaltyDb(interferenceFloorDbm(s, pos, alt, r, n), r);
 }
 
 // Noise and interference add in power: the effective sensitivity is
@@ -1009,8 +1015,8 @@ function liveMarginDb(s, aId, bId) {
     if (s && s._marginCache) s._marginCache.set(cacheKey, -Infinity);
     return -Infinity;
   }
-  // Mixed fleets: each end transmits with its own radio's power, antenna and
-  // calibrated path-loss curve; the link carries the worse direction (js/fleet.js).
+  // Mixed fleets: each end transmits with its own radio's power and antenna
+  // over the link's shared exponent; the link carries the worse direction (js/fleet.js).
   // C2 pairs with the far end's radio (the ground station flies a matched
   // companion unit for every type in the field).
   const ra = (aId === 'C2' ? droneRadio(b) : droneRadio(a)) || s.radio;
@@ -1025,7 +1031,8 @@ function liveMarginDb(s, aId, bId) {
   let res;
   if (!bandCompatible(ra, rb)) res = -Infinity;
   else {
-    const pa = endPenaltyDb(s, a, altA, ra), pb = endPenaltyDb(s, b, altB, rb);
+    const nCh = channelExponent(ra, rb); // the jammer crosses the same air as the partner
+    const pa = endPenaltyDb(s, a, altA, ra, nCh), pb = endPenaltyDb(s, b, altB, rb, nCh);
     res = Math.min(
       rssiDirectionalDb(ra, rb, s.envFactor, slant) - rb.sensDbm + fade - lpiCost - pb,
       rssiDirectionalDb(rb, ra, s.envFactor, slant) - ra.sensDbm + fade - lpiCost - pa);

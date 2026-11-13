@@ -33,6 +33,31 @@ test('mixed link budget is the worse direction, not an average', () => {
   assert.strictEqual(F.mixedLinkMarginDb(RFD, SIK, 1, 1000), Math.min(a2b, b2a));
 });
 
+// Audit rf-physics/per-radio-n-as-channel-physics: each direction used the
+// TRANSMITTER's fitted exponent, so one air path lost 51.6 dB more one way
+// than the other at 300 m (SiK<->RFD900x).
+test('a mixed link\'s path loss is reciprocal: one air path, one exponent', () => {
+  const pl = (tx, rx, d) => tx.txDbm + tx.antGainDbi + rx.antGainDbi - F.rssiDirectionalDb(tx, rx, 1, d);
+  let pairs = 0;
+  for (const ra of R.RADIOS) for (const rb of R.RADIOS) {
+    if (ra === rb || !F.bandCompatible(ra, rb)) continue;
+    pairs++;
+    for (const d of [100, 300, 3000]) {
+      assert.ok(Math.abs(pl(ra, rb, d) - pl(rb, ra, d)) < 1e-9,
+        ra.id + '<->' + rb.id + ' at ' + d + ' m: ' + pl(ra, rb, d).toFixed(1) + ' vs ' + pl(rb, ra, d).toFixed(1) + ' dB');
+    }
+  }
+  assert.ok(pairs >= 2, 'expected at least the SiK/RFD900x pair');
+  // The larger (conservative) exponent is the SiK's, so the binding SiK-TX
+  // direction — and the link margin — are unchanged to the bit.
+  for (const d of [100, 300, 3000]) {
+    const n = R.pathLossExponent(SIK);
+    assert.ok(n > R.pathLossExponent(RFD));
+    const sikTx = SIK.txDbm + SIK.antGainDbi + RFD.antGainDbi - (R.pl1m(SIK.freqMHz) + 10 * n * Math.log10(d)) - RFD.sensDbm;
+    assert.strictEqual(F.mixedLinkMarginDb(SIK, RFD, 1, d), sikTx);
+  }
+});
+
 test('radios in different bands cannot link at all', () => {
   assert.strictEqual(F.mixedLinkMarginDb(SIK, ESP, 1, 5), -Infinity);
   assert.strictEqual(F.bandCompatible(SIK, RFD), true, '915 vs 915 MHz is fine');

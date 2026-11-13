@@ -46,7 +46,7 @@ test('LoRa needs the datasheet SIR (SF10 demodulates 15 dB under noise), FSK kee
 
 test('each receiver\'s interference degrades only the direction it hears (mixed link)', () => {
   const RFD = R.RADIOS.find(r => r.id === 'rfd900x');
-  const s = makeSw(SIK, [{ id: 'JX-1', x: 0, y: 0, erpDbm: 30, band: 'all', altM: 15, on: true }]);
+  const s = makeSw(SIK, [{ id: 'JX-1', x: 0, y: 0, erpDbm: 5, band: 'all', altM: 15, on: true }]);
   s.terrain = ctx.makeTerrain('flat');
   // A tower shadows the jammer from the RFD relay only.
   s.terrain.buildings = [{ x: 50, y: 60, w: 20, d: 20, heightM: 100 }];
@@ -56,21 +56,59 @@ test('each receiver\'s interference degrades only the direction it hears (mixed 
   b.radio = SIK; b.x = 100; b.y = 0; b.altM = 30;
   s._marginCache = null;
   const altA = ctx.nodeAltAbsM(s, a.id, a), altB = ctx.nodeAltAbsM(s, b.id, b);
+  const nCh = ctx.channelExponent(RFD, SIK); // the link's one exponent
   const pen = (pos, alt, r) => { // noise and interference add in power
-    const f = ctx.interferenceFloorDbm(s, pos, alt, r);
+    const f = ctx.interferenceFloorDbm(s, pos, alt, r, nCh);
     return f > -Infinity ? 10 * Math.log10(1 + Math.pow(10, (f - r.sensDbm) / 10)) : 0;
   };
   const pa = pen(a, altA, RFD), pb = pen(b, altB, SIK);
   assert.strictEqual(pa, 0, 'the tower must shadow the jammer from the RFD end');
-  assert.ok(pb > 30, 'the SiK end must be heavily jammed, got ' + pb);
+  assert.ok(pb > 10, 'the SiK end must be heavily jammed, got ' + pb);
+  const slant = Math.hypot(Math.hypot(a.x - b.x, a.y - b.y), altA - altB);
+  const fade = ctx.fadeDb(s, a.id, b.id);
+  const toSik = ctx.rssiDirectionalDb(RFD, SIK, s.envFactor, slant) - SIK.sensDbm + fade - pb;
+  const toRfd = ctx.rssiDirectionalDb(SIK, RFD, s.envFactor, slant) - RFD.sensDbm + fade - pa;
+  const got = ctx.liveMarginDb(s, a.id, b.id);
+  // The RFD's 10 dB hotter transmitter and the SiK's 12 dB better sensitivity
+  // leave the jammed direction spare margin: the clean direction still binds.
+  assert.ok(toSik > toRfd && toRfd > 0, 'the SiK end\'s jamming must cost only its own direction');
+  assert.ok(Math.abs(got - toRfd) < 1e-9, 'liveMarginDb ' + got + ' must equal the per-direction min ' + toRfd);
+});
+
+// Audit rf-physics/per-radio-n-as-channel-physics: on a mixed link the signal
+// now crosses the air with the link's one exponent (the larger fit), and the
+// jammer reaching either receiver of that link uses the same law — the RFD
+// end no longer hears the jammer over its own gentle 2.1 exponent while its
+// SiK partner's signal fades at 3.9.
+test('on a mixed link, interference and signal share the link\'s path-loss exponent', () => {
+  const RFD = R.RADIOS.find(r => r.id === 'rfd900x');
+  const s = makeSw(SIK, [{ id: 'JX-1', x: 250, y: 200, erpDbm: 12, band: 'all', altM: 15, on: true }]);
+  s.terrain = ctx.makeTerrain('flat');
+  // A tower shadows the jammer from the SiK end only.
+  s.terrain.buildings = [{ x: 175, y: 100, w: 30, d: 30, heightM: 100 }];
+  ctx.indexBuildings(s.terrain);
+  const [a, b] = s.drones;
+  a.radio = RFD; a.x = 100; a.y = 120; a.altM = 30;
+  b.radio = SIK; b.x = 100; b.y = 0; b.altM = 30;
+  s._marginCache = null;
+  const nCh = Math.max(R.pathLossExponent(SIK), R.pathLossExponent(RFD));
+  const altA = ctx.nodeAltAbsM(s, a.id, a), altB = ctx.nodeAltAbsM(s, b.id, b);
+  assert.strictEqual(ctx.interferenceFloorDbm(s, b, altB, SIK), -Infinity, 'the tower must shadow the jammer from the SiK end');
+  const pb = 0;
+  // The RFD end, from first principles: EIRP + G_rx - PL(link exponent), +10 dB SIR.
+  const j = s.jammers[0];
+  const jSlant = Math.hypot(Math.hypot(a.x - j.x, a.y - j.y), altA - 15);
+  const fa = j.erpDbm + 2.15 + RFD.antGainDbi - (R.pl1m(RFD.freqMHz) + 10 * nCh * Math.log10(jSlant)) + 10;
+  const pa = 10 * Math.log10(1 + Math.pow(10, (fa - RFD.sensDbm) / 10));
+  assert.ok(pa > 1, 'the RFD end must hear the jammer, got ' + pa);
   const slant = Math.hypot(Math.hypot(a.x - b.x, a.y - b.y), altA - altB);
   const fade = ctx.fadeDb(s, a.id, b.id);
   const want = Math.min(
     ctx.rssiDirectionalDb(RFD, SIK, s.envFactor, slant) - SIK.sensDbm + fade - pb,
     ctx.rssiDirectionalDb(SIK, RFD, s.envFactor, slant) - RFD.sensDbm + fade - pa);
   const got = ctx.liveMarginDb(s, a.id, b.id);
-  assert.ok(want > 0, 'per-direction physics keeps this link alive');
-  assert.ok(Math.abs(got - want) < 1e-9, 'liveMarginDb ' + got + ' must equal the per-direction min ' + want);
+  assert.ok(want > 0, 'the link survives a jammer it hears over the shared exponent, margin ' + want);
+  assert.ok(Math.abs(got - want) < 1e-9, 'liveMarginDb ' + got + ' must use the link exponent for J: ' + want);
 });
 
 // Audit rf-physics/jammer-missing-rx-gain-erp: the signal path counts both
