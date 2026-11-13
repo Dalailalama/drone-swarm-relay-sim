@@ -427,7 +427,7 @@ function renderView3D(ctx, cv, s, status, cam, selected) {
   const sceneKey = JSON.stringify([cam.yaw, cam.pitch, cam.dist, cam.cx, cam.cy,
     cv.width, cv.height, gridN, x0, y0, x1, y1, s.altitudeM, U,
     s.terrain.seed, s.terrain.groundAmpM, s.terrain.groundScaleM,
-    (s.terrain.buildings || []).map(b => [b.x, b.y, b.w, b.d, b.heightM]),
+    (s.terrain.buildings || []).map(b => [b.x, b.y, b.w, b.d, b.heightM, b.angleRad || 0]),
     gTex && gTex.width]);
   const sceneCached = !!(view3dScene.items && view3dScene.key === sceneKey &&
     view3dScene.terrain === s.terrain && view3dScene.tex === gTex);
@@ -502,15 +502,19 @@ function renderView3D(ctx, cv, s, status, cam, selected) {
     const top = base + b.heightM;
     const hw = b.w / 2, hd = b.d / 2;
     const edgeStroke = b.heightM > s.altitudeM ? 'rgba(224,96,80,0.5)' : 'rgba(19,20,16,0.55)';
+    // Footprint corners; a turned OSM footprint (angleRad) turns them about
+    // its center. Wall shading keeps the face order, not true compass faces.
+    const ca = b.angleRad ? Math.cos(b.angleRad) : 1, sa = b.angleRad ? Math.sin(b.angleRad) : 0;
+    const at = (u, v, z) => ({ x: b.x + u * ca - v * sa, y: b.y + u * sa + v * ca, z });
 
-    const BFL = { x: b.x - hw, y: b.y - hd, z: base };
-    const BFR = { x: b.x + hw, y: b.y - hd, z: base };
-    const BBR = { x: b.x + hw, y: b.y + hd, z: base };
-    const BBL = { x: b.x - hw, y: b.y + hd, z: base };
-    const TFL = { x: b.x - hw, y: b.y - hd, z: top };
-    const TFR = { x: b.x + hw, y: b.y - hd, z: top };
-    const TBR = { x: b.x + hw, y: b.y + hd, z: top };
-    const TBL = { x: b.x - hw, y: b.y + hd, z: top };
+    const BFL = at(-hw, -hd, base);
+    const BFR = at(hw, -hd, base);
+    const BBR = at(hw, hd, base);
+    const BBL = at(-hw, hd, base);
+    const TFL = at(-hw, -hd, top);
+    const TFR = at(hw, -hd, top);
+    const TBR = at(hw, hd, top);
+    const TBL = at(-hw, hd, top);
 
     const wallFill = (lambert) => 'rgba(90,89,76,' + wallAlpha(lambert).toFixed(2) + ')';
     const topFill = 'rgba(120,118,103,' + wallAlpha(WALL_LAMBERT.top).toFixed(2) + ')';

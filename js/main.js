@@ -246,7 +246,7 @@
       // procedural city), plus small cleared staging areas at the GCS and the
       // objective — you'd stage in a lot, not on somebody's roof.
       const cx = (tX + baseX) / 2, cy = (tY + baseY) / 2;
-      const bs = osmArea.buildings.map(b => ({ x: b.x + cx, y: b.y + cy, w: b.w, d: b.d, heightM: b.heightM, estimated: b.estimated }));
+      const bs = osmArea.buildings.map(b => ({ x: b.x + cx, y: b.y + cy, w: b.w, d: b.d, heightM: b.heightM, estimated: b.estimated, angleRad: b.angleRad }));
       osmArea.cleared = osmClearZones(bs, [{ x: baseX, y: baseY, rM: 70 }, { x: tX, y: tY, rM: 60 }]);
       terrain = indexBuildings({ seed: terrainSeed, groundAmpM: 0, groundScaleM: 1, buildings: bs });
       // Pin the fetched area's geographic center to the corridor midpoint —
@@ -818,6 +818,9 @@
     if (!ll) {
       osmNote.innerHTML = 'Finding the place&hellip;';
       const gen = osmLoadToken; // geocoding is cancellable too (finding #8)
+      // The search holds the button too: every click used to send another
+      // Nominatim request, against its 1 request/second policy.
+      osmLoadBtn.disabled = true; osmLoadBtn.textContent = 'Finding…';
       try {
         const g = await osmGeocode(txt);
         if (gen !== osmLoadToken) return; // user moved on while we searched
@@ -826,6 +829,9 @@
         if (gen !== osmLoadToken) return;
         osmNote.innerHTML = '<b style="color:var(--lost)">' + escHtml(e.message) + '</b> &middot; Check the spelling, or paste coordinates as <b>lat, lon</b>.';
         return;
+      } finally {
+        // Release it unless an area load has claimed it meanwhile.
+        if (osmBtnOwner === 0) { osmLoadBtn.disabled = false; osmLoadBtn.textContent = 'Load real area'; }
       }
     }
     await loadOsmArea(ll.lat, ll.lon, r, name).catch(() => {}); // note shows the error
@@ -1175,6 +1181,15 @@
   const takExportBtn = el('takExportBtn'), takImportBtn = el('takImportBtn'), takImportInput = el('takImportInput');
   const takClearBtn = el('takClearBtn'), takList = el('takList');
   const takWsInput = el('takWs'), takConnectBtn = el('takConnectBtn'), takStatus = el('takStatus');
+  const takUid = el('takUid');
+  // This page's own CoT uid prefix, drawn once (see makeTakUidPrefix):
+  // browser randomness, never the sim's seeded RNG.
+  const takSessionBytes = new Uint8Array(3);
+  if (window.crypto && window.crypto.getRandomValues) window.crypto.getRandomValues(takSessionBytes);
+  else for (let i = 0, t = Date.now(); i < 3; i++) takSessionBytes[i] = t >>> (8 * i);
+  const takSessionPrefix = makeTakUidPrefix(takSessionBytes);
+  takUid.value = takSessionPrefix;
+  const takUidPrefix = () => takUid.value.trim() || takSessionPrefix;
 
   function takAnchor() {
     // A loaded real area pins the exact geographic anchor; otherwise the
@@ -1200,7 +1215,7 @@
 
   takExportBtn.addEventListener('click', () => {
     if (!swarm) return;
-    const xml = buildCotFromSwarm(swarm, takAnchor());
+    const xml = buildCotFromSwarm(swarm, takAnchor(), null, takUidPrefix());
     download(xml.join('\n'), 'cot-snapshot-T' + Math.floor(swarm.time) + 's.xml', 'application/xml');
     logEvent(swarm, 'ATAK: exported ' + xml.length + ' CoT atoms', 'info');
   });
@@ -1253,7 +1268,7 @@
   let takWs = null, takTimer = null;
   function takStreamOnce() {
     if (!swarm || !takWs || takWs.readyState !== WebSocket.OPEN) return;
-    takWs.send(buildCotFromSwarm(swarm, takAnchor(), Date.now() / 1000).join('\n'));
+    takWs.send(buildCotFromSwarm(swarm, takAnchor(), Date.now() / 1000, takUidPrefix()).join('\n'));
   }
   takConnectBtn.addEventListener('click', () => {
     if (takWs) {

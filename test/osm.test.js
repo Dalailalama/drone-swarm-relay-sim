@@ -36,7 +36,20 @@ test('osmParseHeight reads bare metres, "m" units and imperial units', () => {
   assert.ok(Math.abs(O.osmParseHeight('60 feet') - 18.288) < 1e-6);
 });
 
+test('osmParseHeight reads OSM feet-and-inches and spelled-out metres', () => {
+  // Key:height documents height=7'4" for feet and inches.
+  assert.ok(Math.abs(O.osmParseHeight('7\'4"') - (7 * 0.3048 + 4 * 0.0254)) < 1e-9, '7\'4" is 2.2352 m');
+  assert.ok(Math.abs(O.osmParseHeight('12\'6"') - 3.81) < 1e-9);
+  assert.ok(Math.abs(O.osmParseHeight(' 6\' 7.5" ') - (6 * 0.3048 + 7.5 * 0.0254)) < 1e-9);
+  assert.strictEqual(O.osmParseHeight('12.5 metres'), 12.5);
+  assert.strictEqual(O.osmParseHeight('12.5 meters'), 12.5);
+  assert.strictEqual(O.osmParseHeight('1 metre'), 1);
+});
+
 test('osmParseHeight rejects garbage, blanks and non-positive heights', () => {
+  for (const bad of ['1.2.3', '12..5', '.', '7\'4', '4"', '7\'-4"']) {
+    assert.strictEqual(O.osmParseHeight(bad), null, JSON.stringify(bad) + ' is malformed');
+  }
   for (const bad of ['Mumbai', '', '   ', '18,5', '12 storeys', null, undefined, '-4', '-4 m', '0']) {
     assert.strictEqual(O.osmParseHeight(bad), null, JSON.stringify(bad) + ' should not parse');
   }
@@ -66,6 +79,19 @@ test('osmWayToBuilding uses the sim frame: x=East, y=South', () => {
   // a box centered on the origin lands at the origin
   const mid = O.osmWayToBuilding(rectWay(LAT0 - D_LAT / 2, LON0 - D_LON / 2, D_LAT, D_LON), LAT0, LON0);
   assert.ok(Math.abs(mid.x) < 1e-6 && Math.abs(mid.y) < 1e-6, 'centered box should sit at 0,0');
+});
+
+test('a building just across the antimeridian lands metres away, not around the planet', () => {
+  // Anchor at lon 179.999; the footprint runs from 179.9995 across 180 to
+  // -179.9995, as OSM stores it (its centre is on the line itself).
+  const geometry = [[-17.7, 179.9995], [-17.7, -179.9995], [-17.6998, -179.9995], [-17.6998, 179.9995], [-17.7, 179.9995]]
+    .map(([lat, lon]) => ({ lat, lon }));
+  const b = O.osmWayToBuilding({ type: 'way', geometry }, -17.7, 179.999);
+  const kLon = O.geoMetresPerDeg(-17.7).lon;
+  assert.ok(b, 'footprint survives');
+  assert.ok(Math.abs(b.w - 0.001 * kLon) < 0.01, 'w = ' + b.w.toFixed(2) + ' m');
+  assert.ok(Math.abs(b.x - 0.001 * kLon) < 0.01, 'x = ' + b.x.toFixed(2) + ' m (just east of the anchor)');
+  assert.strictEqual(O.geoWrapLon(72.87), 72.87, 'in-range longitudes are untouched');
 });
 
 // --- osmWayToBuilding: heights -----------------------------------------------
@@ -193,4 +219,56 @@ test('osmParseLatLon rejects place names and out-of-range coordinates', () => {
   for (const bad of ['Mumbai', 'Mumbai, India', '', '19.07', '95, 10', '-91, 10', '10, 190', '10, -181', '19.07 72.87']) {
     assert.strictEqual(O.osmParseLatLon(bad), null, JSON.stringify(bad) + ' should be treated as a place name');
   }
+});
+
+// --- Oriented footprints (rotated street grids) ------------------------------
+
+// Closed way for a w × d rectangle centered at local (cx, cy) metres, turned
+// by angleRad in the sim frame (x=East, y=South), built through the same
+// projection the parser inverts.
+function rotRectWay(cx, cy, w, d, angleRad, tags) {
+  const k = O.geoMetresPerDeg(LAT0);
+  const c = Math.cos(angleRad), s = Math.sin(angleRad);
+  const pts = [[-w / 2, -d / 2], [w / 2, -d / 2], [w / 2, d / 2], [-w / 2, d / 2], [-w / 2, -d / 2]];
+  return { type: 'way', tags, geometry: pts.map(([u, v]) => {
+    const x = cx + u * c - v * s, y = cy + u * s + v * c;
+    return { lat: LAT0 - y / k.lat, lon: LON0 + x / k.lon };
+  }) };
+}
+
+test('a rotated footprint keeps its true area, not its bounding box', () => {
+  const b = O.osmWayToBuilding(rotRectWay(0, 0, 60, 12, Math.PI / 4), LAT0, LON0);
+  assert.ok(near(b.w * b.d, 720, 0.01), '60 × 12 m slab at 45° must stay ~720 m², got ' + (b.w * b.d).toFixed(0));
+  assert.ok(near(Math.max(b.w, b.d), 60, 0.01) && near(Math.min(b.w, b.d), 12, 0.01), b.w + ' × ' + b.d);
+  assert.ok(Math.abs(b.x) < 0.01 && Math.abs(b.y) < 0.01, 'center stays put');
+  const square = O.osmWayToBuilding(rectWay(LAT0, LON0, D_LAT, D_LON), LAT0, LON0);
+  assert.ok(!square.angleRad, 'a north-up footprint stays axis-aligned');
+});
+
+test('a 45° street grid keeps its streets open for LOS and surface height', () => {
+  const Tn = require('../js/terrain.js');
+  const P = 133, BLOCK = 113, th = Math.PI / 4; // 113 m blocks, 20 m streets, 21 m roofs
+  const c = Math.cos(th), s = Math.sin(th);
+  const world = (u, v) => ({ x: u * c - v * s, y: u * s + v * c });
+  const elements = [];
+  for (let i = -2; i <= 3; i++) {
+    for (let j = -4; j <= 4; j++) {
+      const p = world(i * P, j * P);
+      elements.push(rotRectWay(p.x, p.y, BLOCK, BLOCK, th, { height: '21' }));
+    }
+  }
+  const { buildings } = O.osmParseBuildings({ elements }, LAT0, LON0);
+  assert.strictEqual(buildings.length, 54);
+  const t = Tn.indexBuildings({ seed: 1, groundAmpM: 0, groundScaleM: 1, buildings });
+  // The street between block columns 0 and 1: 600 m of it at 12 m AGL.
+  const a = world(P / 2, -300), b = world(P / 2, 300), mid = world(P / 2, 0);
+  assert.strictEqual(Tn.losBlocked(t, a.x, a.y, 12, b.x, b.y, 12), false, 'LOS down an open street');
+  assert.strictEqual(Tn.buildingAt(t, mid.x, mid.y), null, 'the street midpoint is not a roof');
+  assert.strictEqual(Tn.terrainHeightAt(t, mid.x, mid.y), 0);
+  // Control: the blocks themselves still stand and still block.
+  const w0 = world(-P / 2, 0), w1 = world(1.5 * P, 0);
+  assert.strictEqual(Tn.losBlocked(t, w0.x, w0.y, 12, w1.x, w1.y, 12), true, 'a ray across two blocks is blocked');
+  const roof = world(0, 0);
+  const hit = Tn.buildingAt(t, roof.x, roof.y);
+  assert.ok(hit && hit.heightM === 21, 'a block center is inside its building');
 });

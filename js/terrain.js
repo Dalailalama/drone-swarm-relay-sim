@@ -3,7 +3,9 @@
 // The ground is a value-noise heightfield (4-octave FBM): endless rolling
 // hills and valleys, deterministic from a seed, sampled analytically at any
 // (x, y) — no stored grid. Buildings are axis-aligned boxes planted on the
-// ground in seeded city blocks. Radio links need line of sight over BOTH.
+// ground in seeded city blocks (an imported OSM footprint may be turned:
+// angleRad rotates its w × d box about its center). Radio links need line
+// of sight over BOTH.
 //
 // Flight model: drones terrain-follow (their absolute altitude is the
 // ground under them + their AGL setting), the way real autopilots fly
@@ -54,7 +56,20 @@ function fbm(x, y, seed) {
 }
 
 // --- Terrain object -------------------------------------------------------------
-// { seed, groundAmpM, groundScaleM, buildings: [{x, y, w, d, heightM}] }
+// { seed, groundAmpM, groundScaleM, buildings: [{x, y, w, d, heightM, angleRad?}] }
+
+// Half extents of the axis-aligned box enclosing a building: its own w/2,
+// d/2 unless it is turned. Indexing, culling and flight avoidance use this
+// (conservative for a turned footprint); LOS and surface height test the
+// turned box exactly.
+function buildingHalfW(b) {
+  return b.angleRad
+    ? (Math.abs(Math.cos(b.angleRad)) * b.w + Math.abs(Math.sin(b.angleRad)) * b.d) / 2 : b.w / 2;
+}
+function buildingHalfD(b) {
+  return b.angleRad
+    ? (Math.abs(Math.sin(b.angleRad)) * b.w + Math.abs(Math.cos(b.angleRad)) * b.d) / 2 : b.d / 2;
+}
 
 function terrainGroundAt(t, x, y) {
   if (!t || !t.groundAmpM) return 0;
@@ -71,7 +86,13 @@ function buildingAt(t, x, y) {
   if (!list) return null;
   let best = null;
   for (const b of list) {
-    if (Math.abs(x - b.x) <= b.w / 2 && Math.abs(y - b.y) <= b.d / 2) {
+    let dx = x - b.x, dy = y - b.y;
+    if (b.angleRad) { // into the turned box's own frame
+      const c = Math.cos(b.angleRad), s = Math.sin(b.angleRad);
+      const u = dx * c + dy * s;
+      dy = dy * c - dx * s; dx = u;
+    }
+    if (Math.abs(dx) <= b.w / 2 && Math.abs(dy) <= b.d / 2) {
       if (!best || b.heightM > best.heightM) best = b;
     }
   }
@@ -144,6 +165,15 @@ function fresnelClearM(f, spanM, fMHz) {
   return 0.6 * 17.32 * Math.sqrt(Math.max(0, f * (1 - f)) * (spanM / 1000) / (fMHz / 1000));
 }
 
+// The same slab test against a turned building, done in the box's own frame.
+// A rigid transform keeps the ray parameter, so tmin/tmax mean the same.
+function rayIntersectsBuilding(ax, ay, bx, by, b) {
+  const c = Math.cos(b.angleRad), s = Math.sin(b.angleRad);
+  const pax = ax - b.x, pay = ay - b.y, pbx = bx - b.x, pby = by - b.y;
+  return rayIntersectsAABB(pax * c + pay * s, pay * c - pax * s, pbx * c + pby * s, pby * c - pbx * s,
+    -b.w / 2, b.w / 2, -b.d / 2, b.d / 2);
+}
+
 // True if the ray from A (absolute altitude aAltM) to B clips ground or a
 // building anywhere along the way. The clearance tapers to zero at the
 // endpoints — a ray naturally grazes the ground right at its own antenna,
@@ -202,10 +232,13 @@ function losBlocked(t, ax, ay, aAltM, bx, by, bAltM, fMHz) {
       bCandidates = set;
     }
     for (const b of bCandidates) {
-      const minBx = b.x - b.w / 2, maxBx = b.x + b.w / 2;
-      const minBy = b.y - b.d / 2, maxBy = b.y + b.d / 2;
+      const hw = buildingHalfW(b), hd = buildingHalfD(b);
+      const minBx = b.x - hw, maxBx = b.x + hw;
+      const minBy = b.y - hd, maxBy = b.y + hd;
       if (maxRayX < minBx || minRayX > maxBx || maxRayY < minBy || minRayY > maxBy) continue;
-      const isect = rayIntersectsAABB(ax, ay, bx, by, minBx, maxBx, minBy, maxBy);
+      const isect = b.angleRad
+        ? rayIntersectsBuilding(ax, ay, bx, by, b)
+        : rayIntersectsAABB(ax, ay, bx, by, minBx, maxBx, minBy, maxBy);
       if (isect) {
         const fPoints = [isect.tmin, isect.tmax, (isect.tmin + isect.tmax) / 2];
         const bAlt = terrainGroundAt(t, b.x, b.y) + b.heightM;
@@ -307,8 +340,9 @@ function indexBuildings(t) {
   let maxH = 0;
   for (const b of t.buildings) {
     if (b.heightM > maxH) maxH = b.heightM;
-    const x0 = Math.floor((b.x - b.w / 2) / BGRID_CELL_M), x1 = Math.floor((b.x + b.w / 2) / BGRID_CELL_M);
-    const y0 = Math.floor((b.y - b.d / 2) / BGRID_CELL_M), y1 = Math.floor((b.y + b.d / 2) / BGRID_CELL_M);
+    const hw = buildingHalfW(b), hd = buildingHalfD(b);
+    const x0 = Math.floor((b.x - hw) / BGRID_CELL_M), x1 = Math.floor((b.x + hw) / BGRID_CELL_M);
+    const y0 = Math.floor((b.y - hd) / BGRID_CELL_M), y1 = Math.floor((b.y + hd) / BGRID_CELL_M);
     for (let ix = x0; ix <= x1; ix++) {
       for (let iy = y0; iy <= y1; iy++) {
         const key = ix + ',' + iy;
@@ -385,6 +419,6 @@ function makeTerrain(name, opts) {
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     terrainGroundAt, terrainHeightAt, buildingAt, buildingsNear, losBlocked, makeTerrain,
-    indexBuildings, fbm, valueNoise, LOS_CLEARANCE_M, fresnelClearM,
+    indexBuildings, buildingHalfW, buildingHalfD, fbm, valueNoise, LOS_CLEARANCE_M, fresnelClearM,
   };
 }

@@ -128,14 +128,24 @@ function drawTerrain(ctx, cv, view, s) {
     const p = worldToScreen(view, cv, b.x - b.w / 2, b.y - b.d / 2);
     const wpx = b.w * view.pxPerM, dpx = b.d * view.pxPerM;
     if (wpx < 1.2) continue;
-    if (p.x + wpx < 0 || p.x > cv.width || p.y + dpx < 0 || p.y > cv.height) continue;
     const tall = b.heightM > s.altitudeM;
     ctx.fillStyle = tall ? 'rgba(122,74,66,0.55)' : 'rgba(138,136,122,0.28)';
-    ctx.fillRect(p.x, p.y, wpx, dpx);
-    if (tall) {
-      ctx.strokeStyle = 'rgba(224,96,80,0.55)'; ctx.lineWidth = 1 * U;
-      ctx.strokeRect(p.x, p.y, wpx, dpx);
+    if (tall) { ctx.strokeStyle = 'rgba(224,96,80,0.55)'; ctx.lineWidth = 1 * U; }
+    if (b.angleRad) {
+      // Turned OSM footprint: cull on its enclosing box, draw it turned.
+      const c = worldToScreen(view, cv, b.x, b.y);
+      const rpx = Math.max(buildingHalfW(b), buildingHalfD(b)) * view.pxPerM;
+      if (c.x + rpx < 0 || c.x - rpx > cv.width || c.y + rpx < 0 || c.y - rpx > cv.height) continue;
+      ctx.save();
+      ctx.translate(c.x, c.y); ctx.rotate(b.angleRad);
+      ctx.fillRect(-wpx / 2, -dpx / 2, wpx, dpx);
+      if (tall) ctx.strokeRect(-wpx / 2, -dpx / 2, wpx, dpx);
+      ctx.restore();
+      continue;
     }
+    if (p.x + wpx < 0 || p.x > cv.width || p.y + dpx < 0 || p.y > cv.height) continue;
+    ctx.fillRect(p.x, p.y, wpx, dpx);
+    if (tall) ctx.strokeRect(p.x, p.y, wpx, dpx);
   }
 }
 

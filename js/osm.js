@@ -1,8 +1,10 @@
 // Real-world areas from OpenStreetMap — buildings for any place on Earth.
 //
-// Turns a lat/lon + radius into the same axis-aligned building boxes the
-// procedural city uses ({x, y, w, d, heightM}), so LOS, routing, rendering
-// and the spatial index all work unchanged over real geography. Data comes
+// Turns a lat/lon + radius into the same building boxes the procedural city
+// uses ({x, y, w, d, heightM}), so LOS, routing, rendering and the spatial
+// index all work over real geography. Real streets are rarely north-up, so
+// each box keeps its footprint's orientation (angleRad) instead of growing
+// to an axis-aligned bounding box that would fill the street. Data comes
 // from the public Overpass API at runtime (no code dependencies); heights
 // use the building's own `height` tag when mapped, else floor count, else a
 // low-rise default — and each building remembers whether its height was
@@ -29,34 +31,91 @@ function geoMetresPerDeg(latDeg) {
     lon: GEO_WGS84_A / Math.sqrt(w) * Math.cos(phi) * Math.PI / 180,
   };
 }
+// Longitude folded into [-180, 180): applied to a difference it takes the
+// short way round, so a point just across the antimeridian is metres away,
+// not ~40,000 km. Exact (a no-op) for values already in range.
+function geoWrapLon(lonDeg) {
+  return lonDeg - 360 * Math.floor((lonDeg + 180) / 360);
+}
 const OSM_LEVEL_HEIGHT_M = 3.2;   // storey height when only a floor count is mapped
 const OSM_DEFAULT_HEIGHT_M = 9;   // untagged building: low-rise guess (~3 floors)
 const OSM_MAX_BUILDINGS = 6000;   // keep the biggest N; renderer & physics stay smooth
 
-// "18.5", "18.5 m", "60 ft" → metres; null if unparseable.
+// "18.5", "18.5 m", "12.5 metres", "60 ft", and OSM's feet-and-inches
+// 7'4" (Key:height) → metres; null if unparseable — including malformed
+// numbers like "1.2.3", which must not read as 1.2 m.
 function osmParseHeight(v) {
   if (v == null) return null;
-  const m = String(v).match(/^\s*(-?[\d.]+)\s*(m|ft|feet|')?\s*$/i);
+  const fi = String(v).match(/^\s*(\d+(?:\.\d+)?)\s*'\s*(\d+(?:\.\d+)?)\s*"\s*$/);
+  if (fi) {
+    const h = parseFloat(fi[1]) * 0.3048 + parseFloat(fi[2]) * 0.0254;
+    return h > 0 ? h : null;
+  }
+  const m = String(v).match(/^\s*(-?\d+(?:\.\d+)?)\s*(m|metres?|meters?|ft|feet|')?\s*$/i);
   if (!m) return null;
   const n = parseFloat(m[1]);
   if (!isFinite(n) || n <= 0) return null;
-  return (m[2] && m[2].toLowerCase() !== 'm') ? n * 0.3048 : n;
+  return (m[2] && m[2][0].toLowerCase() !== 'm') ? n * 0.3048 : n;
 }
 
-// One Overpass `way` element (out geom) → AABB building box in local metres,
-// or null if degenerate. Frame matches the sim: x=East, y=South, origin at
-// (lat0, lon0) — north is up on screen like a real map.
+// Minimum-area rectangle around a footprint's points (local metres). It has
+// a side flush with some convex-hull edge, so trying every hull edge's
+// direction finds it (a footprint's hull is a handful of points). Returns
+// {x, y, w, d, angleRad} with angleRad folded into [-π/4, π/4], or null.
+// An axis-aligned box would fill the streets of any grid that isn't
+// north-up: a 45° block's bounding box is twice its real footprint.
+function osmMinAreaRect(pts) {
+  const p = pts.slice().sort((a, b) => a.x - b.x || a.y - b.y);
+  const cross = (o, a, b) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+  const lower = [], upper = [];
+  for (const q of p) {
+    while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], q) <= 0) lower.pop();
+    lower.push(q);
+  }
+  for (let i = p.length - 1; i >= 0; i--) {
+    while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p[i]) <= 0) upper.pop();
+    upper.push(p[i]);
+  }
+  const hull = lower.slice(0, -1).concat(upper.slice(0, -1));
+  let best = null;
+  for (let i = 0; i < hull.length; i++) {
+    const a = hull[i], b = hull[(i + 1) % hull.length];
+    const len = Math.hypot(b.x - a.x, b.y - a.y);
+    if (!(len > 0)) continue;
+    const c = (b.x - a.x) / len, s = (b.y - a.y) / len;
+    let u0 = Infinity, u1 = -Infinity, v0 = Infinity, v1 = -Infinity;
+    for (const q of hull) {
+      const u = q.x * c + q.y * s, v = q.y * c - q.x * s;
+      if (u < u0) u0 = u; if (u > u1) u1 = u;
+      if (v < v0) v0 = v; if (v > v1) v1 = v;
+    }
+    const area = (u1 - u0) * (v1 - v0);
+    if (!best || area < best.area) best = { area, c, s, u0, u1, v0, v1 };
+  }
+  if (!best) return null;
+  const { c, s, u0, u1, v0, v1 } = best;
+  const uc = (u0 + u1) / 2, vc = (v0 + v1) / 2;
+  let w = u1 - u0, d = v1 - v0;
+  // A rectangle repeats every 90°: fold the angle near zero, swapping sides
+  // on an odd quarter turn, so a north-up footprint comes back unrotated.
+  let angleRad = Math.atan2(s, c);
+  const quarter = Math.round(angleRad / (Math.PI / 2));
+  angleRad -= quarter * (Math.PI / 2);
+  if (quarter % 2 !== 0) { const tmp = w; w = d; d = tmp; }
+  if (Math.abs(angleRad) < 1e-6) angleRad = 0;
+  return { x: uc * c - vc * s, y: uc * s + vc * c, w, d, angleRad };
+}
+
+// One Overpass `way` element (out geom) → oriented building box in local
+// metres (its minimum-area rectangle), or null if degenerate. Frame matches
+// the sim: x=East, y=South, origin at (lat0, lon0) — north is up on screen
+// like a real map. angleRad is only set when the footprint is turned.
 function osmWayToBuilding(el, lat0, lon0) {
   if (!el || el.type !== 'way' || !el.geometry || el.geometry.length < 3) return null;
   const k = geoMetresPerDeg(lat0);
-  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-  for (const g of el.geometry) {
-    const x = (g.lon - lon0) * k.lon;
-    const y = (lat0 - g.lat) * k.lat;
-    if (x < minX) minX = x; if (x > maxX) maxX = x;
-    if (y < minY) minY = y; if (y > maxY) maxY = y;
-  }
-  const w = maxX - minX, d = maxY - minY;
+  const box = osmMinAreaRect(el.geometry.map(g => ({ x: geoWrapLon(g.lon - lon0) * k.lon, y: (lat0 - g.lat) * k.lat })));
+  if (!box) return null;
+  const { w, d } = box;
   if (!(w > 2 && d > 2)) return null; // slivers and bad geometry
   const tags = el.tags || {};
   let heightM = osmParseHeight(tags.height) ?? osmParseHeight(tags['building:height']);
@@ -67,7 +126,9 @@ function osmWayToBuilding(el, lat0, lon0) {
     else heightM = OSM_DEFAULT_HEIGHT_M;
     estimated = true;
   }
-  return { x: (minX + maxX) / 2, y: (minY + maxY) / 2, w, d, heightM, estimated };
+  const b = { x: box.x, y: box.y, w, d, heightM, estimated };
+  if (box.angleRad) b.angleRad = box.angleRad;
+  return b;
 }
 
 // Multipolygon relation (out geom) → its outer rings as point lists. Mappers
@@ -142,14 +203,35 @@ function osmParseLatLon(text) {
 }
 
 // --- Network (browser only) --------------------------------------------------
+// The free OSM services have usage policies. Nominatim: "an absolute maximum
+// of 1 request per second" per application, and cache results. Overpass:
+// back off when told the server is busy. The browser already identifies the
+// app (its own User-Agent plus the page's Referer/Origin; a page cannot set
+// User-Agent), so what is left to the client is pacing and caching.
+const OSM_NOMINATIM_GAP_MS = 1100;   // a little over the 1 req/s ceiling
+const OSM_BUSY_COOLDOWN_MS = 30000;  // after a 429/406/504 from an Overpass server
+let osmNominatimAt = -Infinity;      // when the latest Nominatim request is due out
+const osmGeocodeCache = new Map();   // normalized query → {lat, lon, name}
+const osmBusyUntil = new Map();      // Overpass endpoint → no requests before this time
 
 async function osmGeocode(query) {
+  const key = String(query).trim().toLowerCase().replace(/\s+/g, ' ');
+  const hit = osmGeocodeCache.get(key);
+  if (hit) return Object.assign({}, hit);
+  // Reserve the next slot synchronously, so two searches in a row queue
+  // behind each other instead of both waking at once.
+  const now = Date.now();
+  const at = Math.max(now, osmNominatimAt + OSM_NOMINATIM_GAP_MS);
+  osmNominatimAt = at;
+  if (at > now) await new Promise(r => setTimeout(r, at - now));
   const url = OSM_NOMINATIM + '?format=json&limit=1&q=' + encodeURIComponent(query);
   const res = await fetch(url, { headers: { Accept: 'application/json' } });
   if (!res.ok) throw new Error('Place search failed (' + res.status + ')');
   const hits = await res.json();
   if (!hits.length) throw new Error('No place found for "' + query + '"');
-  return { lat: parseFloat(hits[0].lat), lon: parseFloat(hits[0].lon), name: hits[0].display_name };
+  const out = { lat: parseFloat(hits[0].lat), lon: parseFloat(hits[0].lon), name: hits[0].display_name };
+  osmGeocodeCache.set(key, out);
+  return Object.assign({}, out);
 }
 
 // Building ways AND multipolygon building relations (whose outer ways are
@@ -162,24 +244,32 @@ function osmBuildingQuery(lat, lon, radiusM) {
 
 async function osmFetchArea(lat, lon, radiusM) {
   const q = osmBuildingQuery(lat, lon, radiusM);
-  let lastErr = null;
+  let lastErr = null, busy = 0;
   for (const ep of OSM_ENDPOINTS) {
+    const waitMs = (osmBusyUntil.get(ep) || 0) - Date.now();
+    if (waitMs > 0) { busy = Math.max(busy, waitMs); continue; } // still cooling down
     try {
       const res = await fetch(ep, { method: 'POST', body: 'data=' + encodeURIComponent(q),
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
+      if (res.status === 429 || res.status === 406 || res.status === 504) {
+        osmBusyUntil.set(ep, Date.now() + OSM_BUSY_COOLDOWN_MS);
+        busy = Math.max(busy, OSM_BUSY_COOLDOWN_MS);
+        continue;
+      }
       if (!res.ok) { lastErr = new Error('Overpass ' + res.status + ' (busy — try again in a minute)'); continue; }
       const json = await res.json();
       const { buildings, dropped } = osmParseBuildings(json, lat, lon);
       return { lat, lon, radiusM, buildings, dropped };
     } catch (e) { lastErr = e; }
   }
+  if (busy > 0) throw new Error('OSM servers asked us to wait ~' + Math.ceil(busy / 1000) + ' s before the next request');
   throw lastErr || new Error('Overpass unreachable');
 }
 
 // UMD-lite export so parsing is unit-testable under Node.
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
-    geoMetresPerDeg, osmParseHeight, osmWayToBuilding, osmParseBuildings, osmBuildingQuery, osmClearZones, osmParseLatLon,
+    geoMetresPerDeg, geoWrapLon, osmParseHeight, osmWayToBuilding, osmParseBuildings, osmBuildingQuery, osmClearZones, osmParseLatLon,
     OSM_LEVEL_HEIGHT_M, OSM_DEFAULT_HEIGHT_M, OSM_MAX_BUILDINGS,
   };
 }
