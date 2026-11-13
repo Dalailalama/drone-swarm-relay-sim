@@ -101,3 +101,21 @@ test('perimeter patrol launches a large short-range ring that heals', () => {
   assert.strictEqual(st.aliveCount, sc.count);
   assert.ok(st.connected, 'dense ESP-NOW mesh must close over a small site');
 });
+
+// audit swarm-onboard/SCN-04: the 180 s test above ended before the vehicle
+// passed the objective. On the template's old rolling hills the moving 6 m
+// mast dropped behind a ridge at ~6 min and contact never came back. Fly the
+// template as the page loads it (terrain, dynamics) for a full 15 minutes.
+test('convoy escort holds the objective for 15 minutes while the command vehicle drives on', () => {
+  const { runScenarioSeed } = require('../tools/compare.js');
+  const m = MISSION_LIBRARY.find(x => x.id === 'convoy-escort');
+  const sc = Object.assign({}, m.scenario, { baseVelMps: m.dynamics.baseVelMps });
+  let S = null;
+  const wrapped = Object.create(ctx);
+  wrapped.stepSwarm = (s, dt) => { S = s; return ctx.stepSwarm(s, dt); };
+  runScenarioSeed(wrapped, { id: m.id, title: m.title, scenario: sc }, sc.seed, 900);
+  assert.ok(Math.hypot(S.base.x, S.base.y) > 5000, 'the vehicle really drove on');
+  assert.ok(S.stats.connSec / S.stats.tSec > 0.5, 'objective uptime ' + (100 * S.stats.connSec / S.stats.tSec).toFixed(1) + '%');
+  const ok = S.drones.filter(d => d.mode === 'ok').length;
+  assert.ok(ok >= S.drones.length / 2, ok + ' of ' + S.drones.length + ' drones in ok at T+15 min');
+});
