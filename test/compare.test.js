@@ -146,3 +146,29 @@ test('compare Uptime is the objective-connected metric; fleet contact is its own
   assert.ok(md.includes('Objective uptime') && md.includes('Fleet contact') && md.includes('91.0%'), md);
   assert.ok(renderTextDashboard([row], [1, 2], 40).includes('91.0%'));
 });
+
+// A hand-written scenario may leave fields out: the page fills them from its
+// control defaults (main.js resetControlsToDefaults), but compare used its own
+// (8 micros at 70 m, 250 kbps video, no relay wing for hetero, and video off
+// for the videoOn spelling the page also reads), so the same file ran a
+// different experiment in compare than on the page.
+test('compare fills fields a scenario file omits with the page defaults', () => {
+  const { loadUI, makeFile } = require('./helpers/dom.js');
+  const sc = { version: 1, radio: 'rfd900x', env: 'open', terrain: 'flat', seed: 11,
+    base: { x: 0, y: 0 }, target: { x: 900, y: -200 }, hetero: true, videoOn: true };
+  const { ctx: ui, el, fire } = loadUI();
+  el('loadScenarioInput').files = [makeFile('partial.json', JSON.stringify(sc))];
+  fire('loadScenarioInput', 'change');
+  assert.deepStrictEqual(ui.__alerts, []);
+  const ctx = loadCore(['scenarios.js']);
+  let S = null;
+  const wrapped = Object.create(ctx);
+  wrapped.makeSwarm = opts => (S = ctx.makeSwarm(opts));
+  runScenarioSeed(wrapped, { id: 'p', title: 'p', scenario: sc }, sc.seed, 0);
+  const shape = s => ({
+    drones: s.drones.length, airframe: s.airframe.id, altitudeM: s.altitudeM, deployFrac: s.deployFrac,
+    wing: s.relayIdx.length, relayAirframe: s.relayAirframe && s.relayAirframe.id, relayRadio: s.relayRadio && s.relayRadio.id,
+    videoOn: s.videoOn, videoKbps: s.videoKbps, windX: s.wind.x, windY: s.wind.y, corridor: s.corridorRouting, broadcast: s.broadcastC2,
+  });
+  assert.deepStrictEqual(shape(S), shape(ui.sim.swarm));
+});

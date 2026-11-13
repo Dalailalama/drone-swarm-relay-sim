@@ -17,6 +17,14 @@ const A = require('../js/airframes.js');
 const BS = require('../js/batchstats.js');
 const { SIM_DT_SEC } = require('../js/swarm.js');
 
+// What the page fills in for a field the scenario file leaves out (main.js
+// resetControlsToDefaults), so a partial file runs the experiment the page
+// would load from it.
+const PAGE_DEFAULTS = {
+  airframe: A.AIRFRAMES[1].id, count: 10, altitudeM: 50, spacingPct: 80,
+  relayWing: 4, relayAirframe: 'x8', relayRadio: 'rfd900x', videoKbps: 500,
+};
+
 // Median over ALL runs with a missing value read as "not yet" (+Infinity) —
 // the censored reading for time-to-arrive: a seed that never arrived is
 // slower than every seed that did, not absent. Infinity when fewer than half
@@ -55,7 +63,7 @@ function arrivedOf(st, durationSec) {
 function minDurationSec(scen) {
   const sc = scen.scenario;
   const b = posOf(sc.base, 0, 0), t = posOf(sc.target, 2000, -500);
-  const af = lookup(A.AIRFRAMES, sc.airframe || A.AIRFRAMES[0].id, 'airframe');
+  const af = lookup(A.AIRFRAMES, sc.airframe || PAGE_DEFAULTS.airframe, 'airframe');
   return Math.ceil(2 * Math.hypot(t.x - b.x, t.y - b.y) / af.maxSpeedMs / 10) * 10;
 }
 
@@ -107,7 +115,7 @@ function buildCompareTerrain(ctx, sc, seed) {
   const b = posOf(sc.base, 0, 0), t = posOf(sc.target, 2000, -500);
   return ctx.makeTerrain(sc.terrain || 'flat', {
     distM: Math.hypot(t.x - b.x, t.y - b.y),
-    altM: sc.altitudeM ?? 70,
+    altM: sc.altitudeM ?? PAGE_DEFAULTS.altitudeM,
     baseX: b.x, baseY: b.y, targetX: t.x, targetY: t.y,
     seed,
     density: (sc.cityDensity ?? 40) / 100,
@@ -119,17 +127,21 @@ function runScenarioSeed(ctx, scenarioObj, seed, durationSec) {
   const sc = scenarioObj.scenario;
   const radio = resolveRadio(sc.radio || R.RADIOS[0].id, sc.radioPreset, 'radio');
   const env = lookup(R.ENVIRONMENTS, sc.env || R.ENVIRONMENTS[0].id, 'env');
-  const airframe = lookup(A.AIRFRAMES, sc.airframe || A.AIRFRAMES[0].id, 'airframe');
-  const relayAirframe = sc.relayAirframe ? lookup(A.AIRFRAMES, sc.relayAirframe, 'relay airframe') : null;
-  const relayRadio = sc.relayRadio ? resolveRadio(sc.relayRadio, sc.relayRadioPreset, 'relay radio') : null;
+  const airframe = lookup(A.AIRFRAMES, sc.airframe || PAGE_DEFAULTS.airframe, 'airframe');
+  // A named relay airframe/radio must exist even with the wing off; a wing
+  // that names none flies the page's default selections.
+  const relayAirframeId = sc.relayAirframe || (sc.hetero ? PAGE_DEFAULTS.relayAirframe : null);
+  const relayRadioId = sc.relayRadio || (sc.hetero ? PAGE_DEFAULTS.relayRadio : null);
+  const relayAirframe = relayAirframeId ? lookup(A.AIRFRAMES, relayAirframeId, 'relay airframe') : null;
+  const relayRadio = relayRadioId ? resolveRadio(relayRadioId, sc.relayRadioPreset, 'relay radio') : null;
   const terrain = buildCompareTerrain(ctx, sc, seed);
   const b = posOf(sc.base, 0, 0), t = posOf(sc.target, 2000, -500);
 
   const s = ctx.makeSwarm({
-    count: sc.count ?? 8,
+    count: sc.count ?? PAGE_DEFAULTS.count,
     airframe,
-    altitudeM: sc.altitudeM ?? 70,
-    deployFrac: (sc.spacingPct ?? 80) / 100,
+    altitudeM: sc.altitudeM ?? PAGE_DEFAULTS.altitudeM,
+    deployFrac: (sc.spacingPct ?? PAGE_DEFAULTS.spacingPct) / 100,
     corridorRouting: sc.corridor !== false,
     broadcastC2: sc.broadcast !== false,
     windX: (sc.windSpd ?? 0) * Math.cos((sc.windDir ?? 0) * Math.PI / 180),
@@ -146,15 +158,15 @@ function runScenarioSeed(ctx, scenarioObj, seed, durationSec) {
     shadowSigmaDb: env.shadowSigmaDb,
     seed,
     terrain,
-    relayWing: sc.hetero ? (sc.relayWing ?? 0) : 0,
+    relayWing: sc.hetero ? (sc.relayWing ?? PAGE_DEFAULTS.relayWing) : 0,
     relayAirframe,
     relayRadio,
     jammers: sc.jammers || [],
     gpsZones: sc.gpsZones || [],
     spectrumAgility: !!sc.spectrumAgility,
     lpiMode: !!sc.lpiMode,
-    videoOn: !!sc.videoBackhaul,
-    videoKbps: sc.videoKbps ?? 250,
+    videoOn: !!(sc.videoBackhaul ?? sc.videoOn), // the page reads videoOn when videoBackhaul is absent
+    videoKbps: sc.videoKbps ?? PAGE_DEFAULTS.videoKbps,
   });
 
   // Energy is integrated per step: a completed battery swap resets energyWh to
