@@ -229,6 +229,28 @@ test('regression #14: a run that exceeds the time budget is killed with 504', as
   }
 });
 
+// LIMITS admits ~600 s of fleet time plus ~480 s of relay planning at the
+// rates batch.js was sized at, but the pool killed every run at a fixed
+// 5 min: a batch the validator accepted could hold a worker for 5 minutes
+// and then 504 with nothing the client could act on.
+test('the server time budget covers the largest batch the limits admit, and its 504 says what to do', async () => {
+  const wallMs = B.maxBatchWallMs();
+  assert.strictEqual(wallMs, B.LIMITS.maxTotalWorkDroneSec * 1 + B.LIMITS.maxTotalPlanCellReplans * 0.012);
+  const dflt = createApp();
+  assert.ok(dflt.batchTimeoutMs >= 2 * wallMs,
+    'time budget ' + dflt.batchTimeoutMs + ' ms vs ' + wallMs + ' ms for the largest admissible batch');
+  const app = createApp({ workers: 1, queue: 1, timeoutMs: 150 });
+  assert.strictEqual(app.batchTimeoutMs, 150);
+  await new Promise(r => app.listen(0, r));
+  try {
+    const r = await post(app.address().port, { ...GOOD, durationSec: 600, count: 20 });
+    assert.strictEqual(r.code, 504);
+    assert.match(JSON.parse(r.body).error, /150 ms time budget.*fewer runs.*tools\/batch\.js/);
+  } finally {
+    app.close();
+  }
+});
+
 test('regression #14: a client disconnect cancels its queued/running work', async () => {
   const app = createApp({ workers: 1, queue: 2, timeoutMs: 60000 });
   await new Promise(r => app.listen(0, r));

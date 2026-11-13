@@ -15,7 +15,7 @@
 const http = require('node:http');
 const { Worker } = require('node:worker_threads');
 const path = require('node:path');
-const { validateConfig, LIMITS } = require('./batch.js');
+const { validateConfig, LIMITS, maxBatchWallMs } = require('./batch.js');
 
 // Oversize bodies are answered, not hung up on (soak finding R13): the old
 // code destroyed the socket mid-upload, so the client saw ECONNRESET instead
@@ -51,7 +51,12 @@ function send(res, code, body, type) {
 // `workers` concurrent runs, a bounded wait queue (overflow answers 429), a
 // hard per-run time budget (504 + terminate), and a client who hangs up
 // takes their worker down with them.
-const POOL_DEFAULTS = { workers: 2, queue: 8, timeoutMs: 5 * 60 * 1000 };
+// The time budget follows the work budgets the validator admits (review): a
+// fixed 5 min sat under the ~18 min the largest admissible batch takes at
+// batch.js's rates, so an accepted batch could hold a worker for 5 minutes
+// and then 504. Twice that estimate leaves room for a slower machine.
+const TIMEOUT_MARGIN = 2;
+const POOL_DEFAULTS = { workers: 2, queue: 8, timeoutMs: Math.ceil(TIMEOUT_MARGIN * maxBatchWallMs()) };
 
 function makePool(opts, stats) {
   const workers = opts.workers != null ? opts.workers : POOL_DEFAULTS.workers;
@@ -96,7 +101,10 @@ function makePool(opts, stats) {
       const killTimer = setTimeout(() => {
         stats.timedOut++;
         worker.terminate();
-        finish(job.reject, err('batch run exceeded the ' + timeoutMs + ' ms time budget', 504));
+        // Past a budget sized for the largest admissible batch, say what to
+        // do: this machine runs slower than the limits assume.
+        finish(job.reject, err('batch run exceeded the ' + timeoutMs + ' ms time budget — split it into smaller ' +
+          'batches (fewer runs, a shorter duration or a smaller fleet), or run it with tools/batch.js, which has none', 504));
       }, timeoutMs);
       job.cancel = () => {
         stats.terminated++;
@@ -116,6 +124,7 @@ function makePool(opts, stats) {
   }
 
   return {
+    timeoutMs,
     submit(cfg, req, res) {
       return new Promise((resolve, reject) => {
         if (active >= workers && waiting.length >= queueMax) {
@@ -214,6 +223,7 @@ function createApp(opts) {
     }
   });
   app.batchStats = stats;
+  app.batchTimeoutMs = pool.timeoutMs;
   return app;
 }
 
