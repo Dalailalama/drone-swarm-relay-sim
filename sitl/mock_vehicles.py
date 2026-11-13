@@ -87,6 +87,7 @@ INIT_ABORT_HOLD = "abort-hold"
 FAILED_PREFIX = "failed:"
 
 MAV_CMD_NAV_LAND = 21
+LAND_MODE_ID = 9  # ArduCopter's LAND custom_mode: NAV_LAND switches the autopilot to it
 
 
 def _now() -> float:
@@ -141,6 +142,11 @@ class Vehicle:
     descent_ref_alt: float = 0.0
     last_descent_at: float = 0.0
     climb_ref_alt: float = 0.0
+    # Autopilot refusals the real bridge has to handle, so tests can make the
+    # mock exhibit them: GUIDED is refused (an abort is never confirmed, a
+    # relaunch fails:mode), or the pre-arm checks fail (a relaunch fails:arm).
+    stuck_mode: bool = False
+    arm_refused: bool = False
 
     # --- link/telemetry truth ---
     @property
@@ -327,6 +333,13 @@ class Vehicle:
                     self.failed_at = None
                 return
             elif self.service_phase == "relaunch":
+                if not self.armed:
+                    # As the bridge does on a DENIED arm ACK, or on GUIDED never
+                    # confirmed within the step timeout: park, never retried.
+                    if self.arm_refused or now - self.step_started_at >= INIT_STEP_TIMEOUT_S:
+                        self._fail("arm" if self.mode_confirmed else "mode", now)
+                        self.service_phase = "failed"
+                    return
                 if self.mode_confirmed and self.armed and self.airborne and self.alt >= self.takeoff_alt - TAKEOFF_CONFIRM_ALT_M:
                     self._become_ready(now)
                     self.service_phase = None
@@ -418,6 +431,7 @@ class Vehicle:
                 ground = 0.0
             self.target_ground_alt = ground
             self.goal_alt = ground
+            self.custom_mode = LAND_MODE_ID
             return True, None, None, False
 
         if request_id != self.service_id:
@@ -449,11 +463,13 @@ class Vehicle:
             self.launch_alt = self.alt
             self.takeoff_climb_m = alt
             self.takeoff_alt = self.launch_alt + alt
-            self.goal_alt = self.takeoff_alt
             self.service_phase = "relaunch"
             self._enter_step(INIT_CONFIRM_MODE, now=_now())
-            self.custom_mode = self.guided_mode_id
-            self.armed = True
+            if not self.stuck_mode:
+                self.custom_mode = self.guided_mode_id
+            if self.mode_confirmed and not self.arm_refused:
+                self.armed = True
+                self.goal_alt = self.takeoff_alt
             return True, None, None, False
 
         if action == "abort":
@@ -467,7 +483,7 @@ class Vehicle:
                     self.failed_at = None
                     self.step_started_at = now
                     self.step_sent_at = now
-                    if not getattr(self, "stuck_mode", False):
+                    if not self.stuck_mode:
                         self.custom_mode = self.guided_mode_id
                     if self.connected and self.mode_confirmed and self.position_fresh:
                         self.hold_x = self.x
@@ -722,42 +738,35 @@ async def handle_message(websocket, raw: str) -> None:
         if not isinstance(request_id, str) or v is None or not action:
             return
 
-        # Idempotency check: replay previous response if this action was already handled
-        history_key = (request_id, action)
-        if history_key in v.service_action_history:
-            cached_acc, cached_err, cached_code, cached_ret = v.service_action_history[history_key]
-            await websocket.send(json.dumps({
+        def ack(accepted, err, code, retryable, duplicate):
+            # Same keys as bridge.py's _send_service_ack, replay included.
+            ack_msg = {
                 "type": "service_ack",
                 "requestId": request_id,
                 "id": vid,
                 "action": action,
-                "accepted": cached_acc,
-                "error": cached_err,
-                "code": cached_code,
-                "retryable": cached_ret,
-                "duplicate": True,
-            }))
+                "accepted": accepted,
+                "duplicate": duplicate,
+            }
+            if err is not None:
+                ack_msg["error"] = err
+            if code is not None:
+                ack_msg["code"] = code
+            if not accepted:
+                ack_msg["retryable"] = retryable
+            return json.dumps(ack_msg)
+
+        # Idempotency check: replay previous response if this action was already handled
+        history_key = (request_id, action)
+        if history_key in v.service_action_history:
+            await websocket.send(ack(*v.service_action_history[history_key], duplicate=True))
             return
 
         accepted, err, code, retryable = v.service(request_id, action, msg)
         log.info("service req: vid=%s action=%s req_id=%s accepted=%s code=%s err=%s", vid, action, request_id, accepted, code, err)
         if accepted:
             v.service_action_history[history_key] = (accepted, err, code, retryable)
-        ack_msg = {
-            "type": "service_ack",
-            "requestId": request_id,
-            "id": vid,
-            "action": action,
-            "accepted": accepted,
-            "duplicate": False,
-        }
-        if err is not None:
-            ack_msg["error"] = err
-        if code is not None:
-            ack_msg["code"] = code
-        if not accepted:
-            ack_msg["retryable"] = retryable
-        await websocket.send(json.dumps(ack_msg))
+        await websocket.send(ack(accepted, err, code, retryable, duplicate=False))
 
     else:
         # Unknown message type: ignore gracefully, per protocol.

@@ -179,7 +179,7 @@ A rejection adds `retryable`, and `code`/`error` when the server has them:
 }
 ```
 - `accepted` (boolean): Whether the request was validated and adopted.
-- `duplicate` (boolean): `true` if this `(requestId, action)` was previously processed and accepted; the original outcome is replayed. The mock's replay always carries `code`, `error` and `retryable` (`null`/`false` when unset); the bridge's omits them.
+- `duplicate` (boolean): `true` if this `(requestId, action)` was previously processed and accepted; the original outcome is replayed, with the same keys from both servers.
 - `code` (string, optional): Machine-readable error code on failure (e.g. `INVALID_PHASE`, `INVALID_REQUEST_ID`, `SERVICE_BUSY`, `HOLD_NOT_READY`, `VEHICLE_NOT_READY`, `BAD_ALTITUDE`).
 - `retryable` (boolean, on rejections): `true` if the failure is temporary and can succeed on vehicle state change. Only accepted outcomes are cached for duplicate replay.
 - `error` (string, optional): Human-readable diagnostic description.
@@ -264,5 +264,7 @@ stateDiagram-v2
 3. Stale heartbeat gating: an abort with an expired heartbeat enters `confirm-abort` and commands no hold until fresh heartbeat evidence arrives (`abort-hold`).
 4. Elevation datum conversion for relaunch (`takeoff_alt = launch_alt + requested_alt`).
 5. READY only at `takeoff_alt - 1.0 m`.
+6. A grounded abort exits through `relaunch` (§5.3).
+7. Shared failure semantics: a re-init keeps an airborne vehicle where it is; a relaunch whose arm the autopilot refuses parks the vehicle (`failed:arm`, never re-armed); an abort whose GUIDED request is refused never reports `abort-hold`. The mock models the refusals with its `arm_refused` and `stuck_mode` vehicle flags, and switches to LAND mode on `land` as ArduCopter does. The duplicate-replay `service_ack` carries the same keys from both servers.
 
 Not covered by this suite: non-caching of retryable rejections and touchdown detection (exercised per server in `sitl/test_bridge.py` and `sitl/test_mock_vehicles.py`), and the server differences called out in §3 and §5.2.

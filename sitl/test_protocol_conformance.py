@@ -317,6 +317,9 @@ def test_service_ack_keys_match_doc() -> None:
                        f"(required {sorted(required)}, allowed {sorted(allowed)})")
         if not ack["accepted"]:
             assert_conform("retryable" in ack, f"{who}: rejected service_ack lacks retryable")
+    dups = {who: sorted(ack) for who, ack in seen_acks if ack["duplicate"]}
+    assert_conform(dups.get("Bridge") == dups.get("Mock"),
+                   f"duplicate-replay ack keys differ between the servers: {dups}")
 
 
 async def test_ready_means_takeoff_altitude() -> None:
@@ -420,12 +423,139 @@ async def test_grounded_abort_exits_by_relaunch() -> None:
                        f"Mock: relaunch after a grounded abort refused: {code} {err}")
 
 
+async def test_shared_semantics() -> None:
+    """Behaviour the mock used to fake, run identically against both servers:
+    a re-init keeps an airborne vehicle where it is; a relaunch whose arm is
+    refused parks the vehicle (failed:arm, then back to 'landed' on the
+    ground, never re-armed or climbing); an abort whose GUIDED request is
+    refused never reports abort-hold (failed:abort instead)."""
+    # --- bridge -----------------------------------------------------------
+    h = tb.Harness()
+    ws = h.client("conformance-semantics")
+    ap = h.autopilot(14550)
+    await h.init(ws, count=1, alt=30.0)
+    v = bridge.STATE.vehicles["DR-1"]
+    ap.north, ap.east = -40.0, 25.0
+    await tb.wait_until(lambda: (v.x, v.y) == (25.0, 40.0))
+    await h.init(ws, count=1, alt=30.0)
+    await asyncio.sleep(0.1)
+    assert_conform(bridge.STATE.vehicles["DR-1"] is v and v.ready and (v.x, v.y) == (25.0, 40.0)
+                   and tb.conn_for(14550).count("takeoff") == 1,
+                   f"Bridge: re-init moved or re-launched an airborne vehicle ({v.x}, {v.y}, {v.init_state})")
+    await h.close()
+
+    h = tb.Harness()
+    ws = h.client("conformance-semantics")
+    await h.init(ws, count=0, alt=30.0)
+    clock = tb.Clock()
+
+    async def service(action, request_id, **extra):
+        await bridge.handle_message(ws, json.dumps({
+            "type": "service", "id": "DR-1", "requestId": request_id, "action": action, **extra}), None, 14550)
+        return json.loads(ws.messages[-1])
+
+    def tick(armed, mode, down=-0.2, step=0.1):
+        clock.now += step
+        conn.push(tb.hb_msg(armed=armed, custom_mode=mode))
+        conn.push(tb.pos_msg(0.0, 0.0, down))
+        if not armed:
+            conn.push(tb.ext_state_msg(1))
+        bridge._drain_messages(v)
+
+    with patch.object(bridge, "_now", clock):
+        v = tb.current_vehicle()
+        conn = v.conn
+        v.service_id, v.service_phase, v.init_state, v.ready = "svc-arm", "swapped", "swapped", False
+        tick(False, GUIDED_MODE_ID)
+        assert_conform((await service("relaunch", "svc-arm", alt=20.0))["accepted"], "Bridge: relaunch setup refused")
+        tick(False, GUIDED_MODE_ID)
+        await bridge._advance_init(v)
+        conn.push(tb.ack_msg(tb.MAV_CMD_COMPONENT_ARM_DISARM, tb.MAV_RESULT_DENIED))
+        states = set()
+        for _ in range(30):
+            tick(False, GUIDED_MODE_ID, step=0.5)
+            await bridge._advance_init(v)
+            states.add(v.init_state)
+        assert_conform("failed:arm" in states and v.service_phase in ("failed", "landed") and not v.ready
+                       and conn.count("arm") == 1 and conn.count("takeoff") == 0,
+                       f"Bridge: refused relaunch arm not parked ({sorted(states)}, {v.service_phase}, "
+                       f"arms={conn.count('arm')})")
+
+        v = tb.current_vehicle()
+        await service("land", "svc-guided")
+        tick(True, 9, down=-20.0)  # ArduCopter switched to LAND (9) and will not leave it
+        await service("abort", "svc-guided")
+        states = set()
+        for _ in range(30):
+            tick(True, 9, down=-20.0, step=0.5)
+            await bridge._advance_init(v)
+            states.add(v.init_state)
+        assert_conform(bridge.INIT_ABORT_HOLD not in states and "failed:abort" in states,
+                       f"Bridge: abort with GUIDED refused went {sorted(states)}")
+    await h.close()
+
+    # --- mock -------------------------------------------------------------
+    clock = [5000.0]
+    with patch.object(mv, "_now", lambda: clock[0]):
+        world = mv.World()
+
+        def run(pred, n=1000):
+            for _ in range(n):
+                clock[0] += 0.05
+                world.physics_tick(0.05)
+                if pred():
+                    return True
+            return False
+
+        world.reset(1, 30.0)
+        m = world.vehicles["DR-1"]
+        run(lambda: m.ready)
+        world.apply_goals([{"id": "DR-1", "x": 25.0, "y": 40.0, "alt": 30.0}])
+        run(lambda: (m.x, m.y) == (25.0, 40.0))
+        world.reset(1, 30.0)
+        run(lambda: False, n=20)
+        assert_conform(world.vehicles["DR-1"] is m and m.ready and (m.x, m.y) == (25.0, 40.0),
+                       f"Mock: re-init moved an airborne vehicle ({m.x}, {m.y}, {m.init_state})")
+
+        m.service("svc-arm", "land", {"groundAlt": 0.0})
+        run(lambda: m.service_phase == "landed")
+        m.service("svc-arm", "authorize", {})
+        m.service("svc-arm", "complete", {})
+        m.arm_refused = True
+        acc, *_ = m.service("svc-arm", "relaunch", {"alt": 20.0})
+        states = set()
+        for _ in range(60):
+            clock[0] += 0.05
+            world.physics_tick(0.05)
+            states.add(m.init_state)
+        assert_conform(acc and "failed:arm" in states and m.service_phase in ("failed", "landed")
+                       and not m.armed and not m.ready and m.alt == 0.0,
+                       f"Mock: refused relaunch arm not parked ({sorted(states)}, {m.service_phase}, alt {m.alt})")
+
+        world.reset(0, 30.0)
+        world.reset(1, 30.0)
+        m = world.vehicles["DR-1"]
+        run(lambda: m.ready)
+        m.service("svc-guided", "land", {"groundAlt": 0.0})
+        run(lambda: False, n=5)
+        m.stuck_mode = True
+        m.service("svc-guided", "abort", {})
+        states = set()
+        for _ in range(300):
+            clock[0] += 0.05
+            world.physics_tick(0.05)
+            states.add(m.init_state)
+        assert_conform(mv.INIT_ABORT_HOLD not in states and "failed:abort" in states,
+                       f"Mock: abort with GUIDED refused went {sorted(states)}")
+
+
 def main() -> int:
     print("Testing Protocol Conformance across Bridge and Mock implementations...")
     asyncio.run(test_bridge_conformance())
     asyncio.run(test_mock_conformance())
     asyncio.run(test_ready_means_takeoff_altitude())
     asyncio.run(test_grounded_abort_exits_by_relaunch())
+    asyncio.run(test_shared_semantics())
     test_service_ack_keys_match_doc()
 
     if failures:
