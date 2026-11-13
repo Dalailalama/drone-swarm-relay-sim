@@ -181,7 +181,7 @@ function makeDrone(x, y, target, rng, airframe, radio, cls) {
     relinkUntil: null,
     relinkAttempt: 0,
     relinkGoalX: 0, relinkGoalY: 0,
-    rejectedRole: null, rejectedSig: null,
+    rejectedRole: null, rejectedSig: null, rejectSeq: 0,
     deadLog: [],          // onboard black box: positions where the link was dead
     deadLogSession: session,
     neighborKnown: {},
@@ -1224,18 +1224,23 @@ function c2Step(s) {
 
   // A drone that declined its tasking gets struck off and benched for a
   // while, so C2 immediately elects someone with the reserves for the job.
-  for (const id of [...s.c2.relays]) {
-    if (fresh(id) && known[id].reject === 'relay') {
+  // Each decline is acted on once, by its sequence number, whether or not
+  // the drone is still on the roster: it has usually accepted its next order
+  // (often the mission order C2 sent on striking it off as stale) by the
+  // time slow telemetry reports the decline (audit C2-07).
+  s.c2.rejectSeen = s.c2.rejectSeen || {};
+  for (const id of Object.keys(known)) {
+    const kn = known[id];
+    if (!fresh(id) || !(kn.rejectSeq > (s.c2.rejectSeen[id] || 0))) continue;
+    s.c2.rejectSeen[id] = kn.rejectSeq;
+    if (kn.reject === 'relay') {
       s.c2.relays = s.c2.relays.filter(r => r !== id);
       s.c2.unfit[id] = s.time + 60;
       logEvent(s, 'C2: ' + id + ' declined relay duty (low reserves) — benched, reassigning', 'warn');
-    }
-  }
-  for (const rid of [...s.c2.rescuers]) {
-    if (fresh(rid) && known[rid].reject === 'rescue') {
-      s.c2.unfit[rid] = s.time + 60;
-      logEvent(s, 'C2: ' + rid + ' declined rescue tasking — benched', 'warn');
-      s.c2.rescuers = s.c2.rescuers.filter(x => x !== rid);
+    } else if (kn.reject === 'rescue') {
+      s.c2.unfit[id] = s.time + 60;
+      logEvent(s, 'C2: ' + id + ' declined rescue tasking — benched', 'warn');
+      s.c2.rescuers = s.c2.rescuers.filter(x => x !== id);
     }
   }
 
@@ -1640,6 +1645,7 @@ function droneComms(s, d) {
       d.rejectedRole = o.role;
       if (d.rejectedSig !== sig) {
         d.rejectedSig = sig;
+        d.rejectSeq += 1;
         const pct = (d.energyWh / usableWh(afOf(s, d)) * 100).toFixed(0);
         logEvent(s, d.id + ' declines ' + o.role + ' tasking — recovery plan does not close (' + pct + '% battery)', 'warn');
       }
@@ -1647,7 +1653,10 @@ function droneComms(s, d) {
     }
     const prevRole = d.order.role;
     d.order = o;
-    d.rejectedRole = null; d.rejectedSig = null;
+    // rejectedRole stays latched (the role of the LAST decline) and rides in
+    // telemetry with rejectSeq: clearing it here erased the decline before
+    // slow telemetry ever carried it to C2 (audit C2-07).
+    d.rejectedSig = null;
     if (d.mode === 'ok' && prevRole !== d.order.role) {
       logEvent(s, d.id + ' now ' + d.order.role + (d.order.role === 'relay' ? ' (slot ' + (d.order.slot + 1) + ')' : ''), 'relay');
     }
@@ -1693,6 +1702,7 @@ function droneComms(s, d) {
       battery: d.batteryPct, role: effRole(d),
       cls: d.cls,   // fleet class rides along so C2 assigns roles by capability
       reject: d.rejectedRole || null,
+      rejectSeq: d.rejectSeq,   // one count per decline, so C2 benches each exactly once
       deadLog: unacked,
       deadLogMaxSeq: deadLogMaxSeq,
       deadLogSession: d.deadLogSession,
