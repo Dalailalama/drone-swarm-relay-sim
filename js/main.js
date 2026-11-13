@@ -1442,11 +1442,12 @@
 
   // The sim reads the dragged position at every step, so a drag is recorded
   // on each move (coalesced per sim time), not only on release (audit C-replay).
-  function recordDrag() {
-    if (dragMode === 'target') recordAction({ type: 'target', x: swarm.target.x, y: swarm.target.y });
-    else if (dragMode === 'base') recordAction({ type: 'base', x: swarm.base.x, y: swarm.base.y });
-    else if (dragMode === 'jammer' && selectedJammer) recordAction({ type: 'jammer_move', id: selectedJammer.id, x: selectedJammer.x, y: selectedJammer.y });
-    else if (dragMode === 'zone' && selectedZone) recordAction({ type: 'zone_move', id: selectedZone.id, x: selectedZone.x, y: selectedZone.y });
+  function recordDrag() { recordMove(dragMode); }
+  function recordMove(kind) {
+    if (kind === 'target') recordAction({ type: 'target', x: swarm.target.x, y: swarm.target.y });
+    else if (kind === 'base') recordAction({ type: 'base', x: swarm.base.x, y: swarm.base.y });
+    else if (kind === 'jammer' && selectedJammer) recordAction({ type: 'jammer_move', id: selectedJammer.id, x: selectedJammer.x, y: selectedJammer.y });
+    else if (kind === 'zone' && selectedZone) recordAction({ type: 'zone_move', id: selectedZone.id, x: selectedZone.x, y: selectedZone.y });
   }
   cv.addEventListener('pointerup', e => {
     pointers.delete(e.pointerId);
@@ -1731,11 +1732,30 @@
   });
 
   // Map keyboard: arrows pan (orbit in 3D), +/- zoom, [ and ] step the
-  // selection through live drones. Only keys used here are consumed.
+  // selection through live drones. Placement without a drag (2D): Shift+arrows
+  // move the selected source or zone (the objective when none is selected),
+  // Alt+arrows move C2, N steps through every source and zone, Escape drops
+  // that selection. Moves are recorded exactly like a drag. Only keys used
+  // here are consumed.
   cv.addEventListener('keydown', e => {
     const k = e.key;
     const arrows = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
-    if (arrows[k]) {
+    if (arrows[k] && (e.shiftKey || e.altKey) && !view3D) {
+      const [ax, ay] = arrows[k];
+      const kind = e.altKey ? 'base' : selectedJammer ? 'jammer' : selectedZone ? 'zone' : 'target';
+      const obj = { base: swarm.base, jammer: selectedJammer, zone: selectedZone, target: swarm.target }[kind];
+      const stepM = Math.max(5, 0.02 * Math.hypot(swarm.target.x - swarm.base.x, swarm.target.y - swarm.base.y));
+      obj.x += ax * stepM; obj.y += ay * stepM;
+      recordMove(kind);
+    } else if ((k === 'n' || k === 'N') && !e.ctrlKey && !e.metaKey) {
+      const items = swarm.jammers.map(j => ['jammer', j]).concat((swarm.gpsZones || []).map(z => ['zone', z]));
+      if (!items.length) return;
+      const i = items.findIndex(([, o]) => o === selectedJammer || o === selectedZone);
+      selectSource(...items[(i + 1) % items.length]);
+    } else if (k === 'Escape' && (selectedJammer || selectedZone)) {
+      selectedJammer = null; selectedZone = null;
+      updateJammerPanel(); updateZonePanel();
+    } else if (arrows[k]) {
       const [ax, ay] = arrows[k];
       if (view3D && cam3D) orbitCamera3D(cam3D, ax * 40, ay * 40);
       else {

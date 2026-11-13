@@ -74,6 +74,43 @@ test('keyboard users can select a drone from the fleet list and kill it, and zoo
   assert.ok(!unused.defaultPrevented, 'keys the map does not use are left alone');
 });
 
+// Keyboard leftovers of ui-render/keyboard-inaccessible-map-and-fleet: the
+// objective, C2, RF sources and GPS zones could only be placed by dragging,
+// and only the newest source (or the last left after a Remove) could be
+// selected at all.
+test('keyboard users can place the objective, C2, sources and zones, and pick any source', () => {
+  const { loadUI } = require('./helpers/dom.js');
+  const { ctx, el, fire } = loadUI();
+  const s = ctx.sim.swarm;
+  const acts = type => (s.userActions || []).filter(a => a.type === type).length;
+  const key = (k, mods) => fire('map', 'keydown', Object.assign({ key: k }, mods));
+
+  const t0 = { ...s.target };
+  assert.ok(key('ArrowRight', { shiftKey: true }).defaultPrevented);
+  assert.ok(s.target.x > t0.x && s.target.y === t0.y, 'Shift+arrow moves the objective when no source is selected');
+  assert.strictEqual(acts('target'), 1, 'and records it like a drag');
+  const b0 = { ...s.base };
+  key('ArrowUp', { altKey: true });
+  assert.ok(s.base.y < b0.y && s.base.x === b0.x, 'Alt+arrow moves C2');
+  assert.strictEqual(acts('base'), 1);
+
+  el('addJammerBtn').click(); el('addJammerBtn').click(); el('addGpsZoneBtn').click();
+  const [j1, j2] = s.jammers, z1 = s.gpsZones[0];
+  const ids = [];
+  for (let i = 0; i < 3; i++) { key('n'); ids.push((/editing <b>([^<]+)<\/b>|Editing <b>([^<]+)<\/b>/.exec(el('jammerPanel').innerHTML + el('zonePanel').innerHTML) || []).slice(1).find(Boolean)); }
+  assert.deepStrictEqual(ids, [j1.id, j2.id, z1.id], 'N steps through every source and zone, from the oldest');
+  key('n');                                            // back to the first source
+  const j0 = { x: j1.x, y: j1.y }, tBefore = { ...s.target };
+  key('ArrowDown', { shiftKey: true });
+  assert.ok(j1.y > j0.y, 'Shift+arrow moves the selected source');
+  assert.deepStrictEqual({ ...s.target }, tBefore, 'not the objective');
+  assert.strictEqual(acts('jammer_move'), 1);
+  assert.ok(key('Escape').defaultPrevented, 'Escape drops the source selection');
+  key('ArrowLeft', { shiftKey: true });
+  assert.ok(s.target.x < tBefore.x, 'the objective is the Shift+arrow target again');
+  assert.match(el('map').getAttribute('aria-label'), /Shift.*Alt.*\bN\b|Shift.*\bN\b.*Alt|\bN\b.*Shift.*Alt/, 'the keys are announced');
+});
+
 test('link-state changes and the event log are live regions', () => {
   assert.match(HTML, /<span id="statusPill"[^>]*\brole="status"/, '#statusPill must be role=status');
   assert.match(HTML, /<span id="statusPill"[^>]*\baria-live="polite"/);
