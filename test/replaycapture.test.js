@@ -206,3 +206,16 @@ test('C-replay: an action taken before capture is switched on still replays', ()
   assert.ok(meta.captureStartT > 0, 'the header must say when packet capture began');
   assertReplayMatches(s, rep);
 });
+
+test('C-replay: a wingless swarm carries no wing radio, exactly as its replay rebuilds it', () => {
+  // The page always hands makeSwarm its relay dropdowns' picks; kept on a
+  // wingless swarm, the RFD900x widened C2's routing span (net.js c2Tree)
+  // past the SiK one the replay rebuilds, and the two runs routed apart.
+  const s = loadCore().makeSwarm({
+    count: 4, radio: R.RADIOS.find(r => r.id === 'sik-v3'), airframe: A.AIRFRAMES.find(a => a.id === 'q450'),
+    relayWing: 0, relayRadio: R.RADIOS.find(r => r.id === 'rfd900x'), relayAirframe: A.AIRFRAMES.find(a => a.id === 'x8'),
+  });
+  assert.strictEqual(s.relayRadio, null);
+  assert.strictEqual(s.relayAirframe, null);
+  assert.deepStrictEqual([...s.relayIdx], []);
+});

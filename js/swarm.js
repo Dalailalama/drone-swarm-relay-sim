@@ -41,6 +41,7 @@ const FAILSAFE = {
   relinkArriveM: 40,   // "close enough" to an attempt point
   relinkAttempts: 3,   // tries before giving up and flying home to C2
   relinkStepFrac: 0.7, // each failed attempt falls back this fraction of usable range toward base
+  relinkTransitFactor: 2, // an unreachable point expires after this × its straight-line transit + the listen time
 };
 
 const RESCUE = {
@@ -179,6 +180,7 @@ function makeDrone(x, y, target, rng, airframe, radio, cls) {
     holdX: 0, holdY: 0,
     lastLinkX: x, lastLinkY: y, // where the link last provably worked
     relinkUntil: null,
+    relinkGiveUpAt: null,
     relinkAttempt: 0,
     relinkGoalX: 0, relinkGoalY: 0,
     rejectedRole: null, rejectedSig: null,
@@ -195,6 +197,8 @@ function makeDrone(x, y, target, rng, airframe, radio, cls) {
 
 function makeSwarm(opts) {
   droneSeq = 0;
+  const wingIdx = (opts.relayWing > 0 && opts.relayAirframe && opts.relayRadio)
+    ? relayClassIndices(opts.count, opts.relayWing) : [];
   const s = {
     base: {
       x: (opts.base && opts.base.x != null) ? opts.base.x : (opts.baseX != null ? opts.baseX : 0),
@@ -217,10 +221,12 @@ function makeSwarm(opts) {
     shadowSigmaDb: opts.shadowSigmaDb || 0,
     // Heterogeneous fleet (js/fleet.js): relayWing drones carry the heavy
     // radio + endurance airframe and hold the chain; the rest fly tactical.
-    relayAirframe: opts.relayAirframe || null,
-    relayRadio: opts.relayRadio || null,
-    relayIdx: (opts.relayWing > 0 && opts.relayAirframe && opts.relayRadio)
-      ? relayClassIndices(opts.count, opts.relayWing) : [],
+    // No wing, no wing hardware: the page always passes its dropdowns'
+    // picks, and a wing radio left on a wingless swarm widened C2's routing
+    // span past what the capture records — the replay rebuilt it as null.
+    relayAirframe: wingIdx.length ? opts.relayAirframe : null,
+    relayRadio: wingIdx.length ? opts.relayRadio : null,
+    relayIdx: wingIdx,
     terrain: opts.terrain || makeTerrain('flat'),
     jammers: opts.jammers ? opts.jammers.map(j => ({ ...j })) : [],
     gpsZones: opts.gpsZones ? opts.gpsZones.map(z => ({ ...z })) : [],
@@ -1536,8 +1542,12 @@ function droneComms(s, d) {
     // Any heard C2 transmission proves the link works here — even a
     // broadcast without a row for us (C2 hasn't met us yet)
     d.lastC2 = s.time;
-    d.lastLinkX = d.x; d.lastLinkY = d.y;
+    // Every onboard set-point lives in the frame the drone steers in — its
+    // nav belief. Truth set-points made a GNSS-denied drone chase its own
+    // nav error (audit ONB-02).
+    d.lastLinkX = d.belX; d.lastLinkY = d.belY;
     d.relinkUntil = null;
+    d.relinkGiveUpAt = null;
     d.relinkAttempt = 0;
     // C2's own position rides in every packet it sends (a real GCS streams
     // its location). This is the ONLY way a drone learns the base moved
@@ -1681,7 +1691,7 @@ function droneComms(s, d) {
     : Math.max(FAILSAFE.rtlMissionSec, 2 * holdAfter);
   const age = s.time - d.lastC2;
   if (d.mode === 'ok' && age > holdAfter) {
-    d.mode = 'hold'; d.holdX = d.x; d.holdY = d.y;
+    d.mode = 'hold'; d.holdX = d.belX; d.holdY = d.belY;
     logEvent(s, d.id + ' lost C2 link — holding position', 'warn');
   }
   if (d.mode === 'hold' && age > rtlAfter) {
@@ -1691,31 +1701,47 @@ function droneComms(s, d) {
     d.relinkAttempt = 1;
     d.relinkGoalX = d.lastLinkX; d.relinkGoalY = d.lastLinkY;
     d.relinkUntil = null;
+    d.relinkGiveUpAt = relinkGiveUpAt(s, d);
     logEvent(s, d.id + ' link timeout — retreating to last-link point (attempt 1/' + FAILSAFE.relinkAttempts + ')', 'warn');
   }
   if (d.mode === 'relink') {
-    if (dist2d(d, { x: d.relinkGoalX, y: d.relinkGoalY }) < FAILSAFE.relinkArriveM) {
-      if (d.relinkUntil === null) d.relinkUntil = s.time + FAILSAFE.relinkWaitSec;
-      else if (s.time > d.relinkUntil) {
-        // Attempt failed. Fall back one radio-range step toward base and
-        // listen again; after the last attempt, go home for real.
-        const homeK = d.baseKnown || s.base; // last KNOWN base — never live truth (finding #18)
-        const dHome = dist2d(d, homeK);
-        const step = usableRangeM(droneRadio(d) || s.radio, s.envFactor) * FAILSAFE.relinkStepFrac;
-        if (d.relinkAttempt >= FAILSAFE.relinkAttempts || dHome <= step) {
-          d.mode = 'rtl';
-          logEvent(s, d.id + ' no contact after ' + d.relinkAttempt + ' attempts — returning to C2', 'warn');
-        } else {
-          d.relinkAttempt += 1;
-          const f = step / dHome;
-          d.relinkGoalX = d.x + (homeK.x - d.x) * f;
-          d.relinkGoalY = d.y + (homeK.y - d.y) * f;
-          d.relinkUntil = null;
-          logEvent(s, d.id + ' still silent — falling back toward C2 (attempt ' + d.relinkAttempt + '/' + FAILSAFE.relinkAttempts + ')', 'warn');
-        }
+    // Arrival is judged where the drone BELIEVES it is, the frame it steers
+    // in — a truth test never fired while GNSS-denied (audit ONB-02).
+    if (d.relinkUntil === null &&
+        Math.hypot(d.belX - d.relinkGoalX, d.belY - d.relinkGoalY) < FAILSAFE.relinkArriveM) {
+      d.relinkUntil = s.time + FAILSAFE.relinkWaitSec;
+    }
+    // A point it can't get to (inside a tower, upwind of what it can beat)
+    // still expires, so the ladder always moves on.
+    const expired = d.relinkUntil !== null ? s.time > d.relinkUntil
+      : d.relinkGiveUpAt != null && s.time > d.relinkGiveUpAt;
+    if (expired) {
+      // Attempt failed. Fall back one radio-range step toward base and
+      // listen again; after the last attempt, go home for real.
+      const homeK = d.baseKnown || s.base; // last KNOWN base — never live truth (finding #18)
+      const dHome = Math.hypot(homeK.x - d.belX, homeK.y - d.belY);
+      const step = usableRangeM(droneRadio(d) || s.radio, s.envFactor) * FAILSAFE.relinkStepFrac;
+      if (d.relinkAttempt >= FAILSAFE.relinkAttempts || dHome <= step) {
+        d.mode = 'rtl';
+        logEvent(s, d.id + ' no contact after ' + d.relinkAttempt + ' attempts — returning to C2', 'warn');
+      } else {
+        d.relinkAttempt += 1;
+        const f = step / dHome;
+        d.relinkGoalX = d.belX + (homeK.x - d.belX) * f;
+        d.relinkGoalY = d.belY + (homeK.y - d.belY) * f;
+        d.relinkUntil = null;
+        d.relinkGiveUpAt = relinkGiveUpAt(s, d);
+        logEvent(s, d.id + ' still silent — falling back toward C2 (attempt ' + d.relinkAttempt + '/' + FAILSAFE.relinkAttempts + ')', 'warn');
       }
     }
   }
+}
+
+// Deadline for reaching the current relink point: generous transit time at
+// full airspeed from where the drone believes it is, plus the listen time.
+function relinkGiveUpAt(s, d) {
+  const legM = Math.hypot(d.relinkGoalX - d.belX, d.relinkGoalY - d.belY);
+  return s.time + FAILSAFE.relinkTransitFactor * legM / afOf(s, d).maxSpeedMs + FAILSAFE.relinkWaitSec;
 }
 
 function updateBattery(s, d, dt, vAirMs) {
