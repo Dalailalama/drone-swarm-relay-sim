@@ -28,15 +28,16 @@ test('C2-10: drones dying unseen do not move C2\'s staleness timer', () => {
 test('C2-10: a drone paces telemetry on the interval C2 announced, not on C2\'s private plan', () => {
   const { ctx, s } = swarm(60);
   while (s.time < 20) ctx.stepSwarm(s, 0.25);
-  const d = s.drones.find(x => x.mode === 'ok' && x.tlmEvery);
+  const d = s.drones.find(x => x.mode === 'ok' && x.lastC2 > 0 && x.linkCadence);
   assert.ok(d, 'a drone must have heard C2 announce its report interval');
+  const announced = d.linkCadence.tlmSec;
   // Replace C2's private plan with a far longer chain; nothing is transmitted.
   s.c2.chainPlan = { ...s.c2.chainPlan, slots: new Array(20).fill({ x: 0, y: 0 }) };
   d.nextTlm = s.time;
   const t0 = s.time;
   ctx.droneComms(s, d);
-  assert.ok(Math.abs((d.nextTlm - t0) - d.tlmEvery) < 1e-9,
-    'next report in ' + (d.nextTlm - t0).toFixed(2) + ' s, announced ' + d.tlmEvery.toFixed(2) + ' s');
+  assert.ok(Math.abs((d.nextTlm - t0) - announced) < 1e-9,
+    'next report in ' + (d.nextTlm - t0).toFixed(2) + ' s, announced ' + announced.toFixed(2) + ' s');
 });
 
 test('C2-10: the RTB report carries the navigation position and a timestamp, never truth', () => {

@@ -111,14 +111,22 @@ test('convoy escort holds the objective for 15 minutes while the command vehicle
   const m = MISSION_LIBRARY.find(x => x.id === 'convoy-escort');
   const sc = Object.assign({}, m.scenario, { baseVelMps: m.dynamics.baseVelMps });
   let S = null;
+  const batteryReturn = new Set(); // drones that turned for home on the battery check
   const wrapped = Object.create(ctx);
-  wrapped.stepSwarm = (s, dt) => { S = s; return ctx.stepSwarm(s, dt); };
+  wrapped.stepSwarm = (s, dt) => {
+    S = s;
+    const st = ctx.stepSwarm(s, dt);
+    for (const d of s.drones) if (d.mode === 'rtb') batteryReturn.add(d.id);
+    return st;
+  };
   runScenarioSeed(wrapped, { id: m.id, title: m.title, scenario: sc }, sc.seed, 900);
   assert.ok(Math.hypot(S.base.x, S.base.y) > 5000, 'the vehicle really drove on');
   assert.ok(S.stats.connSec / S.stats.tSec > 0.5, 'objective uptime ' + (100 * S.stats.connSec / S.stats.tSec).toFixed(1) + '%');
-  // A battery RTB is not the lost contact SCN-04 was about: on the fitted
+  // A battery return is not the lost contact SCN-04 was about: on the fitted
   // Mini 4 Pro power curve the micros price the return to the receding
-  // vehicle at full speed and turn for it at ~10-11 min with ~45% left.
-  const ok = S.drones.filter(d => d.mode === 'ok' || d.mode === 'rtb').length;
-  assert.ok(ok >= S.drones.length / 2, ok + ' of ' + S.drones.length + ' drones in ok or battery RTB at T+15 min');
+  // vehicle at full speed, turn for it at ~10.5 min with ~45% left and set
+  // down where they last learned the base. A link-loss (rtl) landing still fails.
+  const ok = S.drones.filter(d => d.mode === 'ok' ||
+    (batteryReturn.has(d.id) && (d.mode === 'rtb' || d.mode === 'landed'))).length;
+  assert.ok(ok >= S.drones.length / 2, ok + ' of ' + S.drones.length + ' drones in ok or on a battery return at T+15 min');
 });
