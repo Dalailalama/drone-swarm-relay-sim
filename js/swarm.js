@@ -37,7 +37,7 @@ const FAILSAFE = {
   holdSec: 8,          // silence before a drone freezes in place
   rtlMissionSec: 30,   // silence before a mission drone retreats to regain link
   rtlRelaySec: 90,     // relays hold much longer — they ARE the link
-  relinkWaitSec: 35,   // listen time at each relink attempt point
+  relinkWaitSec: 35,   // listen time floor at each relink attempt point (see relinkListenSec)
   relinkArriveM: 40,   // "close enough" to an attempt point
   relinkAttempts: 3,   // tries before giving up and flying home to C2
   relinkStepFrac: 0.7, // each failed attempt falls back this fraction of usable range toward base
@@ -163,6 +163,14 @@ function droneCadence(d) {
 // under FAILSAFE.holdSec (like PX4's COM_DL_LOSS_T).
 function holdAfterSec(d) {
   return Math.max(FAILSAFE.holdSec, 3 * droneCadence(d).cmdSec);
+}
+
+// Listen time at a relink point, by the same rule: three announced order
+// rounds, never under FAILSAFE.relinkWaitSec. A fixed 35 s on a slow unicast
+// link was shorter than one round, so the drone moved on before C2 could
+// even reach it.
+function relinkListenSec(d) {
+  return Math.max(FAILSAFE.relinkWaitSec, 3 * droneCadence(d).cmdSec);
 }
 
 let droneSeq = 0;
@@ -1881,7 +1889,7 @@ function droneComms(s, d) {
     // in — a truth test never fired while GNSS-denied (audit ONB-02).
     if (d.relinkUntil === null &&
         Math.hypot(d.belX - d.relinkGoalX, d.belY - d.relinkGoalY) < FAILSAFE.relinkArriveM) {
-      d.relinkUntil = s.time + FAILSAFE.relinkWaitSec;
+      d.relinkUntil = s.time + relinkListenSec(d);
     }
     // A point it can't get to (inside a tower, upwind of what it can beat)
     // still expires, so the ladder always moves on.
@@ -1913,7 +1921,7 @@ function droneComms(s, d) {
 // full airspeed from where the drone believes it is, plus the listen time.
 function relinkGiveUpAt(s, d) {
   const legM = Math.hypot(d.relinkGoalX - d.belX, d.relinkGoalY - d.belY);
-  return s.time + FAILSAFE.relinkTransitFactor * legM / afOf(s, d).maxSpeedMs + FAILSAFE.relinkWaitSec;
+  return s.time + FAILSAFE.relinkTransitFactor * legM / afOf(s, d).maxSpeedMs + relinkListenSec(d);
 }
 
 function updateBattery(s, d, dt, vAirMs) {
