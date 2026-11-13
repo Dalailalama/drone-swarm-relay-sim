@@ -2163,7 +2163,32 @@ async def scenario_reinit_keeps_position_seq():
     await h.close()
 
 
+async def scenario_shrinking_init_lands_dropped_vehicle():
+    """An init that drops an airborne vehicle commands it to LAND and keeps
+    watching it until it is down: closing its socket instead left it holding
+    its last GUIDED target forever, unmonitored."""
+    h = Harness()
+    ws = h.client("browser-1")
+    h.autopilot(14550)
+    ap2 = h.autopilot(14560, climb_per_tick=1.0)
+    await ready_reply(ws, h.init(ws, count=2, alt=30.0))
+    v2, conn2 = vehicle("DR-2"), conn_for(14560)
+    assert v2.ready and ap2.armed
+
+    reply = await ready_reply(ws, h.init(ws, count=1, alt=30.0))
+    assert reply["ids"] == ["DR-1"] and "DR-2" not in bridge.STATE.vehicles, reply
+    assert conn2.count("land") == 1, conn2.kinds()[-8:]
+    assert not conn2.closed and not v2.task.done(), "the dropped vehicle was abandoned in the air"
+    assert ws.said("DR-2: left the fleet while armed"), ws.statuses()
+    assert await wait_until(lambda: v2.task.done(), timeout=5.0), (v2.service_phase, v2.init_state, ap2.alt)
+    assert conn2.closed and not ap2.armed and ap2.alt == 0.0
+    assert "DR-2" not in bridge.STATE.retiring and v2.task not in bridge.STATE.vehicle_tasks
+    assert ws.said("DR-2: landed and disarmed after leaving the fleet"), ws.statuses()
+    await h.close()
+
+
 SCENARIOS = [
+    ("an init that drops an airborne vehicle lands it and watches it down", scenario_shrinking_init_lands_dropped_vehicle),
     ("re-init keeps a vehicle parked mid-swap parked; only the handshake relaunches it", scenario_reinit_keeps_parked_vehicle),
     ("re-init keeps positionSeq increasing, also for an id that leaves and returns", scenario_reinit_keeps_position_seq),
     ("A2: init of an airborne vehicle at altitude is READY without NAV_TAKEOFF", scenario_reinit_airborne_no_takeoff),

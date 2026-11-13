@@ -330,6 +330,7 @@ class Vehicle:
     first_pass_done: asyncio.Event = field(default_factory=asyncio.Event)
     status_ws: object = None  # websocket that ran the init which created this vehicle
     task: object = None  # the asyncio task driving this vehicle
+    retiring: bool = False  # dropped by an init while armed: landing, watched until down (_retire_vehicles)
 
     @property
     def connected(self) -> bool:
@@ -426,6 +427,9 @@ class State:
     # resumes its counters if a later init brings it back: a watcher tab only
     # takes a fix as new when its seq beats the largest it has seen.
     seq_floor: dict = field(default_factory=dict)
+    # Vehicles an init dropped while armed: out of the fleet (no telemetry,
+    # goals or services) but still landing under their own task.
+    retiring: dict = field(default_factory=dict)
 
 
 STATE = State()
@@ -1024,6 +1028,8 @@ async def vehicle_task(vehicle: Vehicle) -> None:
         try:
             _drain_messages(vehicle)
             await _advance_init(vehicle)
+            if vehicle.retiring and vehicle.service_phase == "landed":
+                break
             if vehicle.last_heartbeat is not None and (
                     gcs_heartbeat_at is None or _now() - gcs_heartbeat_at >= GCS_HEARTBEAT_DT):
                 vehicle.conn.mav.heartbeat_send(MAV_TYPE_GCS, MAV_AUTOPILOT_INVALID, 0, 0, MAV_STATE_ACTIVE)
@@ -1033,6 +1039,18 @@ async def vehicle_task(vehicle: Vehicle) -> None:
         except Exception as exc:  # pragma: no cover - defensive: one bad poll must not kill the vehicle
             log.warning("vehicle %s: poll raised %r (continuing)", vehicle.id, exc)
         await asyncio.sleep(DRAIN_POLL_DT)
+
+    # Dropped by an init while armed, and now confirmed down: nothing is left
+    # to watch, so release the socket like _close_vehicle would.
+    if STATE.retiring.get(vehicle.id) is vehicle:
+        del STATE.retiring[vehicle.id]
+    STATE.vehicle_tasks = [t for t in STATE.vehicle_tasks if t is not vehicle.task]
+    STATE.seq_floor[vehicle.id] = (vehicle.position_seq, vehicle.landed_seq)
+    try:
+        vehicle.conn.close()
+    except Exception:  # pragma: no cover - best-effort cleanup
+        pass
+    await _vehicle_status(vehicle, f"vehicle {vehicle.id}: landed and disarmed after leaving the fleet; link closed")
 
 
 # --------------------------------------------------------------------------
@@ -1126,11 +1144,26 @@ async def _close_vehicle(v: Vehicle) -> None:
 
 async def _retire_vehicles(keep: set) -> None:
     """Drop the vehicles an init no longer lists (or whose socket never bound,
-    so a fresh vehicle can retry the bind)."""
+    so a fresh vehicle can retry the bind).
+
+    Closing the socket of an armed vehicle would orphan it: GUIDED position
+    targets never time out, so it would hover unmonitored forever. A dropped
+    vehicle that last reported armed is commanded to LAND instead, and its
+    task keeps watching (and narrating) until it is confirmed down.
+    """
     for vid in list(STATE.vehicles):
         v = STATE.vehicles[vid]
-        if vid not in keep or (v.task is not None and v.task.done()):
-            del STATE.vehicles[vid]
+        if vid in keep and not (v.task is not None and v.task.done()):
+            continue
+        del STATE.vehicles[vid]
+        if v.armed and v.conn is not None and v.task is not None and not v.task.done():
+            v.retiring = True
+            STATE.retiring[vid] = v
+            if v.service_phase != "landing":
+                _begin_landing(v, f"retire-{vid}")
+            await _vehicle_status(v, f"vehicle {vid}: left the fleet while armed - commanding LAND, "
+                                     f"still monitored until it is down")
+        else:
             await _close_vehicle(v)
 
 
@@ -1150,7 +1183,8 @@ def _keep_vehicle(v: Vehicle, websocket, origin: dict) -> None:
 
 
 async def _stop_all_vehicles() -> None:
-    """Cancel every vehicle task and close every MAVLink socket (shutdown)."""
+    """Cancel every vehicle task and close every MAVLink socket (shutdown),
+    including vehicles still landing after leaving the fleet."""
     tasks = [t for t in STATE.vehicle_tasks if t is not None]
     for task in tasks:
         task.cancel()
@@ -1159,13 +1193,14 @@ async def _stop_all_vehicles() -> None:
         # without swallowing a cancellation aimed at *us*.
         await asyncio.gather(*tasks, return_exceptions=True)
     STATE.vehicle_tasks = []
-    for v in STATE.vehicles.values():
+    for v in [*STATE.vehicles.values(), *STATE.retiring.values()]:
         if v.conn is not None:
             try:
                 v.conn.close()
             except Exception:  # pragma: no cover - best-effort cleanup
                 pass
     STATE.vehicles = {}
+    STATE.retiring = {}
 
 
 async def handle_init(websocket, msg: dict, cli_count: Optional[int], base_port: int) -> None:
@@ -1213,8 +1248,11 @@ async def handle_init(websocket, msg: dict, cli_count: Optional[int], base_port:
 
         vehicles = []
         for i, vid in enumerate(ids):
-            v = STATE.vehicles.get(vid)
+            v = STATE.vehicles.get(vid) or STATE.retiring.pop(vid, None)
             if v is not None:
+                # (A returning id that was still landing after leaving the
+                # fleet comes back as it is: in its landing service.)
+                v.retiring = False
                 _keep_vehicle(v, websocket, origin)
             else:
                 position_seq, landed_seq = STATE.seq_floor.pop(vid, (0, 0))
@@ -1328,6 +1366,24 @@ async def _send_service_ack(
         pass
 
 
+def _begin_landing(v: Vehicle, request_id: str) -> None:
+    """Enter the landing service phase and command MAV_CMD_NAV_LAND."""
+    v.service_history.add(request_id)
+    v.service_id = request_id
+    v.service_phase = "landing"
+    v.service_started = _now()
+    v.service_position_seq = v.position_seq
+    v.service_landed_seq = v.landed_seq
+    v.descent_ref_alt = v.alt
+    v.last_descent_at = _now()
+    v.init_state = "landing"
+    v.ready = False
+    # Clear any stale MAV_CMD_NAV_LAND ack from previous landing attempts
+    v.acks.pop(21, None)
+    v.conn.mav.command_long_send(v.conn.target_system, v.conn.target_component,
+                                 21, 0, 0, 0, 0, 0, 0, 0, 0)
+
+
 async def handle_service(websocket, msg: dict) -> None:
     if not await _may_control(websocket) or not _owns_control(websocket):
         return
@@ -1363,20 +1419,7 @@ async def handle_service(websocket, msg: dict) -> None:
         if not (v.ready and v.init_state == INIT_READY and v.connected and v.position_fresh and v.armed):
             await record_and_ack(False, error="vehicle not ready to land", code="VEHICLE_NOT_READY", retryable=True)
             return
-        v.service_history.add(request_id)
-        v.service_id = request_id
-        v.service_phase = "landing"
-        v.service_started = _now()
-        v.service_position_seq = v.position_seq
-        v.service_landed_seq = v.landed_seq
-        v.descent_ref_alt = v.alt
-        v.last_descent_at = _now()
-        v.init_state = "landing"
-        v.ready = False
-        # Clear any stale MAV_CMD_NAV_LAND ack from previous landing attempts
-        v.acks.pop(21, None)
-        v.conn.mav.command_long_send(v.conn.target_system, v.conn.target_component,
-                                     21, 0, 0, 0, 0, 0, 0, 0, 0)
+        _begin_landing(v, request_id)
         await record_and_ack(True)
         return
 
@@ -1553,7 +1596,7 @@ async def run(args: argparse.Namespace) -> None:
             await telem_task
         except (asyncio.CancelledError, Exception):
             pass
-        for v in STATE.vehicles.values():
+        for v in [*STATE.vehicles.values(), *STATE.retiring.values()]:
             if v.conn is not None:
                 try:
                     v.conn.close()
