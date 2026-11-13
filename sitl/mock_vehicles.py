@@ -51,7 +51,7 @@ from typing import Optional
 from websockets.asyncio.server import serve
 from websockets.exceptions import ConnectionClosed
 
-from ws_origin import add_origin_argument, make_origin_check
+from ws_origin import add_origin_argument, make_origin_check, resolve_token
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("mock_vehicles")
@@ -765,11 +765,11 @@ async def handler(websocket) -> None:
         # keeps every vehicle it still lists as it is.
 
 
-async def run(host: str, port: int, allow_origin=()) -> None:
+async def run(host: str, port: int, allow_origin=(), token=None) -> None:
     physics_task = asyncio.create_task(physics_loop())
     telem_task = asyncio.create_task(telemetry_loop())
     try:
-        check = make_origin_check(allow_origin, log.warning)
+        check = make_origin_check(allow_origin, log.warning, resolve_token(token, host, log.warning))
         async with serve(handler, host, port, process_request=check) as server:
             log.info("mock vehicle server listening on ws://%s:%s", host, port)
             await asyncio.get_running_loop().create_future()  # run forever
@@ -801,7 +801,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     try:
-        asyncio.run(run(args.host, args.port, args.allow_origin))
+        asyncio.run(run(args.host, args.port, args.allow_origin, args.token))
     except KeyboardInterrupt:
         log.info("shutting down (Ctrl+C)")
 

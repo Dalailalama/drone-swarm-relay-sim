@@ -10,11 +10,13 @@ TAK multicast group every ATAK client listens on by default:
 Usage:
     python tak_bridge.py [--ws-host localhost] [--ws-port 8087] [--group 239.2.3.1]
                          [--port 6969] [--ttl 3] [--unicast HOST:PORT ...]
-                         [--allow-origin ORIGIN ...]
+                         [--allow-origin ORIGIN ...] [--token SECRET]
 
 The WebSocket binds loopback only by default and refuses handshakes from web
 pages on other origins (see ws_origin.py), so neither a LAN host nor a page
-open in the operator's browser can inject CoT into the TAK group.
+open in the operator's browser can inject CoT into the TAK group. With
+--token (generated when bound beyond loopback) a client must also connect
+with ?token=SECRET in its URL.
 
 Only dependency: `websockets` (already in requirements.txt for bridge.py).
 ATAK side: add the multicast stream, or point a TAK Client / FOG server at
@@ -28,7 +30,7 @@ import socket
 
 from websockets.asyncio.server import serve
 
-from ws_origin import add_origin_argument, make_origin_check
+from ws_origin import add_origin_argument, make_origin_check, resolve_token
 
 # TAK's conventional CoT multicast: everyone who matters already listens here.
 DEFAULT_GROUP = "239.2.3.1"
@@ -86,7 +88,10 @@ async def main() -> None:
     async def handler(ws):
         await handle_client(ws, udp, targets)
 
-    check = make_origin_check(args.allow_origin, lambda line: print(f"[tak_bridge] {line}"))
+    def say(line):
+        print(f"[tak_bridge] {line}")
+
+    check = make_origin_check(args.allow_origin, say, resolve_token(args.token, args.ws_host, say))
     async with serve(handler, args.ws_host, args.ws_port, process_request=check):
         print(f"[tak_bridge] WebSocket on {args.ws_host}:{args.ws_port} -> CoT UDP -> {mode} (ttl {args.ttl})")
         await asyncio.Future()

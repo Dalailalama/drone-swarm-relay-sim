@@ -31,20 +31,20 @@ def free_port(kind=socket.SOCK_STREAM) -> int:
         return probe.getsockname()[1]
 
 
-async def with_bridge(body) -> None:
+async def with_bridge(body, extra_args=(), ready_path="") -> None:
     udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     udp.bind(("127.0.0.1", 0))
     udp.setblocking(False)
     ws_port = free_port()
     argv = sys.argv
     sys.argv = ["tak_bridge.py", "--ws-host", "127.0.0.1", "--ws-port", str(ws_port),
-                "--group", "127.0.0.1", "--port", str(udp.getsockname()[1]), "--ttl", "1"]
+                "--group", "127.0.0.1", "--port", str(udp.getsockname()[1]), "--ttl", "1", *extra_args]
     server = asyncio.create_task(tak_bridge.main())
     uri = f"ws://127.0.0.1:{ws_port}"
     try:
         for _ in range(200):
             try:
-                async with connect(uri):
+                async with connect(uri + ready_path):
                     break
             except OSError:
                 await asyncio.sleep(0.01)
@@ -86,9 +86,26 @@ async def test_foreign_origin_rejected() -> None:
     await with_bridge(body)
 
 
+async def test_token_required() -> None:
+    async def body(uri, udp):
+        for path in ("", "/?token=wrong"):
+            try:
+                async with connect(uri + path, origin="http://localhost:8000"):
+                    raise AssertionError(f"handshake {path!r} without the token was accepted")
+            except InvalidStatus as e:
+                assert e.response.status_code == 401, e
+        async with connect(uri + "/?token=s3cret", origin="http://localhost:8000") as ws:
+            await ws.send('<event version="2.0" uid="DR-1" type="a-f-A"/>')
+            await asyncio.sleep(0.2)
+        assert udp.recv(65536) == b'<event version="2.0" uid="DR-1" type="a-f-A"/>'
+
+    await with_bridge(body, ("--token", "s3cret"), "/?token=s3cret")
+
+
 SCENARIOS = [
     ("TAK bridge: <event> lines forwarded once, other lines dropped", test_event_lines_forwarded),
     ("TAK bridge: foreign web Origin rejected at the handshake", test_foreign_origin_rejected),
+    ("TAK bridge: --token required at the handshake", test_token_required),
 ]
 
 

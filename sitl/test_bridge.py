@@ -1918,6 +1918,59 @@ async def scenario_foreign_origin_rejected() -> None:
         assert check(Conn(), Req(origin)) is None, origin
 
 
+async def scenario_token_gate() -> None:
+    """With --token (or a non-loopback bind, which generates one) a handshake
+    must carry ?token=: the Origin check cannot stop a non-browser client,
+    and on a LAN bind every host is one. A loopback bind stays tokenless."""
+    captured, announced = {}, []
+
+    def fake_serve(handler, host, port, **kwargs):
+        captured.update(kwargs)
+        raise RuntimeError("stop after capturing serve() kwargs")
+
+    class Req:
+        def __init__(self, path, origin=None):
+            self.path = path
+            self.headers = {} if origin is None else {"Origin": origin}
+
+    class Conn:
+        def respond(self, status, body):
+            return (int(status), body)
+
+    async def check_for(host, token):
+        captured.clear()
+        args = argparse.Namespace(count=None, mav_base_port=14550, ws_host=host, ws_port=0,
+                                  allow_origin=[], token=token)
+        try:
+            await bridge.run(args)
+        except RuntimeError:
+            pass
+        return captured["process_request"]
+
+    real_serve = bridge.serve
+    bridge.serve = fake_serve
+    try:
+        with patch.dict(os.environ, {"BRIDGE_TOKEN": ""}), \
+                patch.object(bridge.log, "warning", lambda msg, *a: announced.append(msg % a if a else msg)):
+            check = await check_for("localhost", "s3cret")
+            for path, origin in (("/", None), ("/?token=wrong", None), ("/?token=", "http://localhost:8000")):
+                assert check(Conn(), Req(path, origin))[0] == 401, (path, origin)
+            assert check(Conn(), Req("/?token=s3cret", "https://evil.example"))[0] == 403
+            assert check(Conn(), Req("/?token=s3cret", "http://localhost:8000")) is None
+            assert check(Conn(), Req("/?a=1&token=s3cret")) is None
+
+            announced.clear()
+            check = await check_for("0.0.0.0", None)
+            assert check(Conn(), Req("/"))[0] == 401, "a LAN bind without --token must still need a token"
+            token = next(m.split("?token=")[1].split()[0] for m in announced if "?token=" in m)
+            assert len(token) >= 16 and check(Conn(), Req(f"/?token={token}")) is None, announced
+
+            check = await check_for("localhost", None)
+            assert check(Conn(), Req("/", "http://localhost:8000")) is None, "loopback default needs no token"
+    finally:
+        bridge.serve = real_serve
+
+
 async def scenario_init_count_bounded() -> None:
     """An init's count comes off the network: a huge one is clamped (with a
     status) instead of building a vehicle and UDP task per requested unit."""
@@ -2238,6 +2291,7 @@ SCENARIOS = [
     ("ownership: a second client's init is refused while the controller is connected", scenario_second_client_blocked),
     ("ownership: goals from a non-controller are not forwarded", scenario_goals_ownership),
     ("CSWSH: a foreign web Origin is refused at the handshake", scenario_foreign_origin_rejected),
+    ("CSWSH: --token (or a LAN bind) requires ?token= at the handshake", scenario_token_gate),
     ("init: a huge vehicle count is clamped", scenario_init_count_bounded),
     ("malformed messages are skipped without dropping the connection", scenario_malformed_messages_keep_connection),
     ("the bridge sends a GCS HEARTBEAT once it hears the vehicle", scenario_gcs_heartbeat_sent),

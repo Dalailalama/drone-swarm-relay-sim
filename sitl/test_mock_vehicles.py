@@ -551,6 +551,46 @@ async def test_foreign_origin_rejected_at_handshake():
             pass
 
 
+async def test_token_required_at_handshake():
+    """With --token the handshake must carry ?token=<secret> (401 otherwise),
+    so a non-browser client on the network, which the Origin check cannot
+    stop, cannot drive the fleet; the right token still flies."""
+    import socket
+    from websockets.asyncio.client import connect
+    from websockets.exceptions import InvalidStatus
+
+    mock_vehicles.WORLD = World()
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    server = asyncio.create_task(mock_vehicles.run("127.0.0.1", port, token="s3cret"))
+    uri = f"ws://127.0.0.1:{port}"
+    try:
+        for _ in range(200):
+            try:
+                async with connect(uri + "/?token=s3cret"):
+                    break
+            except OSError:
+                await asyncio.sleep(0.01)
+        for path, origin in (("", None), ("/?token=wrong", None), ("/?token=", "http://localhost:8000")):
+            try:
+                async with connect(uri + path, origin=origin):
+                    raise AssertionError(f"handshake {path!r} without the token was accepted")
+            except InvalidStatus as e:
+                assert e.response.status_code == 401, e
+        assert not mock_vehicles.WORLD.clients and not mock_vehicles.WORLD.vehicles
+        async with connect(uri + "/?token=s3cret", origin="http://localhost:8000") as ws:
+            await ws.send(json.dumps({"type": "init", "count": 1, "alt": 30.0}))
+            while json.loads(await asyncio.wait_for(ws.recv(), 2.0)).get("type") != "ready":
+                pass
+    finally:
+        server.cancel()
+        try:
+            await server
+        except (asyncio.CancelledError, Exception):
+            pass
+
+
 async def test_init_count_is_bounded():
     """An init's vehicle count comes off the network: a huge one is clamped
     instead of building millions of vehicles inside the event loop."""
@@ -627,6 +667,7 @@ SCENARIOS = [
     ("Mock: service ACKs, retryable rejection recovery, and duplicate suppression", test_service_acks_and_idempotency),
     ("Mock: two consecutive complete service cycles", test_two_consecutive_complete_service_cycles),
     ("Mock: foreign web Origin rejected at the handshake", test_foreign_origin_rejected_at_handshake),
+    ("Mock: --token required at the handshake", test_token_required_at_handshake),
     ("Mock: init vehicle count is bounded", test_init_count_is_bounded),
     ("Mock: malformed messages are skipped without dropping the connection", test_malformed_messages_keep_connection),
 ]
