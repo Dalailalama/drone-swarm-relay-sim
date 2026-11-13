@@ -22,8 +22,12 @@ if (typeof pl1m !== 'function' && typeof require === 'function') {
 // (matches the out-of-band test the interference model already uses).
 const BAND_COMPAT_MHZ = 150;
 
+// Two radios hear each other only if they also speak the same air protocol
+// (`air`: modulation + framing). A preset without one links to its own id.
 function bandCompatible(ra, rb) {
-  return ra === rb || Math.abs(ra.freqMHz - rb.freqMHz) <= BAND_COMPAT_MHZ;
+  if (ra === rb) return true;
+  const same = ra.air != null ? ra.air === rb.air : ra.id === rb.id;
+  return same && Math.abs(ra.freqMHz - rb.freqMHz) <= BAND_COMPAT_MHZ;
 }
 
 // Received strength at the RX end when TX transmits: TX's power and its own

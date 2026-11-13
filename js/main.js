@@ -84,6 +84,7 @@
     p.note = String(raw.note || '').slice(0, 400);
     if (raw.source != null) p.source = String(raw.source).slice(0, 200);
     if (raw.band != null) p.band = String(raw.band).slice(0, 16);
+    if (raw.air != null) p.air = String(raw.air).slice(0, 32);
     if (raw.calibrated != null) p.calibrated = !!raw.calibrated;
     for (const k of Object.keys(PRESET_NUM_FIELDS)) {
       if (raw[k] == null) continue;
@@ -94,6 +95,12 @@
     }
     for (const k of ['freqMHz', 'txDbm', 'sensDbm', 'airRateKbps', 'rangeLosM']) {
       if (p[k] == null) return null; // unusable by the link-budget math
+    }
+    if (p.nFit == null) {
+      // In-bounds fields can still imply an exponent <= 0 (signal rising with
+      // distance) or ~20: hold the derived one to the same bounds as nFit.
+      const n = pathLossExponent(p);
+      if (!(n >= PRESET_NUM_FIELDS.nFit[0] && n <= PRESET_NUM_FIELDS.nFit[1])) return null;
     }
     return p;
   }
@@ -564,7 +571,7 @@
       heteroInfo.innerHTML =
         '<b>Relay wing:</b> ' + escHtml(waf.name) + ' (~' + Math.round(hoverEnduranceMin(waf)) +
         ' min hover) on <b>' + escHtml(wr.name) + '</b> — usable ' + fmtDist(usableRangeM(wr, env.factor)) +
-        (bandOk ? '' : ' <b style="color:var(--lost)">· different band from the tactical radio: the wing can bridge C2↔wing and wing↔wing, but tactical drones only link to their own kind</b>') +
+        (bandOk ? '' : ' <b style="color:var(--lost)">· different radio protocol/band from the tactical radio: the wing can bridge C2↔wing and wing↔wing, but tactical drones only link to their own kind</b>') +
         '.<br><b>Tactical:</b> ' + escHtml(airframe.name) + ' on ' + escHtml(radio.name) + ' — usable ' + fmtDist(usableRangeM(radio, env.factor)) + '.';
     }
   }
