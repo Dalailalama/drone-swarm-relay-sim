@@ -335,6 +335,18 @@
             setStatus(s, v.id + ' landing failed on the bridge (' + v.state + ')' +
               (attempt < LAND_MAX_ATTEMPTS ? ' — retrying' : ' after ' + attempt + ' attempts — vehicle left holding'));
           }
+          // A landing the bridge gave up on can still end on the pad (a slow
+          // descent setting down late, an autopilot failsafe landing). The
+          // bridge then reports the vehicle 'landed' again under that
+          // landing's id, and the land retry, which wants it armed, never
+          // comes: carry on from there exactly as after a normal touchdown.
+          // A retry the bridge never took up (the vehicle was down first)
+          // gives way to that landing the same way.
+          if (svc && v.servicePhase === 'landed' && typeof v.serviceId === 'string' && v.serviceId.length <= 64 &&
+              (svc.phase === 'failed' && svc.landFailedAt !== undefined && svc.id === v.serviceId ||
+               svc.phase === 'landing' && svc.landAttempt > 1 && svc.id !== v.serviceId)) {
+            svc = ExternalMode.services[v.id] = { id: v.serviceId, phase: 'landed' };
+          }
           if (svc && svc.id === v.serviceId && svc.phase !== 'failed') {
             if (v.state === 'landing' || v.servicePhase === 'landing') {
               if (svc.pendingAction === 'land') { svc.pendingAction = null; svc.lastAction = null; svc.retries = 0; }
