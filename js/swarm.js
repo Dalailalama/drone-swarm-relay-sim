@@ -459,7 +459,7 @@ function planWorldKey(s) {
   for (const e of s.c2.cov.values()) if (e.bad > e.good) bad++;
   const r40 = v => Math.round(v / 40);
   return [r40(s.base.x), r40(s.base.y), r40(s.target.x), r40(s.target.y), bad,
-    (s.jammers || []).map(j => [r40(j.x), r40(j.y), j.erpDbm, j.on !== false, j.band, j.freqMHz].join(':')).join('|'),
+    c2Jammers(s).map(j => [r40(j.x), r40(j.y), j.erpDbm, j.on !== false, j.band, j.freqMHz].join(':')).join('|'),
     (s.gpsZones || []).map(z => [r40(z.x), r40(z.y), Math.round(z.rM), z.on !== false].join(':')).join('|'),
   ].join(';');
 }
@@ -904,8 +904,9 @@ function agilityGainDb(s, radio) {
 // Elevated noise floor (dBm, in sensitivity-equivalent terms) that all active
 // interference sources impose on a receiver at rxPos/rxAlt. -Infinity if none.
 // rxRadio carries the receiver's anti-jam capability (spectrum agility).
-function interferenceFloorDbm(s, rxPos, rxAlt, rxRadio) {
-  const jams = s.jammers;
+// jamList overrides the true sources: C2's survey passes its own picture.
+function interferenceFloorDbm(s, rxPos, rxAlt, rxRadio, jamList) {
+  const jams = jamList || s.jammers;
   if (!jams || !jams.length) return -Infinity;
   const rad = rxRadio || s.radio;
   const n = pathLossExponent(rad);
@@ -956,16 +957,39 @@ function endPenaltyDb(s, pos, alt, radio) {
 // it already uses its terrain database. Terrain shadowing is respected, so a
 // hill that blocks the emitter also shrinks the avoided area.
 function inDenialZone(s, pos) {
-  if (!s.jammers || !s.jammers.length) return false;
+  const jams = c2Jammers(s);
+  if (!jams.length) return false;
   const alt = terrainGroundAt(s.terrain, pos.x, pos.y) + s.altitudeM;
   // Spectrum survey uses the radio that would actually HOLD a relay there.
-  return interferenceFloorDbm(s, pos, alt, chainRadio(s)) > chainRadio(s).sensDbm;
+  return interferenceFloorDbm(s, pos, alt, chainRadio(s), jams) > chainRadio(s).sensDbm;
+}
+
+// The interference sources as C2 knows them (audit C2-09). An operator-placed
+// source is intel the moment it is placed, and a static one stays where the
+// operator puts it, so outside red-team mode the picture is the placement.
+// Red-team hunters MOVE: C2 keeps each where it was reported and learns of a
+// move only the way it learns any dead zone, through lost telemetry and
+// black-box uploads into the coverage map. Reading their live positions was
+// a god view of the adversary.
+function c2Jammers(s) {
+  const jams = s.jammers || [];
+  if (!s.adversaryMode || !jams.length) return jams;
+  const v = s.c2.jamView;
+  if (v && v.at === s.time && v.n === jams.length) return v.list;
+  const intel = s.c2.jamIntel || (s.c2.jamIntel = new WeakMap());
+  const list = jams.map(j => {
+    let at = intel.get(j);
+    if (!at) { at = { x: j.x, y: j.y }; intel.set(j, at); }
+    return { ...j, x: at.x, y: at.y }; // a copy: a hunter moving later this tick must not leak in
+  });
+  s.c2.jamView = { at: s.time, n: jams.length, list };
+  return list;
 }
 
 // Widest active denial radius — used to give the path planner room to detour.
 function maxDenialRadiusM(s) {
   let r = 0;
-  for (const j of (s.jammers || [])) r = Math.max(r, jammerDenialRadiusM(s, j));
+  for (const j of c2Jammers(s)) r = Math.max(r, jammerDenialRadiusM(s, j));
   return r;
 }
 
