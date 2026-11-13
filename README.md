@@ -79,7 +79,12 @@ the link last worked:
   to that last-link point and listen → fall back one radio-range step toward
   base and listen again → third strike → only then RTL home.* Three attempts
   before the mission position is abandoned — base is the last resort, not
-  the first one.
+  the first one. Each point is flown by the drone's own navigation belief,
+  and an attempt that cannot reach its point (inside a tower, say) expires
+  after twice its straight-line transit time plus the listening time. A
+  drone that reaches its last-known home with the link still dead lands
+  there; the ground crew swaps its battery only if the base really is there
+  (if the operator moved in radio silence, it stays landed).
 - **C2 side** — the ground station remembers where every lost drone was
   last heard (rendered as dashed ghost markers). After a grace period it
   dispatches a rescue drone toward that point — held one link-length from
@@ -101,8 +106,9 @@ trajectories in unknown terrain; here it's applied to energy. Before a drone
 adopts any in-flight tasking — relay slot, rescue point, new mission target —
 it checks that flying there still leaves enough battery to get home against
 the current wind, with pessimism margin and reserve intact. If not, it
-declines the order, keeps flying its current (already-vetted) one, and
-reports the refusal; C2 benches it for a while and elects a drone that can
+declines the order, keeps flying its current one while that one still
+closes (if neither closes, it takes the cheaper of the two), and reports the
+refusal; C2 benches it for a while and elects a drone that can
 actually afford the job. A drone that says yes has proven it can also say
 goodbye safely.
 
@@ -164,7 +170,10 @@ all tested:
   airspeed with Ornstein-Uhlenbeck drift, they steer by that belief (and miss
   slots by exactly their nav error), and telemetry poisons C2's picture of
   where they are. The planner hedges: relay slots sidestep zones it cannot
-  trust positions in.
+  trust positions in, and C2 reads each report's GNSS flag, so a
+  dead-reckoned position paints no coverage, calls off no search, anchors no
+  rescue chain and earns no election credit, and a drone lost there is
+  marked uncertain.
 - **Anti-jam spectrum agility + LPI/LPD** (*Mission setup*) — anti-jam /
   agile presets (FHSS for ELRS; interference avoidance and cancellation for
   Silvus and Doodle Mesh Rider) shed an assumed processing gain of 12–16 dB

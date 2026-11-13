@@ -211,7 +211,8 @@ simulation was right all along.
 ## Full hardware bill of materials (reference)
 
 **T0 — Bench (~$400–$1,500)**
-- SiK/RFD900-class telemetry radio pair — ~$40–$200
+- SiK/RFD900-class telemetry radio pair — ~$60–$200 (Holybro lists the SiK
+  V3 pair at $58.99)
 - ExpressLRS + LoRa module set — ~$60
 - 2× companion computer (Raspberry Pi 5 class) — ~$160
 - Pixhawk-class autopilot — ~$150–$300 (or bundled in a dev drone)
