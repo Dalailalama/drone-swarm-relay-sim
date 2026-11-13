@@ -467,8 +467,10 @@ const PLAN = {
 };
 
 // What a failed search depends on: the ends, the RF denial sources, the GNSS
-// zones and the measured-bad coverage cells. While none of it changes a
-// re-search can only fail again — it took 30-42 s over hills, every 5 s (#27).
+// zones and the measured-bad coverage cells, plus the settings that size the
+// hops and every denial zone (chain radio, environment, altitude, spacing,
+// agility and LPI). While none of it changes a re-search can only fail
+// again — it took 30-42 s over hills, every 5 s (#27).
 function planWorldKey(s) {
   let bad = 0;
   for (const e of s.c2.cov.values()) if (e.bad > e.good) bad++;
@@ -476,6 +478,7 @@ function planWorldKey(s) {
   return [r40(s.base.x), r40(s.base.y), r40(s.target.x), r40(s.target.y), bad,
     c2Jammers(s).map(j => [r40(j.x), r40(j.y), j.erpDbm, j.on !== false, j.band, j.freqMHz].join(':')).join('|'),
     (s.gpsZones || []).map(z => [r40(z.x), r40(z.y), Math.round(z.rM), z.on !== false].join(':')).join('|'),
+    [chainRadio(s).id, s.envFactor, s.altitudeM, s.deployFrac, !!s.spectrumAgility, !!s.lpiMode].join(':'),
   ].join(';');
 }
 

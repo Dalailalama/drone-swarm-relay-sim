@@ -31,6 +31,22 @@ test('#27: a jammer on the objective over hills fails fast, and the failure is n
   assert.ok(again.ms < 50, `an unchanged failed plan was searched again (${again.ms} ms)`);
 });
 
+// The failed plan is held only while the world is unchanged: switching on
+// spectrum agility shrinks every denial zone, so it must be searched again
+// at once, not after the 60 s hold.
+test('#27 guard: switching on an anti-jam remedy re-plans a failed chain at once', () => {
+  const ctx = loadCore();
+  const DOODLE = R.RADIOS.find(r => r.id === 'doodle-rm');
+  const s = ctx.makeSwarm({ count: 6, airframe: Q450, radio: DOODLE, envFactor: 0.45, targetX: 3000, targetY: 0,
+    altitudeM: 60, seed: 5, jammers: [{ x: 3000, y: 300, erpDbm: 10, band: 'all', altM: 15, on: true }] });
+  s.spectrumAgility = false;
+  s.time = 1;
+  assert.strictEqual(ctx.planChain(s).feasible, false, 'the unmitigated denial zone blocks the chain');
+  s.spectrumAgility = true;
+  s.time = 10; // past the replan interval, well inside the failed-plan hold
+  assert.strictEqual(ctx.planChain(s).feasible, true, 'agility shrank the zone but the stale failure was kept');
+});
+
 test('#27: a 100 km objective plans in bounded time', () => {
   const ctx = loadCore();
   // Urban SiK: usable range is short, so the grid cell bottomed out at 40 m;
