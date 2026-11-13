@@ -239,6 +239,7 @@
       tY = -dist * 0.25;
     }
     missionSeq += 1;
+    const takMarks = swarm ? swarm.takMarks || [] : [];
     const terrainSeed = forcedSeed != null ? forcedSeed : 42 + missionSeq;
     let terrain;
     if (terrainSel.value === 'osm' && osmArea) {
@@ -291,6 +292,11 @@
     fleetRowMap.clear();
     if (fleetBody) fleetBody.innerHTML = '';
     swarm._terrainSeed = terrainSeed;
+    // Imported CoT marks are real-world points: they outlive a relaunch,
+    // re-projected onto the new mission's anchor, and the TAK list follows
+    // (audit ui-render/tak-list-stale-after-relaunch).
+    swarm.takMarks = takMarks.map(m => Object.assign({}, m, latLonToLocal(takAnchor(), m.lat, m.lon)));
+    renderTakList();
     swarm.showCoverage = coverageChk.checked;
     cam3D = view3D ? makeCamera3D(swarm) : null;
     if (typeof updateJammerPanel === 'function') updateJammerPanel();
@@ -1301,8 +1307,9 @@
   takConnectBtn.addEventListener('click', () => {
     if (takWs) {
       clearInterval(takTimer); takTimer = null;
-      try { takWs.close(); } catch (_) { /* already gone */ }
-      takWs = null;
+      const old = takWs;
+      takWs = null; // first, so its close event cannot overwrite the status below
+      try { old.close(); } catch (_) { /* already gone */ }
       takConnectBtn.textContent = 'Stream to TAK';
       takStatus.textContent = 'off — use Export for one-shot snapshots';
       return;
@@ -1312,18 +1319,28 @@
     // Bare host:port is a common paste; normalize so WebSocket constructor accepts it.
     if (!/^wss?:\/\//.test(url)) url = 'ws://' + url;
     try { takWs = new WebSocket(url); } catch (e) { takStatus.textContent = 'bad URL: ' + e.message; return; }
-    takWs.onopen = () => {
+    // A socket that never opened failed to connect: browsers fire close right
+    // after error, which used to replace the diagnostic with 'bridge closed'
+    // (audit ui-render/tak-stream-error-overwritten). Events from a socket
+    // that is no longer the current stream are ignored.
+    const ws = takWs, unreachable = 'bridge unreachable — is tak_bridge.py running?';
+    let opened = false;
+    takStatus.textContent = 'connecting to ' + url + '…';
+    ws.onopen = () => {
+      if (takWs !== ws) return;
+      opened = true;
       takConnectBtn.textContent = 'Disconnect TAK stream';
       takStatus.textContent = 'streaming to ' + url + ' every 5 s — run sitl/tak_bridge.py to reach real ATAK clients';
       takStreamOnce();
       takTimer = setInterval(takStreamOnce, 5000);
     };
-    takWs.onclose = () => {
+    ws.onclose = () => {
+      if (takWs !== ws) return;
       clearInterval(takTimer); takTimer = null; takWs = null;
       takConnectBtn.textContent = 'Stream to TAK';
-      takStatus.textContent = 'bridge closed';
+      takStatus.textContent = opened ? 'bridge closed' : unreachable;
     };
-    takWs.onerror = () => { takStatus.textContent = 'bridge unreachable — is tak_bridge.py running?'; };
+    ws.onerror = () => { if (takWs === ws && !opened) takStatus.textContent = unreachable; };
   });
 
   // --- Canvas interaction ---------------------------------------------------
