@@ -23,14 +23,23 @@ Only the `main` branch is supported; there are no tagged releases yet.
   (`localhost` / `127.0.0.1`) by default.
 - A web page open in the operator's browser can still reach a loopback
   WebSocket (cross-site WebSocket hijacking). The servers therefore refuse,
-  with HTTP 403, any handshake whose `Origin` is not the sim's own: loopback
-  http(s), `file://` (`null`), the GitHub Pages demo, or one added with
-  `--allow-origin`. See `sitl/ws_origin.py`.
+  with HTTP 403, any handshake whose `Origin` is not the sim's own: http(s)
+  on `localhost` / `127.0.0.1` / `[::1]` (any port), `file://` (`null`), the
+  GitHub Pages demo (`https://dalailalama.github.io`), or one added with the
+  repeatable `--allow-origin ORIGIN` (`--allow-origin '*'` turns the check
+  off). A page served from any other host, such as `http://<box>:8000` on
+  the LAN, is refused until its origin is added. See `sitl/ws_origin.py`.
+- Admitting `null` is what lets a page opened from `file://` connect, but a
+  sandboxed iframe on any site also sends `Origin: null` and passes the
+  check. If other pages open in the operator's browser are not trusted, use
+  `--token`.
 - The Origin check does not stop a non-browser client, which can send any
-  `Origin`. With `--token SECRET` (or `$BRIDGE_TOKEN`), a handshake must
-  also carry `?token=SECRET` in its URL, or it gets HTTP 401. Put the token
-  in the sim's Bridge URL field, e.g. `ws://host:8765/?token=SECRET`. A
-  server bound beyond loopback (`--ws-host 0.0.0.0`) with no token
+  `Origin`, or none: a handshake with no `Origin` header is treated as a
+  non-browser tool and admitted. With `--token SECRET` (or `$BRIDGE_TOKEN`), a
+  handshake must also carry `?token=SECRET` in its URL, or it gets HTTP 401.
+  Put the token in the sim's Bridge URL field, e.g.
+  `ws://host:8765/?token=SECRET`. A server bound beyond loopback
+  (`--ws-host 0.0.0.0`; `--host` for `mock_vehicles.py`) with no token
   generates one and prints it, because every host on that network is such a
   client.
 - `ws://` is plaintext, token included. Beyond a trusted LAN, use an SSH or

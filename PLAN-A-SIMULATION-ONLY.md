@@ -123,8 +123,9 @@ the (free) funding machine.
 - **Tasks:** Identify 10 labs worldwide working on UAV networks / FANET /
   disaster robotics / mesh comms. Email each a tight note: *"I built an
   open-source, browser-based comms-first swarm simulator that bridges to real
-  PX4/ArduPilot firmware — would your group find it useful for teaching or
-  research? Happy to add features you need."* Offer the tool free.
+  ArduPilot (ArduCopter) firmware — would your group find it useful for
+  teaching or research? Happy to add features you need."* Offer the tool
+  free.
 - **Deliverable:** 10 personalized emails sent.
 - **Done-when:** ≥ 1 lab replies with interest.
 

@@ -189,7 +189,7 @@ So 100% on screen is 80% of the nominal pack. When $E$ reaches 0 the vehicle is 
 ### 5.3 Smart-RTH and Order Feasibility
 The ground speed along a leg with unit direction $\hat{\mathbf{u}}$ crabs out the crosswind:
 $$V_{g} = \mathbf{w} \cdot \hat{\mathbf{u}} + \sqrt{V_{\max}^2 - w_{\perp}^2}$$
-A leg with $w_\perp \ge V_{\max}$ or $V_g \le 0$ is unflyable. Each tick a flying drone (modes ok, hold, relink, rtl) compares its energy with the home leg, flown from its believed position to the base it last learned:
+A leg with $w_\perp \ge V_{\max}$ has $V_g = 0$. The smart-RTH check treats a home leg with $V_g \le 0.05\,\text{m/s}$ as unflyable; the order check (below) rejects any leg with $V_g < 0.5\,\text{m/s}$. Each tick a flying drone (modes ok, hold, relink, rtl) compares its energy with the home leg, flown from its believed position to the base it last learned:
 $$E \le P_{\text{elec}}(V_{\max}) \cdot \frac{d_{\text{home}}}{V_{g,\text{home}}} \cdot \frac{1.3}{3600} + 0.07\,E_{\text{usable}} \implies \text{RTB}$$
 An unflyable home leg counts as infinite cost and triggers RTB at once. The home leg is billed at the maximum-speed power with a 1.3 margin (`BATTERY.homeMargin`) plus a reserve of 7% of usable energy. Before accepting an order, a drone adds the outbound leg to the same sum (commitment rule) and declines the order if a leg is unflyable or the energy is short. Both checks use the true wind vector: no onboard wind estimate is modelled.
 
