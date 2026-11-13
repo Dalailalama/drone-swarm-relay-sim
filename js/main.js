@@ -815,6 +815,9 @@
     if (!ll) {
       osmNote.innerHTML = 'Finding the place&hellip;';
       const gen = osmLoadToken; // geocoding is cancellable too (finding #8)
+      // The search holds the button too: every click used to send another
+      // Nominatim request, against its 1 request/second policy.
+      osmLoadBtn.disabled = true; osmLoadBtn.textContent = 'Finding…';
       try {
         const g = await osmGeocode(txt);
         if (gen !== osmLoadToken) return; // user moved on while we searched
@@ -823,6 +826,9 @@
         if (gen !== osmLoadToken) return;
         osmNote.innerHTML = '<b style="color:var(--lost)">' + escHtml(e.message) + '</b> &middot; Check the spelling, or paste coordinates as <b>lat, lon</b>.';
         return;
+      } finally {
+        // Release it unless an area load has claimed it meanwhile.
+        if (osmBtnOwner === 0) { osmLoadBtn.disabled = false; osmLoadBtn.textContent = 'Load real area'; }
       }
     }
     await loadOsmArea(ll.lat, ll.lon, r, name).catch(() => {}); // note shows the error

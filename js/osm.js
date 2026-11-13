@@ -203,14 +203,35 @@ function osmParseLatLon(text) {
 }
 
 // --- Network (browser only) --------------------------------------------------
+// The free OSM services have usage policies. Nominatim: "an absolute maximum
+// of 1 request per second" per application, and cache results. Overpass:
+// back off when told the server is busy. The browser already identifies the
+// app (its own User-Agent plus the page's Referer/Origin; a page cannot set
+// User-Agent), so what is left to the client is pacing and caching.
+const OSM_NOMINATIM_GAP_MS = 1100;   // a little over the 1 req/s ceiling
+const OSM_BUSY_COOLDOWN_MS = 30000;  // after a 429/406/504 from an Overpass server
+let osmNominatimAt = -Infinity;      // when the latest Nominatim request is due out
+const osmGeocodeCache = new Map();   // normalized query → {lat, lon, name}
+const osmBusyUntil = new Map();      // Overpass endpoint → no requests before this time
 
 async function osmGeocode(query) {
+  const key = String(query).trim().toLowerCase().replace(/\s+/g, ' ');
+  const hit = osmGeocodeCache.get(key);
+  if (hit) return Object.assign({}, hit);
+  // Reserve the next slot synchronously, so two searches in a row queue
+  // behind each other instead of both waking at once.
+  const now = Date.now();
+  const at = Math.max(now, osmNominatimAt + OSM_NOMINATIM_GAP_MS);
+  osmNominatimAt = at;
+  if (at > now) await new Promise(r => setTimeout(r, at - now));
   const url = OSM_NOMINATIM + '?format=json&limit=1&q=' + encodeURIComponent(query);
   const res = await fetch(url, { headers: { Accept: 'application/json' } });
   if (!res.ok) throw new Error('Place search failed (' + res.status + ')');
   const hits = await res.json();
   if (!hits.length) throw new Error('No place found for "' + query + '"');
-  return { lat: parseFloat(hits[0].lat), lon: parseFloat(hits[0].lon), name: hits[0].display_name };
+  const out = { lat: parseFloat(hits[0].lat), lon: parseFloat(hits[0].lon), name: hits[0].display_name };
+  osmGeocodeCache.set(key, out);
+  return Object.assign({}, out);
 }
 
 // Building ways AND multipolygon building relations (whose outer ways are
@@ -223,17 +244,25 @@ function osmBuildingQuery(lat, lon, radiusM) {
 
 async function osmFetchArea(lat, lon, radiusM) {
   const q = osmBuildingQuery(lat, lon, radiusM);
-  let lastErr = null;
+  let lastErr = null, busy = 0;
   for (const ep of OSM_ENDPOINTS) {
+    const waitMs = (osmBusyUntil.get(ep) || 0) - Date.now();
+    if (waitMs > 0) { busy = Math.max(busy, waitMs); continue; } // still cooling down
     try {
       const res = await fetch(ep, { method: 'POST', body: 'data=' + encodeURIComponent(q),
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
+      if (res.status === 429 || res.status === 406 || res.status === 504) {
+        osmBusyUntil.set(ep, Date.now() + OSM_BUSY_COOLDOWN_MS);
+        busy = Math.max(busy, OSM_BUSY_COOLDOWN_MS);
+        continue;
+      }
       if (!res.ok) { lastErr = new Error('Overpass ' + res.status + ' (busy — try again in a minute)'); continue; }
       const json = await res.json();
       const { buildings, dropped } = osmParseBuildings(json, lat, lon);
       return { lat, lon, radiusM, buildings, dropped };
     } catch (e) { lastErr = e; }
   }
+  if (busy > 0) throw new Error('OSM servers asked us to wait ~' + Math.ceil(busy / 1000) + ' s before the next request');
   throw lastErr || new Error('Overpass unreachable');
 }
 
