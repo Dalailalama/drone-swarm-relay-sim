@@ -41,6 +41,8 @@ function makeNet(seed) {
   return {
     packets: [], bcasts: [], fades: new Map(), rng: mulberry32(seed),
     dropped: 0, delivered: 0,
+    // the same outcomes split by kind (tlm/cmd/ack/vid/bcast) — see countOutcome
+    byKind: {},
     // shared-channel accounting: ACTUAL on-air seconds, billed per channel at
     // the moment of transmission (never at enqueue — see stepNet), plus an
     // estimate of queued-but-unsent air per channel for latency decisions
@@ -66,7 +68,46 @@ function makeNet(seed) {
     // duplicate suppression), and copies actually aired per C2 order round
     bcastPendingBy: new Map(),
     floodSeq: null, floodCount: 0, floodCopiesEma: null,
+    // drone ids the open C2 round's table addresses (scored at round close)
+    floodAddr: null,
   };
+}
+
+// Outcome counters (NET-04). One delivered/dropped per unicast packet or
+// video fragment, and one per drone a broadcast round addresses — reached or
+// missed, scored when the next round closes it — so broadcast and unicast C2
+// count the same unreachable drone the same way. Kinds are kept apart because
+// a video fragment, a telemetry report and an order are different quantities.
+function countOutcome(s, kind, ok) {
+  if (ok) s.net.delivered++; else s.net.dropped++;
+  const k = s.net.byKind[kind] || (s.net.byKind[kind] = { delivered: 0, dropped: 0 });
+  if (ok) k.delivered++; else k.dropped++;
+}
+
+// Control-plane loss: telemetry, orders, acks and broadcast reach — video
+// fragments excluded (video has its own frame-loss metric).
+function controlLossPct(s) {
+  let ok = 0, lost = 0;
+  for (const kind in s.net.byKind) {
+    if (kind === 'vid') continue;
+    ok += s.net.byKind[kind].delivered;
+    lost += s.net.byKind[kind].dropped;
+  }
+  return 100 * lost / Math.max(1, ok + lost);
+}
+
+// Score a closed C2 round: every drone its table addressed either heard that
+// round (bcastSeen) or missed it. A dead or unreachable addressee is a miss,
+// as the unicast order to it would have been a no-route drop.
+function scoreBcastRound(s) {
+  const seq = s.net.floodSeq, addr = s.net.floodAddr;
+  if (seq == null || !addr) return;
+  for (const id of addr) {
+    const d = nodePos(s, id);
+    const heard = !!d && d.bcastSeen >= seq;
+    countOutcome(s, 'bcast', heard);
+    if (!heard) capLog(s, { ev: 'drop', reason: 'bcast-miss', kind: 'bcast', to: id, seqNo: seq });
+  }
 }
 
 // Packet capture: append one event to the rolling trace. Kept lightweight so
@@ -182,13 +223,16 @@ function scheduleBcast(s, srcId, payload, bytes, rad) {
     }
   }
   // A new C2 round closes the last one: fold its aired copies into the
-  // estimate that paces C2's order rounds (cmdIntervalSec).
+  // estimate that paces C2's order rounds (cmdIntervalSec), and score its
+  // reach (NET-04).
   if (srcId === 'C2' && payload.seq !== s.net.floodSeq) {
     if (s.net.floodSeq != null) {
       const e = s.net.floodCopiesEma;
       s.net.floodCopiesEma = e == null ? s.net.floodCount : e + 0.3 * (s.net.floodCount - e);
+      scoreBcastRound(s);
     }
     s.net.floodSeq = payload.seq;
+    s.net.floodAddr = payload.orders ? Object.keys(payload.orders) : null;
     s.net.floodCount = 0;
   }
   if (list.length >= BCAST_QUEUE_MAX) {
@@ -273,7 +317,7 @@ function markVidFrameDropped(s, id) {
 }
 
 function dropPacketBookkeeping(s, p, reason, from, to, marginDb) {
-  s.net.dropped++;
+  countOutcome(s, p.kind, false);
   if (p.kind === 'vid') markVidFrameDropped(s, p.frameId || p.pid);
   capLog(s, { ev: 'drop', reason, pid: p.pid, kind: p.kind, from, to, marginDb });
 }
@@ -461,7 +505,7 @@ function stepBcasts(s) {
       }
       d.bcastSeen = b.payload.seq;
       d.inbox.push({ kind: 'bcast', src: 'C2', payload: b.payload });
-      s.net.delivered++;
+      // counted when the round closes (scoreBcastRound), not per reception
       capLog(s, { ev: 'bcast', seqNo: b.payload.seq, from: b.srcId, to: id, marginDb: +m.toFixed(1) });
       // this node re-transmits the table once — through the same scheduler
       scheduleBcast(s, id, b.payload, b.bytes, txRadioOf(s, id, null));
@@ -749,7 +793,7 @@ function sendPacket(s, kind, src, dst, payload, bytesOverride) {
     path = dst === 'C2' ? pathToC2(s, src) : routePath(s, src, dst);
   }
   if (!path || path.length < 2) {
-    s.net.dropped++;
+    countOutcome(s, kind, false);
     if (kind === 'vid') s.net.vid.droppedFrames++;
     capLog(s, { ev: 'drop', reason: 'no-route', kind, src, dst });
     return false; // no route — radio silence
@@ -770,7 +814,7 @@ function sendPacket(s, kind, src, dst, payload, bytesOverride) {
   // chunk needs hops x its airtime before the last fragment lands (NET-02).
   const hops = path.length - 1;
   if (kind === 'vid' && (queueDelay > 1.0 || queueDelay + frameAirtime * hops > 2.0)) {
-    s.net.dropped++;
+    countOutcome(s, kind, false);
     s.net.vid.droppedFrames++;
     capLog(s, { ev: 'drop', reason: 'queue-latency', kind, src, dst });
     return false;
@@ -819,7 +863,7 @@ function sendPacket(s, kind, src, dst, payload, bytesOverride) {
 }
 
 function deliverPacket(s, p) {
-  s.net.delivered++;
+  countOutcome(s, p.kind, true);
   if (p.kind === 'vid') {
     if (s.net.vidDropped.has(p.frameId || p.pid)) {
       // Straggler of a frame already counted as lost: the RF delivery
@@ -855,7 +899,11 @@ function deliverPacket(s, p) {
     const d = nodePos(s, p.dst);
     const aliveAtArrive = d && (alive(d) || (d.endpointDeadAt != null && d.endpointDeadAt >= p.tArrive));
     if (aliveAtArrive) d.inbox.push(p);
-    else s.net.delivered--, s.net.dropped++;
+    else {
+      const k = s.net.byKind[p.kind];
+      s.net.delivered--, k.delivered--;
+      countOutcome(s, p.kind, false);
+    }
   }
 }
 
@@ -1023,7 +1071,7 @@ if (typeof module !== 'undefined' && module.exports) {
     NET, VID, makeNet, capLog, sendBroadcast, stepBcasts,
     txRadioOf, channelKeyOf, hopTimeSec, nodeIds, nodePos,
     linkUsable, linkCost, routePath, c2Tree, pathToC2,
-    sendPacket, deliverPacket, stepNet, exportCaptureJSONL,
+    sendPacket, deliverPacket, stepNet, exportCaptureJSONL, controlLossPct,
     hopDelivered, HOP_RETRIES, interruptEndpointAttempts,
     recordUserAction,
   };

@@ -162,8 +162,9 @@ function runScenarioSeed(ctx, scenarioObj, seed, durationSec) {
 
   const connSec = s.stats.fleetConnSec || s.stats.connSec || 0;
   const uptimePct = 100 * connSec / Math.max(1e-9, s.stats.tSec);
-  const totalPkts = s.net.delivered + s.net.dropped;
-  const droppedPct = 100 * s.net.dropped / Math.max(1, totalPkts);
+  // Control-plane loss (telemetry, orders, broadcast reach; no video
+  // fragments): scenarios that toggle broadcast stay comparable (NET-04).
+  const droppedPct = ctx.controlLossPct(s);
 
   return {
     seed,
@@ -237,7 +238,7 @@ function renderMarkdownDashboard(results, seeds, durationSec) {
     '### Metric Definitions',
     '- **Uptime**: % of mission time fleet maintains active C2 connectivity to ground station.',
     '- **Arrival Time**: Seconds from takeoff until the first tactical drone arrives within objective perimeter (200m), over the seeds that arrived; k/N says how many did.',
-    '- **Packet Loss**: Total link and routing drops as a percentage of total transmitted packets.',
+    '- **Packet Loss**: Control-plane loss: telemetry, acks and orders dropped on a link or for want of a route, plus addressed drones that missed a broadcast order round, as a percentage of all of them. Video fragments are not counted.',
     '- **Energy Consumed**: Mean per-drone battery consumption in Watt-hours over the mission.',
     '- **Variance (SD)**: Standard deviation across the identical seed Monte Carlo iterations.',
     '',

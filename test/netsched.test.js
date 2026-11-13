@@ -555,3 +555,38 @@ test('NET-06: a relay death invalidates the cached C2 tree on the same tick', ()
   ctx.killDrone(s, relay);
   assert.strictEqual(ctx.pathToC2(s, far.id), null, 'route through a dead relay');
 });
+
+// NET-04: a drone that never heard a broadcast order table produced no drop
+// anywhere, so broadcast C2 reported 0 % loss where unicast reported 50 % for
+// the same unreachable drone. Broadcast reach is now scored per addressed
+// drone when the next round supersedes it, and the control-plane loss ratio
+// leaves video fragments out.
+function orderRounds(broadcast, rounds) {
+  const s = mk(2);
+  const [near, far] = s.drones;
+  near.x = 100; near.y = 0;
+  far.x = 50000; far.y = 0; // 50 km: no route, never hears a table
+  // A broadcast round is scored when the next one supersedes it, so the
+  // broadcast run sends one extra round to close the last scored one.
+  const sends = broadcast ? rounds + 1 : rounds;
+  for (let r = 1; r <= sends; r++) {
+    s.time = r - 1;
+    if (broadcast) ctx.sendBroadcast(s, 'C2', { seq: r, orders: { [near.id]: {}, [far.id]: {} } }, 68);
+    else for (const d of s.drones) ctx.sendPacket(s, 'cmd', 'C2', d.id, {}, 64);
+    run(s, r - 1, r - 0.05, 0.05);
+  }
+  return s;
+}
+
+test('NET-04: an unreachable drone counts as lost in broadcast mode exactly as in unicast', () => {
+  const bc = orderRounds(true, 10), uc = orderRounds(false, 10);
+  assert.strictEqual(uc.net.dropped, 10, 'unicast: 10 orders to the far drone dropped');
+  assert.strictEqual(bc.net.dropped, 10, 'broadcast: 10 rounds the far drone never heard must count as lost');
+  assert.deepStrictEqual({ ...bc.net.byKind.bcast }, { delivered: 10, dropped: 10 });
+  assert.deepStrictEqual({ ...uc.net.byKind.cmd }, { delivered: 10, dropped: 10 });
+  assert.strictEqual(ctx.controlLossPct(bc), 50);
+  assert.strictEqual(ctx.controlLossPct(uc), 50, 'same geometry, same loss in both C2 modes');
+  // Video fragments are a different quantity (frame loss has its own metric).
+  uc.net.byKind.vid = { delivered: 0, dropped: 1000 };
+  assert.strictEqual(ctx.controlLossPct(uc), 50, 'video fragments leak into the control-plane loss');
+});

@@ -321,7 +321,9 @@ function runOne(ctx, cfg, cell, seed) {
     uptimePct: 100 * s.stats.connSec / Math.max(1e-9, s.stats.tSec),
     freshFrac: ticks ? freshSum / ticks / Math.max(1, s.drones.length) : 0,
     delivered: s.net.delivered,
-    droppedPct: 100 * s.net.dropped / Math.max(1, s.net.delivered + s.net.dropped),
+    // control-plane loss: telemetry, orders and broadcast reach, not video
+    // fragments (video has vidLossPct) — comparable across C2 modes (NET-04)
+    droppedPct: ctx.controlLossPct(s),
     vidLossPct: vidTotal ? 100 * s.net.vid.droppedFrames / vidTotal : null,
     maxNavErrM: s.maxNavErrM || 0,
   };
