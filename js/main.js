@@ -1757,6 +1757,17 @@
   }
 
   const mapAttrib = el('mapAttrib');
+  // First-run tips on the map (audit ui-render/no-first-run-guidance): the
+  // gestures were documented only in the README. Dismissal is remembered per
+  // browser; blocked storage just means the tip comes back next visit.
+  const mapHint = el('mapHint'), MAP_HINT_KEY = 'swarmsim.mapHintDismissed';
+  let mapHintDismissed = false;
+  try { mapHintDismissed = localStorage.getItem(MAP_HINT_KEY) === '1'; } catch (_) { /* storage blocked */ }
+  mapHint.style.display = mapHintDismissed ? 'none' : 'flex';
+  el('mapHintClose').addEventListener('click', () => {
+    mapHint.style.display = 'none';
+    try { localStorage.setItem(MAP_HINT_KEY, '1'); } catch (_) { /* storage blocked */ }
+  });
   fleetBody.addEventListener('click', e => {
     const row = e.target.closest('.fleet-row');
     if (row) selected = swarm.drones.find(d => d.id === row.dataset.id) || null;

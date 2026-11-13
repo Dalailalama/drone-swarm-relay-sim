@@ -109,6 +109,24 @@ main { flex: 1; display: flex; min-height: 0; }
   display: flex;
   gap: 14px;
 }
+/* First-run tips; sits above the basemap credit so it never covers it. */
+#mapHint {
+  position: absolute;
+  left: 12px; bottom: 34px;
+  max-width: min(560px, calc(100% - 24px));
+  background: rgba(26, 27, 22, 0.92);
+  border: 1px solid var(--line);
+  border-radius: 2px;
+  padding: 7px 8px 7px 12px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--dim-2);
+  align-items: center;
+  gap: 10px;
+}
+#mapHint b { color: var(--text); font-weight: 600; }
+#mapHint button { flex: none; padding: 6px 12px; font-size: 11px; }
+
 #legend span::before {
   content: '';
   display: inline-block;
