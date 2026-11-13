@@ -522,9 +522,17 @@
       const overPad = (d.mode === 'rtb' || d.mode === 'rtl') && dist2d(d, s.base) < DRONE.landThresholdM;
       const origin = ExternalMode.origin;
       const t = ExternalMode.telem[d.id];
-      if (svc && svc.landFailedAt != null && overPad && wallSec() - svc.landFailedAt >= LAND_RETRY_SEC &&
-          positionFresh(t) && t.armed === true && t.servicePhase === 'failed') {
+      const landFailed = svc && overPad && positionFresh(t) && t.armed === true && t.servicePhase === 'failed';
+      if (landFailed && svc.landFailedAt != null && wallSec() - svc.landFailedAt >= LAND_RETRY_SEC) {
         ExternalMode.services[d.id] = { id: String(++ExternalMode.serviceSeq), phase: 'landing', landAttempt: (svc.landAttempt || 1) + 1 };
+        dispatchServiceAction(s, d.id, 'land', { groundAlt: terrainGroundAt(s.terrain, d.x, d.y) - origin.groundM });
+        continue;
+      }
+      // A retry the bridge has not taken up yet (a retryable rejection, or a
+      // lost ack) goes out again under its own id — the vehicle is not
+      // 'ready', so the dispatch below never reaches it. The dispatcher
+      // throttles it and fails it once its retry budget is spent.
+      if (landFailed && svc.landAttempt > 1 && svc.phase === 'landing' && svc.lastAction === 'land' && t.serviceId !== svc.id) {
         dispatchServiceAction(s, d.id, 'land', { groundAlt: terrainGroundAt(s.terrain, d.x, d.y) - origin.groundM });
         continue;
       }

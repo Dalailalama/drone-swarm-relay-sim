@@ -121,6 +121,16 @@ test('land-not-resent-browser-stuck: a landing the bridge reports failed is surf
   assert.strictEqual(lands.length, 2, 'the failed landing is never tried again');
   assert.notStrictEqual(lands[1].requestId, land.requestId, 'a retry needs a fresh request id');
   assert.strictEqual(ui.ctx.ExternalMode.services[d.id].phase, 'landing');
+
+  // A retryable rejection of that retry (VEHICLE_NOT_READY) left it pending
+  // forever: the vehicle is not 'ready', so the ordinary land dispatch never
+  // reached it again and the remaining attempts were never made.
+  ws.onmessage({ data: JSON.stringify({ type: 'service_ack', id: d.id, requestId: lands[1].requestId, action: 'land',
+    accepted: false, retryable: true, code: 'VEHICLE_NOT_READY' }) });
+  for (let i = 0; i < 4; i++) { ui.ctx.__clock.ms += 250; frame(failed); ui.ctx.stepSwarm(s, 0.25); }
+  const again = services(ws, 'land');
+  assert.ok(again.length > 2, 'a rejected retry is never sent again');
+  assert.strictEqual(again.at(-1).requestId, lands[1].requestId, 'it is re-sent under its own request id');
 });
 
 test('reinit-adopts-swapped-vehicle: a vehicle the bridge kept parked already swapped is grounded in the rebuilt swarm and relaunched', () => {
