@@ -151,3 +151,45 @@ test('LOS terrain sampling follows the map\'s finest relief on short missions', 
   }
   assert.ok(under > 20, 'the sweep must include rays that hit the ground, got ' + under);
 });
+
+// Audit rf-physics/fresnel-clearance-fixed-5m: the clearance was a flat 5 m
+// whatever the frequency or span. With the link's frequency it is 0.6 of the
+// first Fresnel radius, F1 = 17.32 sqrt(d1 d2 / (f_GHz D)) (km), which is
+// 3-8x more on long sub-GHz hops and less than 5 m on short 2.4 GHz ones.
+test('LOS clearance is 0.6 of the first Fresnel zone at the link\'s frequency', () => {
+  const tower = h => T.indexBuildings({ seed: 1, groundAmpM: 0, groundScaleM: 1, buildings: [{ x: 10000, y: 0, w: 20, d: 20, heightM: h }] });
+  // 20 km at 915 MHz, both ends at 50 m: 0.6 F1 at mid-span is 24.3 m.
+  assert.ok(Math.abs(T.fresnelClearM(0.5, 20000, 915) - 24.29) < 0.01);
+  assert.strictEqual(T.losBlocked(tower(44), 0, 0, 50, 20000, 0, 50), false, 'legacy 5 m clearance: 44 m roof clears');
+  assert.strictEqual(T.losBlocked(tower(44), 0, 0, 50, 20000, 0, 50, 915), true, '6 m is 15% of F1: blocked');
+  // A 30 m roof sits under the legacy early-out (both ends above roof + 5 m),
+  // but well inside 0.6 F1.
+  assert.strictEqual(T.losBlocked(tower(30), 0, 0, 50, 20000, 0, 50, 915), true, 'the early-out must use the Fresnel clearance');
+  assert.strictEqual(T.losBlocked(tower(20), 0, 0, 50, 20000, 0, 50, 915), false, 'a 30 m gap clears 0.6 F1');
+  // 300 m at 2400 MHz: 0.6 F1 is 1.84 m, so 4 m over a roof is clear.
+  const short = T.indexBuildings({ seed: 1, groundAmpM: 0, groundScaleM: 1, buildings: [{ x: 150, y: 0, w: 20, d: 20, heightM: 46 }] });
+  assert.strictEqual(T.losBlocked(short, 0, 0, 50, 300, 0, 50, 2400), false);
+  assert.strictEqual(T.losBlocked(short, 0, 0, 50, 300, 0, 50), true, 'the legacy 5 m blocks it');
+});
+
+test('live link margins use the Fresnel clearance at the link frequency', () => {
+  const { loadCore } = require('./helpers/sim.js');
+  const ctx = loadCore();
+  const R = require('../js/radios.js');
+  const A = require('../js/airframes.js');
+  const RFD = R.RADIOS.find(r => r.id === 'rfd900x');
+  const s = ctx.makeSwarm({ count: 2, airframe: A.AIRFRAMES.find(a => a.id === 'q450'), radio: RFD, envFactor: 1,
+    targetX: 20000, targetY: 0, altitudeM: 50, seed: 3 });
+  s.terrain = T.indexBuildings({ seed: 1, groundAmpM: 0, groundScaleM: 1, buildings: [{ x: 10000, y: 0, w: 20, d: 20, heightM: 44 }] });
+  const [a, b] = s.drones;
+  a.x = 0; a.y = 0; a.altM = 50; b.x = 20000; b.y = 0; b.altM = 50;
+  s._marginCache = null;
+  assert.strictEqual(ctx.liveMarginDb(s, a.id, b.id), -Infinity, 'a 44 m roof under a 20 km 915 MHz hop at 50 m blocks it');
+  b.x = 2000; // 2 km: 0.6 F1 is 7.7 m, and the 6 m gap is still inside it
+  s.terrain.buildings[0].x = 1000; T.indexBuildings(s.terrain);
+  s._marginCache = null;
+  assert.strictEqual(ctx.liveMarginDb(s, a.id, b.id), -Infinity);
+  s.terrain.buildings[0].heightM = 40; T.indexBuildings(s.terrain); // a 10 m gap clears it
+  s._marginCache = null;
+  assert.ok(ctx.liveMarginDb(s, a.id, b.id) > 0);
+});

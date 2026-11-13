@@ -685,7 +685,7 @@ function planChain(s) {
       // than by its length never clears, and splitting it again and again
       // stacked slots at the building's edge (#15).
       if (dist2d(a, b) < 4 * DRONE.separationM) continue;
-      if (losBlocked(s.terrain, a.x, a.y, altOf(a, i === 0), b.x, b.y, altOf(b, false))) {
+      if (losBlocked(s.terrain, a.x, a.y, altOf(a, i === 0), b.x, b.y, altOf(b, false), chainRadio(s).freqMHz)) {
         const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
         slots.splice(i === 0 ? 0 : i, 0, mid); // insert between a and b
         inserted = true;
@@ -908,7 +908,7 @@ function interferenceFloorDbm(s, rxPos, rxAlt, rxRadio, nOverride) {
     if (Number.isNaN(jf) || (jf != null && Math.abs(jf - rad.freqMHz) > 150)) continue; // out of band
     const ground = Math.hypot(rxPos.x - j.x, rxPos.y - j.y);
     const jAlt = terrainGroundAt(s.terrain, j.x, j.y) + (j.altM || 15);
-    if (losBlocked(s.terrain, j.x, j.y, jAlt, rxPos.x, rxPos.y, rxAlt)) continue; // terrain shadows it
+    if (losBlocked(s.terrain, j.x, j.y, jAlt, rxPos.x, rxPos.y, rxAlt, rad.freqMHz)) continue; // terrain shadows it
     const slant = Math.hypot(ground, jAlt - rxAlt);
     const pl = pl1 + 10 * n * Math.log10(Math.max(1, slant / s.envFactor));
     lin += Math.pow(10, (j.erpDbm + ERP_TO_EIRP_DB + rad.antGainDbi - gainDb - pl) / 10);
@@ -1016,16 +1016,17 @@ function liveMarginDb(s, aId, bId) {
     if (s && s._marginCache) s._marginCache.set(cacheKey, -Infinity);
     return -Infinity;
   }
-  if (losBlocked(s.terrain, a.x, a.y, altA, b.x, b.y, altB)) {
-    if (s && s._marginCache) s._marginCache.set(cacheKey, -Infinity);
-    return -Infinity;
-  }
   // Mixed fleets: each end transmits with its own radio's power and antenna
   // over the link's shared exponent; the link carries the worse direction (js/fleet.js).
   // C2 pairs with the far end's radio (the ground station flies a matched
   // companion unit for every type in the field).
   const ra = (aId === 'C2' ? droneRadio(b) : droneRadio(a)) || s.radio;
   const rb = (bId === 'C2' ? droneRadio(a) : droneRadio(b)) || s.radio;
+  // Fresnel clearance at the lower frequency: the larger, conservative zone.
+  if (losBlocked(s.terrain, a.x, a.y, altA, b.x, b.y, altB, Math.min(ra.freqMHz, rb.freqMHz))) {
+    if (s && s._marginCache) s._marginCache.set(cacheKey, -Infinity);
+    return -Infinity;
+  }
   const slant = Math.hypot(ground, altA - altB);
   // LPI/LPD waveform: pay a fixed link-budget cost for the spread spectrum.
   const lpiCost = s.lpiMode ? AGILITY.lpiCostDb : 0;
@@ -2254,7 +2255,7 @@ function stepAdversaries(s, dt) {
           const dist = dist2d(j, p);
           const maxDetectRange = j.detectRangeM || Math.max(4000, usableRangeM(rad, s.envFactor) * 2.5);
           if (bandOk && dist <= maxDetectRange &&
-              !losBlocked(s.terrain, j.x, j.y, jAlt, p.x, p.y, nodeAltAbsM(s, id, p))) {
+              !losBlocked(s.terrain, j.x, j.y, jAlt, p.x, p.y, nodeAltAbsM(s, id, p), rad.freqMHz)) {
             const bearing = Math.atan2(p.y - j.y, p.x - j.x) + gaussian(s.net.rng) * 0.03; // ~1.7° error
             fix = { x: j.x + dist * Math.cos(bearing), y: j.y + dist * Math.sin(bearing), age: t };
           }
