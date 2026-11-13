@@ -1985,6 +1985,31 @@ async def scenario_token_gate() -> None:
         bridge.serve = real_serve
 
 
+async def scenario_token_plus_typed_as_is() -> None:
+    """A base64 secret (`openssl rand -base64`) often holds '+', and a browser
+    sends a typed ?token=a+b as is: reading that '+' as a form-encoded space
+    answered the exact secret with 401. Percent-encoded and form-encoded
+    spellings of the secret still match; a different secret still does not."""
+
+    class Req:
+        def __init__(self, path):
+            self.path = path
+            self.headers = {"Origin": "http://localhost:8000"}
+
+    class Conn:
+        def respond(self, status, body):
+            return (int(status), body)
+
+    check = bridge.make_origin_check((), None, "Zm9v+YmFy/cXV4==")
+    for path in ("/?token=Zm9v+YmFy/cXV4==", "/?token=Zm9v%2BYmFy%2FcXV4%3D%3D", "/?a=1&token=Zm9v+YmFy/cXV4=="):
+        assert check(Conn(), Req(path)) is None, path
+    for path in ("/?token=Zm9v%20YmFy/cXV4==", "/?token=Zm9vYmFy/cXV4==", "/?token=Zm9v"):
+        assert check(Conn(), Req(path))[0] == 401, path
+    check = bridge.make_origin_check((), None, "two words")
+    for path in ("/?token=two%20words", "/?token=two+words"):
+        assert check(Conn(), Req(path)) is None, path
+
+
 async def scenario_init_count_bounded() -> None:
     """An init's count comes off the network: a huge one is clamped (with a
     status) instead of building a vehicle and UDP task per requested unit."""
@@ -2412,6 +2437,7 @@ SCENARIOS = [
     ("ownership: goals from a non-controller are not forwarded", scenario_goals_ownership),
     ("CSWSH: a foreign web Origin is refused at the handshake", scenario_foreign_origin_rejected),
     ("CSWSH: --token (or a LAN bind) requires ?token= at the handshake", scenario_token_gate),
+    ("CSWSH: a --token holding '+' matches when typed as is", scenario_token_plus_typed_as_is),
     ("init: a huge vehicle count is clamped", scenario_init_count_bounded),
     ("malformed messages are skipped without dropping the connection", scenario_malformed_messages_keep_connection),
     ("a malformed init is refused with a status before it can take control", scenario_malformed_init_refused_without_control),

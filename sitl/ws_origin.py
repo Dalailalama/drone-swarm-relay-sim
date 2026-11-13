@@ -33,7 +33,7 @@ import os
 import secrets
 from http import HTTPStatus
 from typing import Iterable, Optional
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import unquote, unquote_plus, urlsplit
 
 DEFAULT_ALLOWED_ORIGINS = ("null", "https://dalailalama.github.io")
 LOOPBACK_HOSTS = ("localhost", "127.0.0.1", "::1")
@@ -61,12 +61,23 @@ def origin_allowed(origin: Optional[str], extra: Iterable[str] = ()) -> bool:
 
 def token_matches(path: str, token: str) -> bool:
     """True when the request target's ?token= equals the shared secret
-    (constant-time compare)."""
+    (constant-time compare).
+
+    A browser sends a typed ?token=a+b as is, so a '+' may be the secret's
+    own (base64 secrets carry it) as well as a form-encoded space: the value
+    matches under either decoding.
+    """
     try:
-        given = parse_qs(urlsplit(path or "").query).get("token", [""])[0]
+        query = urlsplit(path or "").query
     except ValueError:
         return False
-    return hmac.compare_digest(given.encode("utf-8"), token.encode("utf-8"))
+    given = [""]
+    for part in query.split("&"):
+        name, _, value = part.partition("=")
+        if unquote_plus(name) == "token":
+            given = {unquote(value), unquote_plus(value)}
+            break
+    return any(hmac.compare_digest(g.encode("utf-8"), token.encode("utf-8")) for g in given)
 
 
 def make_origin_check(extra: Iterable[str] = (), log=None, token: Optional[str] = None):
