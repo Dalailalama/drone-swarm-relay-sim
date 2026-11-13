@@ -635,6 +635,32 @@ test('NET-07: a receiver that dies before arrival leaves a dead-dst drop, not a 
   assert.deepStrictEqual(trace(s, 'p0'), ['send', 'hop', 'drop(dead-dst)']);
 });
 
+// The same death at a RELAY: the drop must name the hop whose receiver died
+// (far -> relay), not the next hop (relay -> C2), whose receiver is alive.
+test('NET-07: a relay that dies before arrival is the dead-dst of the hop it was receiving', () => {
+  const s = mk(2), [relay, far] = s.drones;
+  relay.x = 150; relay.y = 0;
+  far.x = 300; far.y = 0;
+  s.captureOn = true;
+  s.net.rng = () => 0.01;
+  s.time = 1.0;
+  const orig = ctx.pathToC2;
+  ctx.pathToC2 = () => [far.id, relay.id, 'C2'];
+  try {
+    assert.ok(ctx.sendPacket(s, 'tlm', far.id, 'C2', {}, 8000)); // 1 s of airtime
+  } finally {
+    ctx.pathToC2 = orig;
+  }
+  ctx.stepNet(s, 0);
+  s.time = 2.005; ctx.stepNet(s, 1.005); // last bit landed at 2.0, arrival due at 2.02
+  s.time = 2.01; ctx.killDrone(s, relay);
+  s.time = 2.05; ctx.stepNet(s, 0.04);
+  assert.strictEqual(s.net.dropped, 1);
+  assert.deepStrictEqual(trace(s, 'p0'), ['send', 'hop', 'drop(dead-dst)']);
+  const drop = s.net.cap.find(e => e.ev === 'drop' && e.pid === 'p0');
+  assert.deepStrictEqual([drop.from, drop.to], [far.id, relay.id], 'the dead receiver is the relay');
+});
+
 test('NET-07: every video fragment event joins its frame send', () => {
   const s = mk(1), d = s.drones[0];
   d.x = 50; d.y = 0;
