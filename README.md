@@ -118,9 +118,11 @@ becomes a caterpillar unroll — the flock waits for the chain instead of
 sprinting into blackout — and in bad RF the chain compresses automatically,
 spacing itself by measured link quality instead of planned geometry.
 
-Measured effect: launch-phase dark time drops to zero, and the urban
-scenario at 50 m AGL goes from ~15% link uptime (swarm repeatedly marooned
-in street canyons) to 100%, with the mission still reaching its target.
+Measured effect when the tether was introduced: launch-phase dark time
+dropped to zero, and the urban scenario at 50 m AGL went from ~15% link
+uptime (swarm repeatedly marooned in street canyons) to 100%, with the
+mission still reaching its target. Later radio-preset, Fresnel-clearance and
+planner changes move these numbers, so re-measure before quoting them.
 
 ### Corridor transit
 
@@ -200,10 +202,13 @@ Five features that make this hard to copy — all software-only, all tested:
   the flock follows.
 - **Red-team adversary mode** (*Interference → Red-team mode*) — interference
   sources direction-find the swarm's own transmissions (sensor-honest: no
-  god view, just a radio receiver) and crawl toward the recency-weighted
-  traffic centroid at limited ground speed. A denial zone that hunts. Uptime
-  with hunting vs static jammers is measurable; the report accounts for how
-  far the adversary moved.
+  god view, just a radio receiver; each fix is a noisy bearing at an
+  RSSI-estimated range) and crawl toward the recency-weighted
+  traffic centroid at limited ground speed. A denial zone that hunts. C2
+  does not see the hunters move either: it plans against where they were
+  placed and learns of a move only through coverage (lost telemetry,
+  black-box uploads). Uptime with hunting vs static jammers is measurable;
+  the report accounts for how far the adversary moved.
 - **ATAK / TAK integration** (*ATAK / TAK section*) — exports the live common
   operating picture as Cursor-on-Target atoms: every drone, the command post,
   the objective, and denial/GNSS-dead zones as ellipse hazards. Download a
@@ -213,19 +218,32 @@ Five features that make this hard to copy — all software-only, all tested:
   any mark into the mission objective. Georeferencing reuses a loaded OSM
   area's exact anchor, or an operator origin (equirectangular, sub-metre at
   these scales).
-- **Scale: 100+ nodes** — drone slider to 120. Upstream routing uses one
-  C2-rooted shortest-path tree refreshed on a 0.5 s cadence instead of a
-  Dijkstra per packet (16× faster at n=100), separation runs on a uniform
-  neighbor grid. `node bench/run.js` regenerates `bench/BASELINE.md` —
-  committed numbers so performance regressions diff in review. At scale the
-  binding constraint is the shared channel, honestly.
+- **Scale: 100+ nodes** — drone slider to 120. Unicast traffic to and from
+  C2 uses one C2-rooted shortest-path tree refreshed on a 0.5 s cadence
+  (and rebuilt when a node dies or launches) instead of a Dijkstra per
+  packet, and separation runs on a uniform neighbor grid. `npm run bench`
+  regenerates `bench/BASELINE.md` — committed numbers so performance
+  regressions diff in review. The committed baseline predates several core
+  changes and no longer reproduces (see its header); re-run it before
+  quoting a figure. At scale the binding constraint is the shared channel,
+  honestly.
 - **Batch Monte Carlo + REST API** — `node tools/batch.js --config
-  batch/example.json` sweeps parameter cells across seeds overnight and emits
-  a Markdown confidence report (uptime/loss/contact as mean ± sd, p05/p95)
-  plus raw CSV. Same engine served over zero-dependency HTTP:
-  `node tools/server.js`, then `POST /api/batch`. The bundled example already
-  surfaced a quotable finding: in dense urban terrain with short-range
-  radios, LOWER altitude holds more uptime than high altitude.
+  batch/example.json` sweeps parameter cells across seeds and emits a
+  Markdown report plus raw CSV. Each metric (link uptime, control-packet
+  drop, video chunk loss, C2 contact %) is printed as mean [95% CI on the
+  mean, Student t] with its n, plus observed min/max below 20 runs and
+  sample p05/p95 from 20 runs; a single run prints `n=1, no interval`.
+  Packet drop counts control traffic only (telemetry, commands, acks and
+  broadcast order reach); video has its own loss column. A batch is capped
+  at 200 runs, 20 distinct seeds per cell and a work budget (chain batches
+  for more). Same engine served over zero-dependency HTTP:
+  `node tools/server.js` (binds `127.0.0.1`; `--host <addr>` exposes it, and
+  then only behind an authenticating reverse proxy; requests carrying a
+  browser `Origin` get 403 unless allowed), then `POST /api/batch`. The
+  bundled example is an urban altitude sweep (SiK radios, 45/90/140 m AGL)
+  to copy for your own study; it is a template, not a result.
+  `node tools/compare.js` runs two or more scenarios on identical seeds and
+  prints objective uptime, fleet contact and arrival side by side.
 
 ## The radio model (and its honesty)
 
@@ -307,8 +325,11 @@ nobody crashes; buildings taller than the flight altitude are no-fly boxes
 the drones steer around (they carry a terrain database, like real
 autopilots — and so does C2, which never plans a relay slot inside a
 tower). Try the urban preset at 50 m AGL, watch the swarm suffer in the
-street canyons, then raise the altitude slider over the low-rise — measured
-uptime goes from ~15% to 100%, which is exactly how real urban BVLOS works.
+street canyons, then raise the altitude slider over the low-rise and
+compare. For short-range radios height is a trade, not a cure: it clears
+roofs, but it also lengthens every slant range, so measure it for your
+radio rather than assume it (an older version of this README quoted ~15% to
+100% uptime; that figure predates later radio, Fresnel and planner changes).
 
 The **3D view** button (header) switches to a FASTER-style perspective
 render — shaded terrain mesh, extruded buildings, drones on altitude stems,
@@ -386,11 +407,16 @@ contributors (ODbL).
    station, RTB triggers early.
 6. **Load *Full DDIL* from the Scenario dropdown** — mixed fleet, jammer,
    GNSS denial over the objective, LPI waveforms, and a 300 kbps video feed
-   all fighting for one channel. Then toggle spectrum agility off mid-run and
-   watch link uptime fall.
-7. **Enable *Mixed fleet*** — an X8 relay wing on RFD900x radios bridges
-   3 km while SiK-equipped micros work the target; kill a wing relay and
-   watch C2 re-elect another *wing* unit, not a tactical one.
+   all fighting for one channel. Then toggle LPI off mid-run and watch the
+   jammer's denial zone grow. (Its RFD900x radios have no agility gain, so
+   the spectrum-agility toggle changes nothing here; try that one on
+   *Disrupted*, whose Doodle Mesh Rider chain has it.)
+7. **Enable *Mixed fleet*** — an X8 relay wing on RFD900x radios holds the
+   long backhaul while SiK-equipped micros work the target; kill a wing relay
+   and watch C2 re-elect another *wing* unit, not a tactical one. The
+   planner covers the micros' hop at the objective end of the chain, not
+   their transit to it, so a far objective can still leave short-range
+   micros out of reach.
 8. **Add a GPS outage over the objective** — drones cross on dead reckoning,
    miss their slots by tens of metres, and C2's picture of them drifts with
    them. Toggle the zone off and navigation snaps back.
@@ -399,8 +425,8 @@ contributors (ODbL).
    it. This is the demo clip.
 10. **Switch on *Red-team mode*** with two jammers placed — they stop sitting
    still and start hunting whoever transmits.
-11. **Run the overnight study** — `node tools/batch.js --config batch/example.json`
-    and read the confidence report it writes; or serve the same thing as an
+11. **Run a batch study** — `node tools/batch.js --config batch/example.json`
+    and read the Markdown report it writes; or serve the same thing as an
     API: `node tools/server.js`, `curl -X POST localhost:8090/api/batch -d @batch/example.json`.
 
 ## Architecture
