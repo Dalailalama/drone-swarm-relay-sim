@@ -120,16 +120,21 @@ function countOutcome(s, kind, ok) {
   if (ok) k.delivered++; else k.dropped++;
 }
 
-// Control-plane loss: telemetry, orders, acks and broadcast reach — video
+// Control-plane outcomes: telemetry, orders, acks and broadcast reach — video
 // fragments excluded (video has its own frame-loss metric).
-function controlLossPct(s) {
-  let ok = 0, lost = 0;
+function controlOutcomes(s) {
+  let delivered = 0, dropped = 0;
   for (const kind in s.net.byKind) {
     if (kind === 'vid') continue;
-    ok += s.net.byKind[kind].delivered;
-    lost += s.net.byKind[kind].dropped;
+    delivered += s.net.byKind[kind].delivered;
+    dropped += s.net.byKind[kind].dropped;
   }
-  return 100 * lost / Math.max(1, ok + lost);
+  return { delivered, dropped };
+}
+
+function controlLossPct(s) {
+  const c = controlOutcomes(s);
+  return 100 * c.dropped / Math.max(1, c.delivered + c.dropped);
 }
 
 // Score a closed C2 round: every drone its table addressed either heard that

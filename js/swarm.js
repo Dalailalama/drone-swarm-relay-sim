@@ -2543,8 +2543,9 @@ function afterActionReport(s) {
   const cov = [...s.c2.cov.values()];
   const badCells = cov.filter(e => e.bad > e.good).length;
   const goodCells = cov.filter(e => e.good >= e.bad && (e.good + e.bad) > 0).length;
-  const deliv = s.net.delivered, drop = s.net.dropped;
-  const dropPct = (deliv + drop) ? (100 * drop / (deliv + drop)).toFixed(1) : '0';
+  // Control plane only, as tools/batch.js and tools/compare.js report it:
+  // video fragments have their own line in the payload section.
+  const ctl = controlOutcomes(s);
   const activeJam = (s.jammers || []).filter(j => j.on !== false).length;
   const D = dist2d(s.base, s.target);
   const relayEvents = (s.stats && s.stats.relayEvents) || s.events.filter(e => e.kind === 'relay').length;
@@ -2609,7 +2610,7 @@ function afterActionReport(s) {
   }
   L.push('## RF environment learned');
   L.push('- **Coverage cells mapped:** ' + cov.length + ' (' + goodCells + ' measured-good, ' + badCells + ' measured dead zones)');
-  L.push('- **Packets delivered:** ' + deliv.toLocaleString() + ' · **dropped:** ' + drop.toLocaleString() + ' (' + dropPct + '% loss)');
+  L.push('- **Control packets delivered:** ' + ctl.delivered.toLocaleString() + ' · **dropped:** ' + ctl.dropped.toLocaleString() + ' (' + controlLossPct(s).toFixed(1) + '% loss)');
   L.push('- **Channel utilization:** ' + (s.net.utilization * 100).toFixed(1) + '%' + (s.radio.dutyCycle ? ' (legal duty-cycle cap ' + (s.radio.dutyCycle * 100) + '%)' : ''));
   L.push('');
   L.push('## Timeline (last events)');
