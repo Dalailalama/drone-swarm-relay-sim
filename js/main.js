@@ -239,6 +239,7 @@
       tY = -dist * 0.25;
     }
     missionSeq += 1;
+    const takMarks = swarm ? swarm.takMarks || [] : [];
     const terrainSeed = forcedSeed != null ? forcedSeed : 42 + missionSeq;
     let terrain;
     if (terrainSel.value === 'osm' && osmArea) {
@@ -280,14 +281,22 @@
       shadowSigmaDb: env.shadowSigmaDb,
       seed: terrainSeed,
       // Heterogeneous fleet: the relay wing flies its own airframe + radio.
+      // With the wing off there is no relay radio at all (as replay.js builds
+      // it): a leftover one widened the C2 tree's search span, so a capture
+      // stopped replaying exactly once the step timing moved.
       relayWing: heteroChk.checked ? +wingRange.value : 0,
-      relayAirframe: AIRFRAMES.find(a => a.id === relayAirframeSel.value) || null,
-      relayRadio: RADIOS.find(r => r.id === relayRadioSel.value) || null,
+      relayAirframe: heteroChk.checked ? AIRFRAMES.find(a => a.id === relayAirframeSel.value) || null : null,
+      relayRadio: heteroChk.checked ? RADIOS.find(r => r.id === relayRadioSel.value) || null : null,
     });
     selected = null; selectedJammer = null; selectedZone = null;
     fleetRowMap.clear();
     if (fleetBody) fleetBody.innerHTML = '';
     swarm._terrainSeed = terrainSeed;
+    // Imported CoT marks are real-world points: they outlive a relaunch,
+    // re-projected onto the new mission's anchor, and the TAK list follows
+    // (audit ui-render/tak-list-stale-after-relaunch).
+    swarm.takMarks = takMarks.map(m => Object.assign({}, m, latLonToLocal(takAnchor(), m.lat, m.lon)));
+    renderTakList();
     swarm.showCoverage = coverageChk.checked;
     cam3D = view3D ? makeCamera3D(swarm) : null;
     if (typeof updateJammerPanel === 'function') updateJammerPanel();
@@ -357,6 +366,22 @@
     for (const k of ['radio', 'relayRadio']) {
       if (sc[k] != null && typeof sc[k] !== 'string' && !obj(sc[k])) return k + ' must be a radio id';
     }
+    // Ids must name something this page has (audit ui-render/scenario-unknown-ids-silent):
+    // an unknown one left its select blank and the sim on a silent fallback.
+    // A radio id may also be a preset the file itself carries.
+    const unknown = [];
+    const known = (k, ok) => {
+      if (sc[k] != null && sc[k] !== '' && !ok(sc[k])) unknown.push(k + ' ' + (typeof sc[k] === 'string' ? JSON.stringify(sc[k].slice(0, 48)) : '(invalid preset)'));
+    };
+    const radioOk = preset => v => (typeof v === 'object' ? !!sanitizeRadioPreset(v)
+      : RADIOS.some(r => r.id === v) || (sanitizeRadioPreset(preset) || {}).id === v);
+    known('env', v => ENVIRONMENTS.some(e => e.id === v));
+    known('airframe', v => AIRFRAMES.some(a => a.id === v));
+    known('relayAirframe', v => AIRFRAMES.some(a => a.id === v));
+    known('terrain', v => Array.from(terrainSel.options).some(o => o.value === v));
+    known('radio', radioOk(sc.radioPreset));
+    known('relayRadio', radioOk(sc.relayRadioPreset));
+    if (unknown.length) return 'unknown ' + unknown.join(', ');
     for (const k of ['base', 'target', 'baseVelMps', 'targetVelMps']) {
       if (sc[k] != null && (!obj(sc[k]) || !num(sc[k].x) || !num(sc[k].y))) return k + ' must be {x, y} with numeric x and y';
     }
@@ -542,6 +567,7 @@
   countRange.addEventListener('input', () => {
     countOut.textContent = countRange.value;
     el('scaleNote').style.display = +countRange.value >= 60 ? 'block' : 'none';
+    updateHeteroRow(); // the wing's ceiling and the composition follow the fleet size
   });
   countRange.addEventListener('change', () => {
     // resetSwarm ends with syncExternalBridge(), which already re-inits the
@@ -566,8 +592,15 @@
   }
 
   // --- Mixed fleet (heterogeneous swarms) -------------------------------------
+  const WING_MAX = +wingRange.max;
   function updateHeteroRow() {
     heteroRow.style.display = heteroChk.checked ? 'block' : 'none';
+    // The wing never takes the whole fleet: at least one tactical drone stays
+    // (audit ui-render/relay-wing-exceeds-fleet — a wing >= the fleet flew no
+    // tactical drones while the panel still described them).
+    const wingMax = Math.max(1, Math.min(WING_MAX, +countRange.value - 1));
+    wingRange.max = String(wingMax);
+    if (+wingRange.value > wingMax) wingRange.value = String(wingMax);
     if (!heteroChk.checked) return;
     const waf = AIRFRAMES.find(a => a.id === relayAirframeSel.value);
     const wr = RADIOS.find(r => r.id === relayRadioSel.value);
@@ -575,14 +608,14 @@
     if (waf && wr) {
       const bandOk = bandCompatible(wr, radio);
       heteroInfo.innerHTML =
-        '<b>Relay wing:</b> ' + escHtml(waf.name) + ' (~' + Math.round(hoverEnduranceMin(waf)) +
+        '<b>Relay wing:</b> ' + wingRange.value + ' × ' + escHtml(waf.name) + ' (~' + Math.round(hoverEnduranceMin(waf)) +
         ' min hover) on <b>' + escHtml(wr.name) + '</b> — usable ' + fmtDist(usableRangeM(wr, env.factor)) +
         (bandOk ? '' : ' <b style="color:var(--lost)">· different radio protocol/band from the tactical radio: the wing can bridge C2↔wing and wing↔wing, but tactical drones only link to their own kind</b>') +
-        '.<br><b>Tactical:</b> ' + escHtml(airframe.name) + ' on ' + escHtml(radio.name) + ' — usable ' + fmtDist(usableRangeM(radio, env.factor)) + '.';
+        '.<br><b>Tactical:</b> ' + (+countRange.value - +wingRange.value) + ' × ' + escHtml(airframe.name) + ' on ' + escHtml(radio.name) + ' — usable ' + fmtDist(usableRangeM(radio, env.factor)) + '.';
     }
   }
   heteroChk.addEventListener('change', () => { updateHeteroRow(); resetSwarm(); });
-  wingRange.addEventListener('input', () => { wingOut.textContent = wingRange.value; });
+  wingRange.addEventListener('input', updateHeteroRow);
   wingRange.addEventListener('change', () => { if (heteroChk.checked) resetSwarm(); });
   relayAirframeSel.addEventListener('change', () => { updateHeteroRow(); if (heteroChk.checked) resetSwarm(); });
   relayRadioSel.addEventListener('change', () => { updateHeteroRow(); if (heteroChk.checked) resetSwarm(); });
@@ -869,20 +902,48 @@
     download(exportCaptureJSONL(swarm), 'swarm-capture-' + Math.floor(swarm.time) + 's.jsonl', 'application/x-ndjson');
   });
   const replayBtn = el('replayBtn'), replayInput = el('replayInput');
+  // The replay runs in slices between frames (a 10-minute capture is tens of
+  // seconds of stepping), with progress on the button, and ends with a
+  // parity check against the capture's own deliveries (audit
+  // ui-render/replay-button-blocking-and-invisible). The step cap keeps a
+  // slice short even when the clock cannot be read.
+  const REPLAY_SLICE_MS = 16, REPLAY_SLICE_STEPS = 200;
   if (replayBtn && replayInput) {
     replayBtn.addEventListener('click', () => replayInput.click());
     replayInput.addEventListener('change', ev => {
       const file = ev.target.files[0]; if (!file) return;
       const reader = new FileReader();
       reader.onload = () => {
-        try {
-          if (typeof replayMission === 'function') {
-            const res = replayMission(String(reader.result || ''));
-            logEvent(swarm, 'Replayed capture: ' + file.name + ' (' + res.time.toFixed(1) + 's, ' + res.delivered + ' pkts delivered)', 'info');
+        if (typeof Replay === 'undefined' || replayBtn.disabled) return;
+        const label = replayBtn.textContent;
+        const end = () => { replayBtn.disabled = false; replayBtn.textContent = label; };
+        let run;
+        const slice = () => {
+          try {
+            if (!run) run = Replay.startReplay(String(reader.result || ''));
+            const t0 = performance.now();
+            let steps = 0, done = false;
+            while (!(done = run.advance(10)) && (steps += 10) < REPLAY_SLICE_STEPS && performance.now() - t0 < REPLAY_SLICE_MS);
+            if (!done) {
+              replayBtn.textContent = 'Replaying… ' + Math.floor(100 * run.swarm.time / run.untilTime) + '%';
+              setTimeout(slice, 0);
+              return;
+            }
+            end();
+            const res = run.result(), par = res.parity;
+            window.sim.lastReplay = res;
+            logEvent(swarm, 'Replayed capture: ' + file.name + ' (' + res.time.toFixed(1) + 's, ' + res.delivered + ' pkts delivered'
+              + (!par ? ')' : '; ' + (par.replayed === par.captured ? 'matches' : 'DIVERGES from') + ' the capture: '
+                + par.replayed + ' vs ' + par.captured + ' deliveries over ' + fmtSimClock(par.from) + '–' + fmtSimClock(par.to) + ')'),
+              par && par.replayed !== par.captured ? 'warn' : 'info');
+          } catch (e) {
+            end();
+            alert('Could not replay capture: ' + e.message);
           }
-        } catch (e) {
-          alert('Could not replay capture: ' + e.message);
-        }
+        };
+        replayBtn.disabled = true;
+        replayBtn.textContent = 'Replaying… 0%';
+        slice();
       };
       reader.readAsText(file);
       ev.target.value = '';
@@ -1273,8 +1334,9 @@
   takConnectBtn.addEventListener('click', () => {
     if (takWs) {
       clearInterval(takTimer); takTimer = null;
-      try { takWs.close(); } catch (_) { /* already gone */ }
-      takWs = null;
+      const old = takWs;
+      takWs = null; // first, so its close event cannot overwrite the status below
+      try { old.close(); } catch (_) { /* already gone */ }
       takConnectBtn.textContent = 'Stream to TAK';
       takStatus.textContent = 'off — use Export for one-shot snapshots';
       return;
@@ -1284,23 +1346,41 @@
     // Bare host:port is a common paste; normalize so WebSocket constructor accepts it.
     if (!/^wss?:\/\//.test(url)) url = 'ws://' + url;
     try { takWs = new WebSocket(url); } catch (e) { takStatus.textContent = 'bad URL: ' + e.message; return; }
-    takWs.onopen = () => {
+    // A socket that never opened failed to connect: browsers fire close right
+    // after error, which used to replace the diagnostic with 'bridge closed'
+    // (audit ui-render/tak-stream-error-overwritten). Events from a socket
+    // that is no longer the current stream are ignored.
+    const ws = takWs, unreachable = 'bridge unreachable — is tak_bridge.py running?';
+    let opened = false;
+    takStatus.textContent = 'connecting to ' + url + '…';
+    ws.onopen = () => {
+      if (takWs !== ws) return;
+      opened = true;
       takConnectBtn.textContent = 'Disconnect TAK stream';
       takStatus.textContent = 'streaming to ' + url + ' every 5 s — run sitl/tak_bridge.py to reach real ATAK clients';
       takStreamOnce();
       takTimer = setInterval(takStreamOnce, 5000);
     };
-    takWs.onclose = () => {
+    ws.onclose = () => {
+      if (takWs !== ws) return;
       clearInterval(takTimer); takTimer = null; takWs = null;
       takConnectBtn.textContent = 'Stream to TAK';
-      takStatus.textContent = 'bridge closed';
+      takStatus.textContent = opened ? 'bridge closed' : unreachable;
     };
-    takWs.onerror = () => { takStatus.textContent = 'bridge unreachable — is tak_bridge.py running?'; };
+    ws.onerror = () => { if (takWs === ws && !opened) takStatus.textContent = unreachable; };
   });
 
   // --- Canvas interaction ---------------------------------------------------
-  let dragMode = null; // 'target' | 'pan' | 'orbit' | 'jammer' | 'pinch'
+  let dragMode = null; // 'pending' | 'target' | 'base' | 'pan' | 'orbit' | 'jammer' | 'zone' | 'pinch'
   let lastMouse = null;
+  // Taps select, drags move (audit ui-render/tap-drone-moves-target). A press
+  // on something only notes what is under it ('pending'); moving past the
+  // slop turns it into a drag of the nearest draggable object, and releasing
+  // before that is a tap on the nearest thing hit. On phones every orbiting
+  // drone sits inside the target's widened hit radius, so grabbing on press
+  // moved the objective instead of selecting the drone.
+  const DRAG_SLOP_PX = { mouse: 4, touch: 8 }; // CSS px, scaled by uiScale
+  let press = null; // { p, w, drag: { kind, obj, x, y } | null, tap: { kind, obj } | null }
   let lastHopsHtml = null, lastFleetHtml = null, lastEvHtml = null; // O7 panel-diff caches
   const pointers = new Map(); // active pointers on the canvas — 2 fingers = pinch zoom
   let lastPinch = null;       // { dist, mid } of the previous pinch frame
@@ -1336,40 +1416,36 @@
       return;
     }
     const w = screenToWorld(view, cv, p.x, p.y);
-    // Interference source hit test first (they're draggable, like the target)
-    let jHit = null;
-    for (const j of swarm.jammers) {
-      const js = worldToScreen(view, cv, j.x, j.y);
-      if (Math.hypot(p.x - js.x, p.y - js.y) < 16 * hitU) { jHit = j; break; }
-    }
-    let zHit = null;
-    for (const z of (swarm.gpsZones || [])) {
-      const zs = worldToScreen(view, cv, z.x, z.y);
-      if (Math.hypot(p.x - zs.x, p.y - zs.y) < 16 * hitU) { zHit = z; break; }
-    }
-    const tScreen = worldToScreen(view, cv, swarm.target.x, swarm.target.y);
-    const bScreen = worldToScreen(view, cv, swarm.base.x, swarm.base.y);
-    if (jHit) {
-      selectedJammer = jHit; selectedZone = null; dragMode = 'jammer'; updateJammerPanel(); updateZonePanel();
-    } else if (zHit) {
-      selectedZone = zHit; selectedJammer = null; dragMode = 'zone'; updateZonePanel(); updateJammerPanel();
-    } else if (Math.hypot(p.x - tScreen.x, p.y - tScreen.y) < 26 * hitU) {
-      dragMode = 'target';
-    } else if (Math.hypot(p.x - bScreen.x, p.y - bScreen.y) < 26 * hitU) {
-      dragMode = 'base'; // the operator moves too — chain re-plans live
+    // Everything under the press (screen space): interference sources, GPS
+    // zones, the target and the operator are draggable; drones are tap-only.
+    const hits = [];
+    const hitTest = (kind, obj, radius) => {
+      const s = worldToScreen(view, cv, obj.x, obj.y);
+      const dist = Math.hypot(p.x - s.x, p.y - s.y);
+      if (dist < radius * hitU) hits.push({ kind, obj, dist });
+    };
+    for (const j of swarm.jammers) hitTest('jammer', j, 16);
+    for (const z of (swarm.gpsZones || [])) hitTest('zone', z, 16);
+    hitTest('target', swarm.target, 26);
+    hitTest('base', swarm.base, 26); // the operator moves too — chain re-plans live
+    for (const d of swarm.drones) hitTest('drone', d, 14);
+    const nearest = list => list.reduce((a, h) => (!a || h.dist < a.dist ? h : a), null);
+    if (hits.length) {
+      const g = nearest(hits.filter(h => h.kind !== 'drone'));
+      press = { p, w, drag: g && { kind: g.kind, obj: g.obj, x: g.obj.x, y: g.obj.y }, tap: nearest(hits) };
+      dragMode = 'pending';
     } else {
-      // Drone hit test (screen space)
-      let hit = null;
-      for (const d of swarm.drones) {
-        const s = worldToScreen(view, cv, d.x, d.y);
-        if (Math.hypot(p.x - s.x, p.y - s.y) < 14 * hitU) { hit = d; break; }
-      }
-      if (hit) { selected = hit; dragMode = null; }
-      else dragMode = 'pan';
+      dragMode = 'pan';
     }
     lastMouse = p;
     cv.setPointerCapture(e.pointerId);
   });
+
+  function selectSource(kind, obj) {
+    if (kind === 'jammer') { selectedJammer = obj; selectedZone = null; }
+    else { selectedZone = obj; selectedJammer = null; }
+    updateJammerPanel(); updateZonePanel();
+  }
 
   cv.addEventListener('pointermove', e => {
     const p = canvasPos(e);
@@ -1403,18 +1479,21 @@
       lastMouse = p;
       return;
     }
-    if (dragMode === 'target') {
-      const w = screenToWorld(view, cv, p.x, p.y);
-      swarm.target.x = w.x; swarm.target.y = w.y;
-    } else if (dragMode === 'base') {
-      const w = screenToWorld(view, cv, p.x, p.y);
-      swarm.base.x = w.x; swarm.base.y = w.y;
-    } else if (dragMode === 'jammer' && selectedJammer) {
-      const w = screenToWorld(view, cv, p.x, p.y);
-      selectedJammer.x = w.x; selectedJammer.y = w.y;
-    } else if (dragMode === 'zone' && selectedZone) {
-      const w = screenToWorld(view, cv, p.x, p.y);
-      selectedZone.x = w.x; selectedZone.y = w.y;
+    if (dragMode === 'pending') {
+      const slop = (DRAG_SLOP_PX[e.pointerType] || DRAG_SLOP_PX.mouse) * (window.uiScale || 1);
+      if (Math.hypot(p.x - press.p.x, p.y - press.p.y) <= slop) return;
+      const g = press.drag;
+      if (!g) dragMode = 'pan'; // pressed only drones: the drag pans the map
+      else {
+        dragMode = g.kind;
+        if (g.kind === 'jammer' || g.kind === 'zone') selectSource(g.kind, g.obj);
+      }
+    }
+    if (press && press.drag && dragMode === press.drag.kind) {
+      // Keep the grab offset: the object follows the pointer's motion and
+      // never jumps to where the press landed.
+      const w = screenToWorld(view, cv, p.x, p.y), g = press.drag;
+      g.obj.x = g.x + (w.x - press.w.x); g.obj.y = g.y + (w.y - press.w.y);
     }
     recordDrag();
     if (dragMode === 'pan' && lastMouse) {
@@ -1426,11 +1505,12 @@
 
   // The sim reads the dragged position at every step, so a drag is recorded
   // on each move (coalesced per sim time), not only on release (audit C-replay).
-  function recordDrag() {
-    if (dragMode === 'target') recordAction({ type: 'target', x: swarm.target.x, y: swarm.target.y });
-    else if (dragMode === 'base') recordAction({ type: 'base', x: swarm.base.x, y: swarm.base.y });
-    else if (dragMode === 'jammer' && selectedJammer) recordAction({ type: 'jammer_move', id: selectedJammer.id, x: selectedJammer.x, y: selectedJammer.y });
-    else if (dragMode === 'zone' && selectedZone) recordAction({ type: 'zone_move', id: selectedZone.id, x: selectedZone.x, y: selectedZone.y });
+  function recordDrag() { recordMove(dragMode); }
+  function recordMove(kind) {
+    if (kind === 'target') recordAction({ type: 'target', x: swarm.target.x, y: swarm.target.y });
+    else if (kind === 'base') recordAction({ type: 'base', x: swarm.base.x, y: swarm.base.y });
+    else if (kind === 'jammer' && selectedJammer) recordAction({ type: 'jammer_move', id: selectedJammer.id, x: selectedJammer.x, y: selectedJammer.y });
+    else if (kind === 'zone' && selectedZone) recordAction({ type: 'zone_move', id: selectedZone.id, x: selectedZone.x, y: selectedZone.y });
   }
   cv.addEventListener('pointerup', e => {
     pointers.delete(e.pointerId);
@@ -1440,13 +1520,19 @@
       // cleanly rather than falling back into a surprise pan.
       if (pointers.size < 2) { dragMode = null; lastPinch = null; }
     } else {
+      // Released before the slop: a tap. It selects a drone or a source and
+      // never moves anything, so nothing goes into the capture.
+      const tap = dragMode === 'pending' && press.tap;
+      if (tap && tap.kind === 'drone') { selected = tap.obj; syncKillBtn(); }
+      else if (tap && (tap.kind === 'jammer' || tap.kind === 'zone')) selectSource(tap.kind, tap.obj);
       dragMode = null;
+      press = null;
     }
     lastMouse = null;
   });
   cv.addEventListener('pointercancel', e => {
     pointers.delete(e.pointerId);
-    dragMode = null; lastPinch = null; lastMouse = null;
+    dragMode = null; lastPinch = null; lastMouse = null; press = null;
   });
 
   cv.addEventListener('wheel', e => {
@@ -1470,6 +1556,22 @@
     return 'T+' + String(m).padStart(2, '0') + ':' + String(sec).padStart(2, '0');
   }
 
+  // Each hop runs at its own transmitter's rate (txRadioOf: a mixed fleet's
+  // wing hops fly the wing radio, not the tactical one) and duty cycle.
+  // Store-and-forward hops sharing a channel split its airtime (1/Σ 1/rate);
+  // separate channels run in parallel, so the slowest channel bounds the
+  // chain. One radio throughout reduces to air rate / hops · duty
+  // (audit ui-render/kpi-throughput-ignores-hop-radios).
+  function chainCapacityKbps(hops) {
+    if (!hops.length) return chainThroughputKbps(radio, 0) * (radio.dutyCycle ?? 1);
+    const inv = {};
+    for (const h of hops) {
+      const r = txRadioOf(swarm, h.a.id, h.b.id), k = channelKeyOf(r);
+      inv[k] = (inv[k] || 0) + 1 / (r.airRateKbps * (r.dutyCycle ?? 1));
+    }
+    return Math.min(...Object.values(inv).map(x => 1 / x));
+  }
+
   function updatePanels(status) {
     kpiRelays.textContent = status.relayCount;
     kpiMission.textContent = status.missionCount;
@@ -1477,15 +1579,15 @@
     kpiPackets.textContent = swarm.net.delivered.toLocaleString();
     // Payload capacity: hop-divided air rate, minus what C2 traffic is already
     // burning, capped by any legal duty cycle.
-    const effKbps = chainThroughputKbps(radio, status.hops.length)
-      * Math.max(0, 1 - swarm.net.utilization) * (radio.dutyCycle ?? 1);
+    const effKbps = chainCapacityKbps(status.hops) * Math.max(0, 1 - swarm.net.utilization);
     kpiThroughput.textContent = status.fleetConnected
       ? (effKbps >= 1000 ? (effKbps / 1000).toFixed(1) + ' Mbps'
         : effKbps.toFixed(effKbps < 10 ? 1 : 0) + ' kbps')
       : '—';
     chanLine.textContent = 'Channel busy ' + (swarm.net.utilization * 100).toFixed(1) + '% with C2 traffic'
       + (radio.dutyCycle ? ' · ' + (radio.dutyCycle * 100) + '% legal duty cycle' : '');
-    kpiClock.textContent = fmtSimClock(swarm.time);
+    kpiClock.textContent = fmtSimClock(swarm.time)
+      + (!paused && achievedRate && Math.abs(achievedRate - rateScale) > 0.05 * rateScale ? ' · ' + Math.round(achievedRate) + '×' : '');
 
     if (!status.aliveCount) {
       statusPill.textContent = 'Swarm down';
@@ -1674,6 +1776,17 @@
   }
 
   const mapAttrib = el('mapAttrib');
+  // First-run tips on the map (audit ui-render/no-first-run-guidance): the
+  // gestures were documented only in the README. Dismissal is remembered per
+  // browser; blocked storage just means the tip comes back next visit.
+  const mapHint = el('mapHint'), MAP_HINT_KEY = 'swarmsim.mapHintDismissed';
+  let mapHintDismissed = false;
+  try { mapHintDismissed = localStorage.getItem(MAP_HINT_KEY) === '1'; } catch (_) { /* storage blocked */ }
+  mapHint.style.display = mapHintDismissed ? 'none' : 'flex';
+  el('mapHintClose').addEventListener('click', () => {
+    mapHint.style.display = 'none';
+    try { localStorage.setItem(MAP_HINT_KEY, '1'); } catch (_) { /* storage blocked */ }
+  });
   fleetBody.addEventListener('click', e => {
     const row = e.target.closest('.fleet-row');
     if (row) selected = swarm.drones.find(d => d.id === row.dataset.id) || null;
@@ -1694,11 +1807,30 @@
   });
 
   // Map keyboard: arrows pan (orbit in 3D), +/- zoom, [ and ] step the
-  // selection through live drones. Only keys used here are consumed.
+  // selection through live drones. Placement without a drag (2D): Shift+arrows
+  // move the selected source or zone (the objective when none is selected),
+  // Alt+arrows move C2, N steps through every source and zone, Escape drops
+  // that selection. Moves are recorded exactly like a drag. Only keys used
+  // here are consumed.
   cv.addEventListener('keydown', e => {
     const k = e.key;
     const arrows = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
-    if (arrows[k]) {
+    if (arrows[k] && (e.shiftKey || e.altKey) && !view3D) {
+      const [ax, ay] = arrows[k];
+      const kind = e.altKey ? 'base' : selectedJammer ? 'jammer' : selectedZone ? 'zone' : 'target';
+      const obj = { base: swarm.base, jammer: selectedJammer, zone: selectedZone, target: swarm.target }[kind];
+      const stepM = Math.max(5, 0.02 * Math.hypot(swarm.target.x - swarm.base.x, swarm.target.y - swarm.base.y));
+      obj.x += ax * stepM; obj.y += ay * stepM;
+      recordMove(kind);
+    } else if ((k === 'n' || k === 'N') && !e.ctrlKey && !e.metaKey) {
+      const items = swarm.jammers.map(j => ['jammer', j]).concat((swarm.gpsZones || []).map(z => ['zone', z]));
+      if (!items.length) return;
+      const i = items.findIndex(([, o]) => o === selectedJammer || o === selectedZone);
+      selectSource(...items[(i + 1) % items.length]);
+    } else if (k === 'Escape' && (selectedJammer || selectedZone)) {
+      selectedJammer = null; selectedZone = null;
+      updateJammerPanel(); updateZonePanel();
+    } else if (arrows[k]) {
       const [ax, ay] = arrows[k];
       if (view3D && cam3D) orbitCamera3D(cam3D, ax * 40, ay * 40);
       else {
@@ -1740,6 +1872,13 @@
   let panelAccum = 0;
   let simAccum = 0;
   const FIXED_SIM_STEP_SEC = SIM_DT_SEC; // ONE step policy across browser/batch/bench (finding #28)
+  // A frame steps a whole number of steps within STEP_BUDGET_MS; a backlog
+  // the CPU cannot clear is dropped, never carried (no spiral, no lag after a
+  // speed change), and the clock KPI shows the achieved rate whenever it
+  // falls short of the selected one (audit ui-render/speed-120x-capped: a
+  // flat 1 sim-s/frame cap made 120× about 57× at 60 Hz, silently).
+  const STEP_BUDGET_MS = 10;
+  let rateSim = 0, rateWall = 0, achievedRate = 0, rateScale = 0;
   let frameErrorMsg = null; // last frame failure already shown to the operator
   function frame(now) {
     try {
@@ -1752,11 +1891,17 @@
         // driving the drones; force 1x so sim time tracks the wall clock.
         const scale = (typeof externalActive === 'function' && externalActive()) ? 1 : timeScale;
         simAccum += realDt * scale;
-        if (simAccum > 1.0) simAccum = 1.0;
-        while (simAccum >= FIXED_SIM_STEP_SEC) {
+        const want = Math.floor(simAccum / FIXED_SIM_STEP_SEC + 1e-9);
+        const t0 = performance.now();
+        let done = 0;
+        while (done < want && (done === 0 || performance.now() - t0 < STEP_BUDGET_MS)) {
           status = stepSwarm(swarm, FIXED_SIM_STEP_SEC);
-          simAccum -= FIXED_SIM_STEP_SEC;
+          done++;
         }
+        simAccum = done < want ? 0 : Math.max(0, simAccum - done * FIXED_SIM_STEP_SEC);
+        if (scale !== rateScale) { rateScale = scale; rateSim = rateWall = achievedRate = 0; }
+        rateSim += done * FIXED_SIM_STEP_SEC; rateWall += realDt;
+        if (rateWall >= 1) { achievedRate = rateSim / rateWall; rateSim = rateWall = 0; }
       }
       if (!status) status = chainStatus(swarm);
 

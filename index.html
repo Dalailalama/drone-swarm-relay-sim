@@ -19,7 +19,7 @@
 
 <main>
   <div id="mapWrap">
-    <canvas id="map" tabindex="0" aria-label="Mission map. Arrows pan, plus and minus zoom, [ and ] select the previous or next drone."></canvas>
+    <canvas id="map" tabindex="0" aria-label="Mission map. Arrows pan, plus and minus zoom, [ and ] select the previous or next drone. N selects the next RF source or GPS zone and Escape clears it; Shift+arrows move the selected source or zone, or the objective when none is selected; Alt+arrows move C2."></canvas>
     <div id="mapAttrib" style="display:none;">map &copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors</div>
     <div id="legend">
       <span class="lg-mission">mission</span>
@@ -30,6 +30,10 @@
       <span class="lg-rtb">RTB/RTL</span>
       <span class="lg-landed">landed</span>
       <span class="lg-dead">down</span>
+    </div>
+    <div id="mapHint" role="note" style="display:none;">
+      <span><b>Drag</b> the target or C2 to move them &middot; <b>click a drone</b>, then Kill &middot; wheel or pinch to <b>zoom</b> &middot; in 3D, drag to orbit &middot; keyboard: focus the map (arrows, + and &minus;, [ and ])</span>
+      <button id="mapHintClose">Got it</button>
     </div>
   </div>
 
