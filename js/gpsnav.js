@@ -3,8 +3,10 @@
 //
 // Inside a GPS-denial zone (jammer, urban canyon, deliberate spoof region)
 // a drone falls back to dead reckoning: its believed position integrates
-// airspeed with a slowly-wandering drift velocity (Ornstein-Uhlenbeck, the
-// same statistics the RF shadowing uses). The error is honest and brutal —
+// airspeed plus the wind it had estimated when GNSS went away, with a
+// slowly-wandering drift velocity on top (Ornstein-Uhlenbeck, the same
+// statistics the RF shadowing uses). A wind that changes after the fix is
+// lost is drift the drone cannot see. The error is honest and brutal —
 // tens of metres within a minute, unbounded with time — which is precisely
 // why nobody pretends INS works like GNSS. The drone STEERS by its belief,
 // so it misses its assigned slot by exactly the amount its navigation lies;
@@ -46,16 +48,28 @@ function gpsDeniedAt(zones, x, y) {
 // drone's bel fields via the returned values (kept pure for testability):
 //   healthy  → belief snaps to truth (GNSS fix re-acquired instantly;
 //              the small per-report GPS noise stays applied at send time)
-//   denied   → belief integrates air velocity + OU drift
-function stepBelief(d, dt, rng, denied) {
+//              and the wind estimate tracks the wind
+//   denied   → belief integrates air velocity + the frozen wind estimate
+//              + OU drift (audit NAV-01: ground velocity knew the wind)
+// `wind` is the true wind vector; omitted, it reads as calm.
+function stepBelief(d, dt, rng, denied, wind) {
+  const wx = wind ? wind.x : 0, wy = wind ? wind.y : 0;
   if (!denied) {
-    return { belX: d.x, belY: d.y, dvx: 0, dvy: 0 };
+    return { belX: d.x, belY: d.y, dvx: 0, dvy: 0, windEstX: wx, windEstY: wy };
   }
   // Ornstein-Uhlenbeck drift velocity: wanders, but doesn't run away.
   const k = Math.sqrt(2 * dt / GPS_DENIED.tauSec);
   const dvx = d.dvx + (-d.dvx * dt / GPS_DENIED.tauSec) + GPS_DENIED.driftSigmaMs * k * gaussian(rng);
   const dvy = d.dvy + (-d.dvy * dt / GPS_DENIED.tauSec) + GPS_DENIED.driftSigmaMs * k * gaussian(rng);
-  return { belX: d.belX + (d.vx + dvx) * dt, belY: d.belY + (d.vy + dvy) * dt, dvx, dvy };
+  // Air velocity is ground velocity minus the wind; the drone adds back the
+  // wind it last estimated. Written as a correction so an unchanged wind
+  // cancels exactly (no estimate yet: assume it still holds).
+  const estX = d.windEstX != null ? d.windEstX : wx, estY = d.windEstY != null ? d.windEstY : wy;
+  return {
+    belX: d.belX + (d.vx + (estX - wx) + dvx) * dt,
+    belY: d.belY + (d.vy + (estY - wy) + dvy) * dt,
+    dvx, dvy, windEstX: estX, windEstY: estY,
+  };
 }
 
 let gpsZoneSeq = 0;

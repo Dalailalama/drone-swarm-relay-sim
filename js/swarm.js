@@ -1957,7 +1957,8 @@ function stepDrone(s, d, dt) {
 
   // GNSS: is the truth position inside a denial zone? Healthy → belief snaps
   // to truth. Denied → dead reckoning (js/gpsnav.js): belief integrates
-  // airspeed + drift, so the drone steers by where it THINKS it is.
+  // airspeed + the wind estimate frozen at GNSS loss + drift, so the drone
+  // steers by where it THINKS it is.
   const wasDenied = d.gpsDenied;
   d.gpsDenied = gpsDeniedAt(s.gpsZones, d.x, d.y);
   if (!wasDenied && d.gpsDenied) logEvent(s, d.id + ' GNSS degraded — dead reckoning', 'warn');
@@ -1968,8 +1969,9 @@ function stepDrone(s, d, dt) {
       s.maxNavErrM = Math.max(s.maxNavErrM || 0, err);
     }
   }
-  const bel = stepBelief(d, dt, s.net.rng, d.gpsDenied);
+  const bel = stepBelief(d, dt, s.net.rng, d.gpsDenied, s.wind);
   d.belX = bel.belX; d.belY = bel.belY; d.dvx = bel.dvx; d.dvy = bel.dvy;
+  d.windEstX = bel.windEstX; d.windEstY = bel.windEstY;
   // Instrumentation (sim-side observables, like batteryPct): whether this
   // drone ever lost GNSS, and the worst truth-vs-belief error seen.
   if (d.gpsDenied) {
