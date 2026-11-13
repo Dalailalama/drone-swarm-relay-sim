@@ -1,8 +1,8 @@
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
-/* Console theme — IBM Plex Mono, warm olive-black surfaces, cream text,
-   lime primary actions. Fonts load from Google Fonts with monospace
-   fallback; the app works fine without them. */
+/* Console theme — system monospace, warm olive-black surfaces, cream text,
+   lime primary actions. No web fonts are fetched (no third-party request on
+   load); IBM Plex is used only if it is installed locally. */
 
 :root {
   --bg: #131410;
@@ -12,19 +12,19 @@
   --line: #32332a;
   --text: #e8e6da;
   --text-2: #d6d4c8;
-  --dim: #8a887a;
+  --dim: #8e8c7e;
   --dim-2: #a5a293;
   --ok: #7fc95e;
   --ok-2: #8fd960;
   --lime: #b8e05c;
   --warn: #e6b345;
   --warn-2: #e0a63c;
-  --lost: #e06050;
+  --lost: #e26453;
   --accent: #6f9fe6;
   --violet: #a48fe0;
   --cyan: #5ecfcf;
   --pink: #d970a8;
-  --mono: 'IBM Plex Mono', ui-monospace, Consolas, monospace;
+  --mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
   --sans: 'IBM Plex Sans', system-ui, sans-serif;
 }
 
@@ -245,6 +245,7 @@ td.dim { color: var(--dim); }
   cursor: pointer;
 }
 .fleet-row:hover { background: var(--panel-2); }
+.fleet-row:focus-visible, #map:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .fleet-row .dot { width: 7px; height: 7px; border-radius: 1px; flex-shrink: 0; }
 .role-mission .dot { background: var(--ok); }
 .role-relay .dot { background: var(--warn); }
