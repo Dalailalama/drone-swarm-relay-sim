@@ -126,6 +126,22 @@ test('compare sizes its default duration from the missions, so the CLI defaults 
   assert.strictEqual(censoredMedian([3, null, null]), Infinity);
 });
 
+// With an even seed count and exactly half arrived, the upper middle value is
+// a censored "not yet", so the median is ">duration" — the definition said
+// that only happened below half.
+test('compare defines the ">duration" median as half or fewer arrived, as it computes it', () => {
+  const { censoredMedian, calcStats, renderMarkdownDashboard } = require('../tools/compare.js');
+  assert.strictEqual(censoredMedian([120, null]), Infinity);
+  assert.strictEqual(censoredMedian([120, 130, null, null]), Infinity);
+  assert.strictEqual(censoredMedian([120, 130, 140, null]), 135);
+  const row = { title: 'H', uptime: calcStats([50, 50]), arrival: calcStats([120, null]), droppedPct: calcStats([1, 1]), energyWh: calcStats([2, 2]) };
+  const md = renderMarkdownDashboard([row], [1, 2], 300);
+  assert.ok(md.includes('1/2 arrived, median >300 s'), md);
+  const def = md.split(/\r?\n/).find(l => l.startsWith('- **Arrival Time**'));
+  assert.ok(!/fewer than half/.test(def), def);
+  assert.match(def, /half or fewer/);
+});
+
 // Same seed => bit-identical run (the batch engine already refuses repeats):
 // --seeds 101,101,101 reported ±0.0 on every column, a copy read as certainty.
 test('compare refuses repeated seeds instead of shrinking every spread to zero', () => {

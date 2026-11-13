@@ -28,8 +28,9 @@ const PAGE_WING_MAX = 15; // index.html's wing slider max
 
 // Median over ALL runs with a missing value read as "not yet" (+Infinity) —
 // the censored reading for time-to-arrive: a seed that never arrived is
-// slower than every seed that did, not absent. Infinity when fewer than half
-// the runs have a value.
+// slower than every seed that did, not absent. Infinity unless more than half
+// the runs have a value: with an even count and exactly half, the upper
+// middle value is a censored one.
 function censoredMedian(vals) {
   if (!vals.length) return Infinity;
   const xs = vals.map(v => (v !== null && v !== undefined && isFinite(v) ? v : Infinity)).sort((a, b) => a - b);
@@ -300,7 +301,7 @@ function renderMarkdownDashboard(results, seeds, durationSec) {
     '### Metric Definitions',
     '- **Objective uptime**: % of mission time C2 has a live route to a mission drone on station at the objective (the uptime the app, batch reports and after-action report show).',
     '- **Fleet contact**: % of mission time C2 has a live route to any mission drone anywhere, en route included; not objective coverage.',
-    '- **Arrival Time**: Seconds from takeoff until the first tactical drone arrives within objective perimeter (200m). The mean ± SD covers only the seeds that arrived; k/N says how many did, and the median counts a seed that never arrived as slower than every one that did (">duration" when fewer than half arrived).',
+    '- **Arrival Time**: Seconds from takeoff until the first tactical drone arrives within objective perimeter (200m). The mean ± SD covers only the seeds that arrived; k/N says how many did, and the median counts a seed that never arrived as slower than every one that did (">duration" when half or fewer arrived).',
     '- **Packet Loss**: Control-plane loss: telemetry, acks and orders dropped on a link or for want of a route, plus addressed drones that missed a broadcast order round, as a percentage of all of them. Video fragments are not counted.',
     '- **Energy Consumed**: Mean per-drone battery consumption in Watt-hours over the mission.',
     '- **Variance (SD)**: Standard deviation across the identical seed Monte Carlo iterations.',
