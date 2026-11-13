@@ -192,7 +192,7 @@ function buildGroundTexture(anchor, x0, y0, x1, y1, nowMs) {
         (lSE.x - lNW.x) * pxPerM, (lSE.y - lNW.y) * pxPerM);
     }
   }
-  g.fillStyle = 'rgba(19,20,16,0.30)'; g.fillRect(0, 0, cvs.width, cvs.height); // same veil as the 2D map
+  g.fillStyle = TILE_VEIL; g.fillRect(0, 0, cvs.width, cvs.height); // same veil as the 2D map
   groundTex = { key, canvas: cvs, complete, builtAt: nowMs };
   return cvs;
 }

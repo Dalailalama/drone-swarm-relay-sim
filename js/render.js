@@ -87,7 +87,10 @@ function drawTerrain(ctx, cv, view, s) {
   if (!hasGround && !t.buildings.length) return;
 
   if (hasGround) {
-    const key = [view.pxPerM.toFixed(5), cv.width, cv.height, t.seed, t.groundAmpM].join('|');
+    // Seed, relief and wavelength fully define the ground (terrainGroundAt);
+    // the wavelength follows the corridor span, so a regenerated map can
+    // share the other two.
+    const key = [view.pxPerM.toFixed(5), cv.width, cv.height, t.seed, t.groundAmpM, t.groundScaleM].join('|');
     const q = 4;
     // Where the cached layer's top-left corner lands on screen this frame.
     let at = terrainLayer.canvas && terrainLayer.key === key

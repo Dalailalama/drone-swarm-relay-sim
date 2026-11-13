@@ -136,12 +136,13 @@
     airframeSel.value = AIRFRAMES[1].id;
     airframe = AIRFRAMES[1];
     heteroChk.checked = false;
+    countRange.value = 10;
+    countOut.textContent = '10';
+    updateHeteroRow(); // frees the wing's max (clamped by a smaller fleet) before the default goes in
     wingRange.value = 4;
     wingOut.textContent = '4';
     relayAirframeSel.value = 'x8';
     relayRadioSel.value = 'rfd900x';
-    countRange.value = 10;
-    countOut.textContent = '10';
     altRange.value = 50;
     altOut.textContent = '50 m';
     distRange.value = 100;
@@ -441,11 +442,14 @@
     }
     if (sc.env) { envSel.value = sc.env; env = ENVIRONMENTS.find(e => e.id === sc.env) || env; }
     if (sc.airframe) { airframeSel.value = sc.airframe; airframe = AIRFRAMES.find(a => a.id === sc.airframe) || airframe; }
-    if (sc.hetero != null) { heteroChk.checked = !!sc.hetero; updateHeteroRow(); }
+    // The fleet size first: the wing slider's max follows it (updateHeteroRow),
+    // and a range input clamps its value to the max it has when set.
+    if (sc.count != null) { countRange.value = sc.count; countOut.textContent = sc.count; }
+    if (sc.hetero != null) heteroChk.checked = !!sc.hetero;
+    updateHeteroRow();
     if (sc.relayWing != null) { wingRange.value = sc.relayWing; wingOut.textContent = sc.relayWing; }
     if (sc.relayAirframe) relayAirframeSel.value = sc.relayAirframe;
     if (sc.relayRadio) relayRadioSel.value = sc.relayRadio;
-    if (sc.count != null) { countRange.value = sc.count; countOut.textContent = sc.count; }
     if (sc.altitudeM != null) { altRange.value = sc.altitudeM; altOut.textContent = sc.altitudeM + ' m'; }
     if (sc.spacingPct != null) { spacingRange.value = sc.spacingPct; spacingOut.textContent = sc.spacingPct + '%'; }
     if (sc.distancePct != null) distRange.value = sc.distancePct;
@@ -1731,7 +1735,7 @@
             '<div><b>Upstream:</b> ' + escHtml(exp.upstream) + '</div>' +
             '<div><b>Link margin:</b> ' + escHtml(marginStr) + '</div>' +
             '<div><b>C2 silence:</b> ' + escHtml(silenceStr) + '</div>' +
-            '<div><b>Airspeed:</b> ' + escHtml(spdStr) + '</div>' +
+            '<div><b>Ground speed:</b> ' + escHtml(spdStr) + '</div>' + // exp.speedMs carries the wind
             '<div><b>Battery:</b> ' + selected.batteryPct.toFixed(1) + '%</div>' +
             '<div><b>Energy:</b> ' + selected.energyWh.toFixed(1) + ' Wh</div>' +
           '</div>';

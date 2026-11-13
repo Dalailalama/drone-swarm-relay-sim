@@ -72,3 +72,38 @@ test('the relay wing always leaves at least one tactical drone, and the panel sa
   assert.strictEqual(el('wingRange').value, '3', 'a file asking for more wing than fleet is clamped');
   assert.strictEqual(el('wingOut').textContent, '3');
 });
+
+// A browser range input clamps its value to max, and the reset to defaults
+// had just set the wing's max to (10-drone fleet - 1) = 9. Setting the
+// file's relay wing BEFORE its fleet size clamped a 12-drone wing from a
+// 20-drone scenario to 9, so the loaded mission flew a different fleet
+// than the file describes.
+test('a loaded scenario keeps a relay wing larger than the default fleet allows', () => {
+  const { ctx, el, fire } = loadUI({ rangeClamp: true });
+  const sc = { version: 1, radio: 'sik-v3', env: 'open', airframe: 'q450', count: 20, hetero: true, relayWing: 12,
+    relayAirframe: 'x8', relayRadio: 'rfd900x', base: { x: 0, y: 0 }, target: { x: 500, y: -120 } };
+  el('loadScenarioInput').files = [makeFile('w12.json', JSON.stringify(sc))];
+  fire('loadScenarioInput', 'change');
+  assert.deepStrictEqual(ctx.__alerts, []);
+  assert.strictEqual(el('wingRange').value, '12', 'the wing slider shows the file\'s wing');
+  assert.strictEqual(el('wingOut').textContent, '12');
+  const s = ctx.sim.swarm;
+  assert.strictEqual(s.drones.length, 20);
+  assert.strictEqual(s.relayIdx.length, 12, 'the swarm flies the file\'s 12-drone wing');
+});
+
+// The same clamp on the reset to defaults: after a 3-drone fleet (wing max
+// 2) the default wing of 4 was written while max was still 2, so a scenario
+// that does not name a wing size got a 2-drone wing instead of the default.
+test('a scenario without a wing size gets the default wing even after a small fleet', () => {
+  const { ctx, el, fire } = loadUI({ rangeClamp: true });
+  el('countRange').value = '3'; fire('countRange', 'input'); fire('countRange', 'change');
+  assert.strictEqual(el('wingRange').max, '2', 'precondition: a 3-drone fleet caps the wing at 2');
+  const sc = { version: 1, radio: 'sik-v3', env: 'open', airframe: 'q450', count: 10, hetero: true,
+    relayAirframe: 'x8', relayRadio: 'rfd900x', base: { x: 0, y: 0 }, target: { x: 500, y: -120 } };
+  el('loadScenarioInput').files = [makeFile('nowing.json', JSON.stringify(sc))];
+  fire('loadScenarioInput', 'change');
+  assert.deepStrictEqual(ctx.__alerts, []);
+  assert.strictEqual(el('wingRange').value, '4', 'the default relay wing');
+  assert.strictEqual(ctx.sim.swarm.relayIdx.length, 4);
+});

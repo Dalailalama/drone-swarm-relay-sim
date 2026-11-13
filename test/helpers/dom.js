@@ -210,6 +210,8 @@ function makeCanvasContext(canvas) {
  * @param {{width:number,height:number}} [opts.viewport]  getBoundingClientRect box (default 800x600)
  * @param {number} [opts.devicePixelRatio]
  * @param {object} [opts.globals]        extra globals merged into the context
+ * @param {boolean} [opts.rangeClamp]    `<input type="range">` clamps its value into
+ *                                       [min, max] like a browser does, also when min/max change
  * @returns {{ctx:object, el:(id:string)=>object, fire:(id:string,type:string,ev?:object)=>object,
  *            document:object, querySelector:(sel:string)=>object}}
  */
@@ -292,11 +294,31 @@ function loadUI(opts) {
       }
     }
 
+    // opts.rangeClamp: a range input's value always lies in [min, max], and
+    // lowering max (or raising min) moves the value with it, as in a browser.
+    const clampRange = o.rangeClamp && node && String(tag).toLowerCase() === 'input' && node.attrs.type === 'range';
+    const clamp = () => {
+      if (!clampRange || value === '' || !isFinite(+value)) return;
+      let v = +value;
+      if (el.max !== '' && v > +el.max) v = +el.max;
+      if (el.min !== '' && v < +el.min) v = +el.min;
+      value = String(v);
+    };
     Object.defineProperty(el, 'value', {
       enumerable: true,
       get() { return value; },
-      set(v) { value = v == null ? '' : String(v); valueSet = true; },
+      set(v) { value = v == null ? '' : String(v); valueSet = true; clamp(); },
     });
+    if (clampRange) {
+      for (const k of ['min', 'max']) {
+        let bound = el[k];
+        Object.defineProperty(el, k, {
+          enumerable: true,
+          get() { return bound; },
+          set(v) { bound = v == null ? '' : String(v); clamp(); },
+        });
+      }
+    }
     Object.defineProperty(el, 'className', {
       enumerable: true,
       get() { return [...classes].join(' '); },
