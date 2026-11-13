@@ -94,3 +94,75 @@ test('each scenario runs headlessly without throwing and plans a chain', () => {
     assert.ok(s.c2.chainPlan && s.c2.chainPlan.slots.length >= 0, p.id + ': C2 produced a plan');
   }
 });
+
+// audit swarm-onboard/SCN-01: ddil-intermittent's urban clutter factor left
+// SiK 42 m of usable range — 18 relays for its span with 12 drones — so no
+// drone ever reached the objective. Every bundled scenario and mission must
+// be flyable with the fleet it ships: the planner's relay count for the
+// span (chain radio, clutter factor, radio horizon, hop spacing) leaves at
+// least one drone for the mission; a relay wing also holds the tactical
+// hand-off slot at the objective.
+const { MISSION_LIBRARY } = require('../js/missions.js');
+const { runScenarioSeed } = require('../tools/compare.js');
+
+test('every bundled scenario and mission has enough drones for the relay chain its span needs', () => {
+  const C2_MAST_M = 6;
+  for (const { id, scenario: sc } of [...SCENARIO_PACK, ...MISSION_LIBRARY]) {
+    const env = R.ENVIRONMENTS.find(e => e.id === sc.env);
+    const chain = R.RADIOS.find(r => r.id === (sc.hetero ? sc.relayRadio : sc.radio));
+    const usable = Math.min(R.usableRangeM(chain, env.factor), R.radioHorizonM(C2_MAST_M, sc.altitudeM));
+    const D = Math.hypot(sc.target.x - sc.base.x, sc.target.y - sc.base.y);
+    const k = ctx.relaysRequired(D, usable * sc.spacingPct / 100);
+    if (sc.hetero) assert.ok(k + 1 <= sc.relayWing, `${id}: ${k} wing relays + the hand-off slot vs a wing of ${sc.relayWing}`);
+    else assert.ok(k < sc.count, `${id}: ${k} relays for ${D.toFixed(0)} m vs ${sc.count} drones`);
+  }
+});
+
+test('ddil-intermittent reaches its objective and the link flickers rather than holding or never forming', () => {
+  const p = SCENARIO_PACK.find(x => x.id === 'ddil-intermittent');
+  let S = null, drops = 0, was = false;
+  const wrapped = Object.create(ctx);
+  wrapped.stepSwarm = (s, dt) => {
+    S = s;
+    const st = ctx.stepSwarm(s, dt);
+    if (was && !st.connected) drops++;
+    was = st.connected;
+    return st;
+  };
+  runScenarioSeed(wrapped, p, p.scenario.seed, 300);
+  assert.ok(S.stats.connSec > 60, 'objective covered for ' + S.stats.connSec.toFixed(0) + ' s of 300');
+  assert.ok(drops >= 1, 'objective contact must drop at least once (the I in DDIL)');
+});
+
+// audit swarm-onboard/SCN-02: ddil-full's tactical micros flew 95 m SiK legs,
+// lost C2 about 250 m out and cycled hold/relink by the base for 15 minutes
+// while only wing units ever reached the objective (0-9% objective uptime).
+// A minute in, every micro must still be in contact and well on its way.
+test('ddil-full tactical micros stay in contact and leave the base area', () => {
+  const p = SCENARIO_PACK.find(x => x.id === 'ddil-full');
+  let S = null;
+  const wrapped = Object.create(ctx);
+  wrapped.stepSwarm = (s, dt) => { S = s; return ctx.stepSwarm(s, dt); };
+  runScenarioSeed(wrapped, p, p.scenario.seed, 60);
+  const micros = S.drones.filter(d => d.cls === 'mission');
+  assert.strictEqual(micros.length, p.scenario.count - p.scenario.relayWing);
+  for (const d of micros) {
+    assert.strictEqual(d.mode, 'ok', d.id + ' is in ' + d.mode);
+    assert.ok(Math.hypot(d.x - S.base.x, d.y - S.base.y) > 400, d.id + ' is still by the base');
+  }
+});
+
+// A jammer that "squats beside the corridor" must not deny the ground station
+// or the objective outright: ddil-full's 18 dBm source denied a 3.9 km disc of
+// the wing's band, so on most terrain seeds the chain had nowhere to go.
+test('no bundled jammer denies the base or the objective of its own scenario', () => {
+  for (const p of SCENARIO_PACK) {
+    if (!(p.scenario.jammers || []).length) continue;
+    let S = null;
+    const wrapped = Object.create(ctx);
+    wrapped.makeSwarm = opts => (S = ctx.makeSwarm(opts));
+    runScenarioSeed(wrapped, p, p.scenario.seed, 0); // built as the page builds it, never stepped
+    assert.ok(!ctx.inDenialZone(S, S.base), p.id + ': base inside a denial zone');
+    assert.ok(!ctx.inDenialZone(S, S.target), p.id + ': objective inside a denial zone');
+  }
+});

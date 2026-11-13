@@ -4,6 +4,9 @@
 //
 // Usage:
 //   node tools/compare.js [--scenarios id1,id2] [--seeds 101,102,103] [--duration 180] [--out dashboard.md]
+//
+// --duration defaults to twice the longest base->objective transit at the
+// mission airframe's top speed; a shorter one prints a warning.
 
 const fs = require('node:fs');
 const path = require('node:path');
@@ -14,23 +17,46 @@ const A = require('../js/airframes.js');
 const BS = require('../js/batchstats.js');
 const { SIM_DT_SEC } = require('../js/swarm.js');
 
+// Median over ALL runs with a missing value read as "not yet" (+Infinity) —
+// the censored reading for time-to-arrive: a seed that never arrived is
+// slower than every seed that did, not absent. Infinity when fewer than half
+// the runs have a value.
+function censoredMedian(vals) {
+  if (!vals.length) return Infinity;
+  const xs = vals.map(v => (v !== null && v !== undefined && isFinite(v) ? v : Infinity)).sort((a, b) => a - b);
+  const mid = (xs.length - 1) / 2;
+  return (xs[Math.floor(mid)] + xs[Math.ceil(mid)]) / 2;
+}
+
 function calcStats(vals) {
   const valid = vals.filter(v => v !== null && v !== undefined && isFinite(v));
   const total = vals.length; // count/total keeps survivorship visible (arrivals)
-  if (!valid.length) return { mean: 0, sd: 0, variance: 0, min: null, max: null, count: 0, total };
+  const median = censoredMedian(vals);
+  if (!valid.length) return { mean: 0, sd: 0, variance: 0, min: null, max: null, count: 0, total, median };
   // Sample SD (n-1) from the batch layer, so the same runs show the same ±.
   const mean = BS.mean(valid);
   const sd = BS.stdev(valid);
   const variance = sd * sd;
   const min = Math.min(...valid);
   const max = Math.max(...valid);
-  return { mean, sd, variance, min, max, count: valid.length, total };
+  return { mean, sd, variance, min, max, count: valid.length, total, median };
 }
 
 // Arrival time only exists for seeds that arrived: always say how many did,
-// or a 1-of-5 success reads faster and more certain than 5-of-5.
-function arrivedOf(st) {
-  return `${st.count}/${st.total} arrived`;
+// or a 1-of-5 success reads faster and more certain than 5-of-5 — and give
+// the censored median, which ranks a 1-of-5 below a 5-of-5 on its own.
+function arrivedOf(st, durationSec) {
+  const med = isFinite(st.median) ? `${st.median.toFixed(1)} s` : `>${durationSec} s`;
+  return `${st.count}/${st.total} arrived, median ${med}`;
+}
+
+// Mission drones cannot arrive before they have flown the distance: give the
+// run at least twice the straight-line transit at the airframe's top speed.
+function minDurationSec(scen) {
+  const sc = scen.scenario;
+  const b = posOf(sc.base, 0, 0), t = posOf(sc.target, 2000, -500);
+  const af = lookup(A.AIRFRAMES, sc.airframe || A.AIRFRAMES[0].id, 'airframe');
+  return Math.ceil(2 * Math.hypot(t.x - b.x, t.y - b.y) / af.maxSpeedMs / 10) * 10;
 }
 
 function resolveScenario(spec) {
@@ -160,8 +186,11 @@ function runScenarioSeed(ctx, scenarioObj, seed, durationSec) {
 
   const meanWhConsumed = totalWhConsumed / Math.max(1, s.drones.length);
 
-  const connSec = s.stats.fleetConnSec || s.stats.connSec || 0;
-  const uptimePct = 100 * connSec / Math.max(1e-9, s.stats.tSec);
+  // Uptime is the consumer metric (swarm.js finding #6): a live route from C2
+  // to a mission drone ON STATION at the objective. Reaching the flock
+  // anywhere en route is fleet contact, reported beside it, never instead.
+  const uptimePct = 100 * (s.stats.connSec || 0) / Math.max(1e-9, s.stats.tSec);
+  const fleetUptimePct = 100 * (s.stats.fleetConnSec || 0) / Math.max(1e-9, s.stats.tSec);
   // Control-plane loss (telemetry, orders, broadcast reach; no video
   // fragments): scenarios that toggle broadcast stay comparable (NET-04).
   const droppedPct = ctx.controlLossPct(s);
@@ -169,6 +198,7 @@ function runScenarioSeed(ctx, scenarioObj, seed, durationSec) {
   return {
     seed,
     uptimePct,
+    fleetUptimePct,
     arrivalTime: firstArrivalTime,
     droppedPct,
     meanWhConsumed,
@@ -180,8 +210,14 @@ function runScenarioSeed(ctx, scenarioObj, seed, durationSec) {
 function compareScenarios(scenarioSpecs, options = {}) {
   const ctx = loadCore(['scenarios.js']);
   const seeds = options.seeds || [101, 102, 103, 104, 105];
-  const durationSec = options.durationSec || 120;
   const scenarios = scenarioSpecs.map(resolveScenario);
+  // No duration given: long enough for every scenario's transit, so the
+  // arrival column is not N/A by construction. A shorter explicit one warns.
+  const needSec = Math.max(120, ...scenarios.map(minDurationSec));
+  const durationSec = options.durationSec || needSec;
+  const warnings = durationSec < needSec
+    ? [`duration ${durationSec} s is under twice the longest transit (${needSec} s): most seeds cannot arrive in time`]
+    : [];
 
   const results = [];
 
@@ -193,6 +229,7 @@ function compareScenarios(scenarioSpecs, options = {}) {
     }
 
     const uptimes = seedRuns.map(r => r.uptimePct);
+    const fleetUptimes = seedRuns.map(r => r.fleetUptimePct);
     const arrivals = seedRuns.map(r => r.arrivalTime);
     const dropPcts = seedRuns.map(r => r.droppedPct);
     const energies = seedRuns.map(r => r.meanWhConsumed);
@@ -203,6 +240,7 @@ function compareScenarios(scenarioSpecs, options = {}) {
       seedsCount: seeds.length,
       runs: seedRuns,
       uptime: calcStats(uptimes),
+      fleetUptime: calcStats(fleetUptimes),
       arrival: calcStats(arrivals),
       droppedPct: calcStats(dropPcts),
       energyWh: calcStats(energies),
@@ -212,18 +250,22 @@ function compareScenarios(scenarioSpecs, options = {}) {
   return {
     seeds,
     durationSec,
+    warnings,
     results,
     markdown: renderMarkdownDashboard(results, seeds, durationSec),
     text: renderTextDashboard(results, seeds, durationSec),
   };
 }
 
+// Rows built before fleet contact had its own column render it as '—'.
+const pctCell = (st, sep) => (st ? `${st.mean.toFixed(1)}% (±${st.sd.toFixed(1)}${sep})` : '—');
+
 function renderMarkdownDashboard(results, seeds, durationSec) {
   const rows = results.map(r => {
     const arrivalStr = r.arrival.count > 0
-      ? `${r.arrival.mean.toFixed(1)} s (±${r.arrival.sd.toFixed(1)}), ${arrivedOf(r.arrival)}`
-      : `N/A (${arrivedOf(r.arrival)})`;
-    return `| **${r.title}** | ${r.uptime.mean.toFixed(1)}% (±${r.uptime.sd.toFixed(1)}%) | ${arrivalStr} | ${r.droppedPct.mean.toFixed(1)}% (±${r.droppedPct.sd.toFixed(1)}%) | ${r.energyWh.mean.toFixed(2)} Wh (±${r.energyWh.sd.toFixed(2)}) |`;
+      ? `${r.arrival.mean.toFixed(1)} s (±${r.arrival.sd.toFixed(1)}), ${arrivedOf(r.arrival, durationSec)}`
+      : `N/A (${arrivedOf(r.arrival, durationSec)})`;
+    return `| **${r.title}** | ${r.uptime.mean.toFixed(1)}% (±${r.uptime.sd.toFixed(1)}%) | ${pctCell(r.fleetUptime, '%')} | ${arrivalStr} | ${r.droppedPct.mean.toFixed(1)}% (±${r.droppedPct.sd.toFixed(1)}%) | ${r.energyWh.mean.toFixed(2)} Wh (±${r.energyWh.sd.toFixed(2)}) |`;
   });
 
   return [
@@ -231,13 +273,14 @@ function renderMarkdownDashboard(results, seeds, durationSec) {
     '',
     `Evaluation over **${results.length} scenarios** across **${seeds.length} identical seeds** (\`${seeds.join(', ')}\`) for **${durationSec}s** each.`,
     '',
-    '| Scenario | Uptime (Mean ± SD) | Arrival Time (Mean ± SD) | Packet Loss (Mean ± SD) | Energy Consumed (Mean ± SD) |',
-    '|---|---|---|---|---|',
+    '| Scenario | Objective uptime (Mean ± SD) | Fleet contact (Mean ± SD) | Arrival Time (Mean ± SD) | Packet Loss (Mean ± SD) | Energy Consumed (Mean ± SD) |',
+    '|---|---|---|---|---|---|',
     ...rows,
     '',
     '### Metric Definitions',
-    '- **Uptime**: % of mission time fleet maintains active C2 connectivity to ground station.',
-    '- **Arrival Time**: Seconds from takeoff until the first tactical drone arrives within objective perimeter (200m), over the seeds that arrived; k/N says how many did.',
+    '- **Objective uptime**: % of mission time C2 has a live route to a mission drone on station at the objective (the uptime the app, batch reports and after-action report show).',
+    '- **Fleet contact**: % of mission time C2 has a live route to any mission drone anywhere, en route included; not objective coverage.',
+    '- **Arrival Time**: Seconds from takeoff until the first tactical drone arrives within objective perimeter (200m). The mean ± SD covers only the seeds that arrived; k/N says how many did, and the median counts a seed that never arrived as slower than every one that did (">duration" when fewer than half arrived).',
     '- **Packet Loss**: Control-plane loss: telemetry, acks and orders dropped on a link or for want of a route, plus addressed drones that missed a broadcast order round, as a percentage of all of them. Video fragments are not counted.',
     '- **Energy Consumed**: Mean per-drone battery consumption in Watt-hours over the mission.',
     '- **Variance (SD)**: Standard deviation across the identical seed Monte Carlo iterations.',
@@ -248,18 +291,20 @@ function renderMarkdownDashboard(results, seeds, durationSec) {
 function renderTextDashboard(results, seeds, durationSec) {
   const lines = [
     `\n=== Scenario Comparison Dashboard (${results.length} scenarios, ${seeds.length} seeds, ${durationSec}s each) ===\n`,
-    `${'Scenario'.padEnd(32)} ${'Uptime'.padEnd(16)} ${'Arrival'.padEnd(18)} ${'Loss'.padEnd(16)} ${'Energy/Dr'.padEnd(16)}`,
-    '-'.repeat(98),
+    `${'Scenario'.padEnd(32)} ${'Obj uptime'.padEnd(16)} ${'Fleet contact'.padEnd(16)} ${'Arrival'.padEnd(18)} ${'Loss'.padEnd(16)} ${'Energy/Dr'.padEnd(16)}`,
+    '-'.repeat(115),
   ];
 
   for (const r of results) {
     const name = r.title.length > 30 ? r.title.slice(0, 27) + '…' : r.title;
     const uptime = `${r.uptime.mean.toFixed(1)}% (±${r.uptime.sd.toFixed(1)})`;
-    const arrived = `${r.arrival.count}/${r.arrival.total}`;
+    const fleet = pctCell(r.fleetUptime, '');
+    const med = isFinite(r.arrival.median) ? `${r.arrival.median.toFixed(1)}s` : `>${durationSec}s`;
+    const arrived = `${r.arrival.count}/${r.arrival.total} med ${med}`;
     const arrival = r.arrival.count > 0 ? `${r.arrival.mean.toFixed(1)}s (±${r.arrival.sd.toFixed(1)}) ${arrived}` : `N/A ${arrived}`;
     const loss = `${r.droppedPct.mean.toFixed(1)}% (±${r.droppedPct.sd.toFixed(1)})`;
     const energy = `${r.energyWh.mean.toFixed(1)}Wh (±${r.energyWh.sd.toFixed(1)})`;
-    lines.push(`${name.padEnd(32)} ${uptime.padEnd(16)} ${arrival.padEnd(18)} ${loss.padEnd(16)} ${energy.padEnd(16)}`);
+    lines.push(`${name.padEnd(32)} ${uptime.padEnd(16)} ${fleet.padEnd(16)} ${arrival.padEnd(18)} ${loss.padEnd(16)} ${energy.padEnd(16)}`);
   }
   lines.push('');
   return lines.join('\n');
@@ -270,7 +315,7 @@ function parseArgs() {
   const options = {
     scenarios: ['ddil-disrupted', 'ddil-full'],
     seeds: [101, 102, 103, 104, 105],
-    durationSec: 120,
+    durationSec: null, // compareScenarios sizes it from the missions' transit
     out: null,
   };
 
@@ -292,6 +337,7 @@ function main() {
   const options = parseArgs();
   console.log(`Running scenario comparison: [${options.scenarios.join(', ')}] with ${options.seeds.length} seeds…`);
   const comparison = compareScenarios(options.scenarios, options);
+  for (const w of comparison.warnings) console.warn('warning: ' + w);
 
   console.log(comparison.text);
 
@@ -307,6 +353,8 @@ if (require.main === module) {
 
 module.exports = {
   calcStats,
+  censoredMedian,
+  minDurationSec,
   resolveScenario,
   runScenarioSeed,
   buildCompareTerrain,

@@ -51,11 +51,15 @@ const SCENARIO_PACK = [
   {
     id: 'ddil-intermittent',
     title: 'I — Intermittent (urban canyons)',
-    blurb: 'Short-range telemetry radios at 45 m AGL over a dense district: street canyons shadow links, contact flickers, relays get pulled off the mission and failsafes fire. Raise the altitude slider mid-run and watch uptime recover — that contrast IS the lesson.',
+    blurb: 'Short-range SiK telemetry at 45 m AGL over a dense district: towers shadow hops, contact flickers, most of the fleet ends up holding the chain and failsafes fire. Try the altitude slider mid-run: with under 100 m of usable range, climbing lengthens the slant hop down to the 6 m ground mast as fast as it clears rooftops, so height is a trade here, not a cure.',
+    // env 'suburban', not 'urban': the district's buildings are modelled
+    // explicitly (line of sight), so the clutter factor covers only what they
+    // don't. The urban factor on top left SiK 42 m of usable range — 18
+    // relays for this span with 12 drones, so the objective was never reached.
     scenario: {
       version: 1,
       name: 'DDIL: intermittent urban link',
-      radio: 'sik-v3', env: 'urban', airframe: 'micro',
+      radio: 'sik-v3', env: 'suburban', airframe: 'micro',
       count: 12, altitudeM: 45, spacingPct: 70,
       terrain: 'urban', cityDensity: 65, cityHeight: 35, seed: 4103,
       base: { x: 0, y: 0 }, target: { x: 520, y: -130 },
@@ -84,11 +88,17 @@ const SCENARIO_PACK = [
   {
     id: 'ddil-full',
     title: 'Full DDIL — everything at once',
-    blurb: 'The flagship: an endurance relay wing on long-range radios holds the backhaul while tactical micros work the objective; a jammer squats beside the corridor, GNSS dies over the target area, LPI/LPD waveforms are up, and payload video competes for the channel. This is the run that sells the capability.',
+    blurb: 'The flagship: an endurance X8 relay wing holds the backhaul while tactical micros on the same long-range telemetry work the objective; a jammer squats beside the corridor, GNSS dies over the target area, LPI/LPD waveforms are up, and payload video competes for the channel.',
+    // The micros fly the wing's RFD900x. On 95 m SiK legs they lost C2 about
+    // 250 m out and never crossed the 3.4 km to the wing's hand-off relay —
+    // nor with the jammer, LPI, video or GNSS zone removed, or under the open
+    // clutter factor — so only wing units ever reached the objective (audit
+    // SCN-02). The planner covers the objective end of a tactical hop, not
+    // the transit to it.
     scenario: {
       version: 1,
       name: 'DDIL: full combination',
-      radio: 'sik-v3', env: 'suburban', airframe: 'micro',
+      radio: 'rfd900x', env: 'suburban', airframe: 'micro',
       hetero: true, relayWing: 4, relayAirframe: 'x8', relayRadio: 'rfd900x',
       count: 12, altitudeM: 75, spacingPct: 78,
       terrain: 'rolling', seed: 4105,
@@ -98,8 +108,12 @@ const SCENARIO_PACK = [
       spectrumAgility: true, lpiMode: true,
       videoBackhaul: true, videoKbps: 300,
       gpsZones: [{ x: 3150, y: -720, rM: 330, on: true }],
+      // 5 dBm denies a ~950 m disc of the wing's band beside the corridor
+      // (~1.8 km with agility and LPI off). At 18 dBm the disc was 3.9 km —
+      // base, objective and every detour — and on the compare tool's seeds
+      // 101-105 the objective was reached late or never (audit SCN-02).
       jammers: [
-        { x: 1700, y: -560, erpDbm: 18, band: 'all', altM: 15, on: true },
+        { x: 1700, y: -560, erpDbm: 5, band: 'all', altM: 15, on: true },
       ],
     },
   },

@@ -27,6 +27,31 @@ function percentile(xs, p) {
   return sorted[lo] + (sorted[hi] - sorted[lo]) * (idx - lo);
 }
 
+// Two-sided 95% Student-t critical value t(0.975, df). Exact table to df 30,
+// then 1.96 + 2.4/df (within 0.003 of the table at df 40, 60 and 120).
+const T975 = [NaN, 12.706, 4.303, 3.182, 2.776, 2.571, 2.447, 2.365, 2.306, 2.262, 2.228,
+  2.201, 2.179, 2.160, 2.145, 2.131, 2.120, 2.110, 2.101, 2.093, 2.086,
+  2.080, 2.074, 2.069, 2.064, 2.060, 2.056, 2.052, 2.048, 2.045, 2.042];
+function tCrit975(df) {
+  if (!(df >= 1)) return NaN;
+  return df < T975.length ? T975[Math.floor(df)] : 1.96 + 2.4 / df;
+}
+
+// 95% confidence interval on the MEAN over n seeds: mean ± t·sd/√n. A run
+// count of 3 gives ±2.48 sd, not the ±1 sd a bare "±" suggests; one run has
+// no interval at all.
+function ci95(xs) {
+  const n = xs.length;
+  if (n < 2) return null;
+  const m = mean(xs), h = tCrit975(n - 1) * stdev(xs) / Math.sqrt(n);
+  return { lo: m - h, hi: m + h };
+}
+
+// Below this many runs a sample p05/p95 cannot estimate the tails (at n = 5
+// the sample p95 falls under the true p95 most of the time), so the report
+// prints the observed min/max instead.
+const TAIL_MIN_N = 20;
+
 // Group rows by a key and summarize the metrics that matter to a buyer:
 // link uptime distribution, packet loss, payload delivery, contact.
 // Metric names are optional per row; missing ones come back as null fields.
@@ -46,6 +71,7 @@ function summarizeGroups(rows, keyFn) {
         n: xs.length,
         mean: mean(xs),
         sd: stdev(xs),
+        ci95: ci95(xs),
         p05: percentile(xs, 5),
         p95: percentile(xs, 95),
         min: Math.min(...xs),
@@ -59,11 +85,18 @@ function summarizeGroups(rows, keyFn) {
 }
 
 // scale lets a 0..1 fraction print as a percentage like the other columns.
+// Every cell says its own n: a metric can be missing from some runs.
 function fmtStat(st, digits, suffix, scale) {
   if (!st) return '—';
   const k = scale || 1;
-  return (k * st.mean).toFixed(digits) + suffix + ' ±' + (k * st.sd).toFixed(digits) +
-    ' (p05 ' + (k * st.p05).toFixed(digits) + ', p95 ' + (k * st.p95).toFixed(digits) + ')';
+  const f = v => (k * v).toFixed(digits);
+  if (st.n < 2 || !st.ci95) return f(st.mean) + suffix + ' (n=' + st.n + ', no interval)';
+  const tails = st.n >= TAIL_MIN_N
+    ? 'p05 ' + f(st.p05) + ', p95 ' + f(st.p95)
+    : 'min ' + f(st.min) + ', max ' + f(st.max);
+  // A percentage cannot leave 0..100 however wide the interval is.
+  const clip = v => (suffix === '%' ? Math.min(100 / k, Math.max(0, v)) : v);
+  return f(st.mean) + suffix + ' [95% CI ' + f(clip(st.ci95.lo)) + ', ' + f(clip(st.ci95.hi)) + '] (n=' + st.n + ', ' + tails + ')';
 }
 
 // Markdown confidence report over summarized groups.
@@ -84,6 +117,10 @@ function reportMd(label, summary, metaLines) {
   }
   L.push('');
   L.push('_uptime = share of the mission with an end-to-end route from C2 to the objective area._');
+  const anyTails = summary.some(g => ['uptime', 'dropped', 'vidLoss', 'freshFrac'].some(f => g[f] && g[f].n >= TAIL_MIN_N));
+  L.push('_Each cell: mean [95% CI on the mean, Student t over its n runs]; ' +
+    (anyTails ? 'sample 5th/95th percentiles where n >= ' + TAIL_MIN_N + ', ' : '') +
+    'observed min/max below ' + TAIL_MIN_N + ' runs, where a sample cannot estimate the tails._');
   return L.join('\n');
 }
 
@@ -108,5 +145,5 @@ function toCsv(rows) {
 }
 
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { mean, stdev, percentile, summarizeGroups, reportMd, toCsv, CSV_COLUMNS };
+  module.exports = { mean, stdev, percentile, tCrit975, ci95, summarizeGroups, reportMd, toCsv, CSV_COLUMNS };
 }

@@ -85,17 +85,21 @@ const MISSION_LIBRARY = [
     blurb: 'The ground station itself drives at road speed. Watch the operator marker crawl across the map while the wing re-forms the chain BEHIND it in real time — the same live re-planning you get from dragging the C2 marker, now on a clock. This is the clip that sells BVLOS escort.',
     checklist: [
       'The square (C2) is driving — the chain re-plans behind it continuously.',
-      'Relay wing carries the backhaul; tactical micros fly screen ahead of the vehicle.',
+      'Relay wing carries the backhaul; tactical micros hold the objective as the vehicle drives past it and on.',
       'If contact degrades, slow is a decision: drag speed by pausing the sim.',
       'GPS-denial pockets ahead? Add an outage zone on the route and rehearse the handover.',
     ],
     dynamics: { baseVelMps: { x: 6.5, y: -1.4 }, targetVelMps: null },
+    // Open road, so 'flat': on the rolling generator's 170 m hills the
+    // vehicle's 6 m mast dropped behind a ridge at ~6 min, and a drone that
+    // loses contact flies back to where it last heard C2 — which a moving base
+    // has already left — so contact never came back (audit SCN-04).
     scenario: {
       version: 1, name: 'Convoy escort, moving command post',
       radio: 'sik-v3', env: 'suburban', airframe: 'micro',
       hetero: true, relayWing: 3, relayAirframe: 'x8', relayRadio: 'rfd900x',
       count: 10, altitudeM: 70, spacingPct: 78,
-      terrain: 'rolling', seed: 5204,
+      terrain: 'flat', seed: 5204,
       base: { x: 0, y: 0 }, target: { x: 1400, y: -300 },
       windSpd: 2, windDir: 90,
       corridor: true, broadcast: true, coverage: true,
