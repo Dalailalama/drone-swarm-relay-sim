@@ -90,9 +90,12 @@ N/M against the browser's count, so set the browser's drone count to match.
 
 While it holds a vehicle the bridge sends it a 1 Hz GCS `HEARTBEAT`
 (system id 255), so ArduCopter's GCS-loss failsafe can engage if the bridge
-dies. That failsafe is off unless `FS_GCS_ENABLE` is set on the vehicle;
-set it (and its action) if a dead bridge should trigger RTL or LAND instead
-of leaving the vehicle holding its last target. MAVLink from anything other
+dies. That failsafe is off unless `FS_GCS_ENABLE` is set on the vehicle.
+`run_ardupilot_sitl.sh` starts every instance with `FS_GCS_ENABLE=1`
+(RTL), so a dead bridge brings the vehicles home and lands them; set the
+`FS_GCS_ENABLE` environment variable to change it (`5` = LAND, `0` = off).
+A vehicle started another way needs it set, or a dead bridge leaves it
+holding its last target. MAVLink from anything other
 than the vehicle's own autopilot (for example a GCS sharing the SITL link)
 is ignored.
 

@@ -56,7 +56,13 @@ the commit messages carry the per-finding detail.
   nav error.
 - The link-loss ladder sets its points and judges arrival on the nav
   belief, and a relink point the drone cannot reach expires after a transit
-  allowance.
+  allowance sized on the ground speed the wind leaves along the leg.
+- At each relink point the drone listens for three announced order rounds,
+  never under 35 s, so a slow unicast link can still reach it.
+- A drone already flying home on RTB no longer logs or latches a decline
+  for orders it cannot take.
+- Black-box samples logged without a GNSS fix carry a denied flag in the
+  upload, and C2 does not paint their dead-reckoned positions RF-bad.
 - A drone that runs out the ladder lands when its belief reaches its
   last-known home (in rtl as well as rtb); smart-RTH also watches rtl, and
   the crew swaps the battery only if the true base is there.
@@ -98,8 +104,12 @@ the commit messages carry the per-finding detail.
 - C2's transmit and duty clocks are kept per radio unit, so a LoRa unit's
   rest no longer silences C2's 2.4 GHz unit.
 - Video admission budgets airtime on every hop of the route.
-- Broadcast order reach is scored like unicast, and batch and compare
-  report control-plane loss without video fragments.
+- Broadcast order reach is scored like unicast, and batch, compare and the
+  after-action report's packet line count control-plane loss without video
+  fragments.
+- An interference source that names no `altM` sits at one 15 m default for
+  the RF floor, the red-team direction finder, the TAK hazard mark and the
+  3D mast, and an explicit `altM` of 0 stays at ground level.
 - C2 unicast orders use the shared C2-rooted tree instead of a Dijkstra per
   drone, and a relay death or launch rebuilds that tree on the same tick.
 - Sender deaths mid-air free the channel at the moment of death for
@@ -131,9 +141,10 @@ the commit messages carry the per-finding detail.
 - Bundled scenarios fly what they describe: ddil-intermittent uses the
   suburban clutter factor its modelled city calls for, so its 12 drones can
   cover the span; ddil-full's tactical micros fly RFD900x and its jammer is
-  retuned so it no longer covers base and objective; convoy escort drives
-  open-road terrain, so the moving command vehicle no longer drops behind
-  a ridge.
+  retuned so it no longer covers base and objective; ddil-disrupted's two
+  emitters deny the corridor's middle but leave base and objective clear;
+  convoy escort drives open-road terrain, so the moving command vehicle no
+  longer drops behind a ridge.
 - Loading a scenario rejects unknown environment, airframe, terrain or
   radio ids before anything changes, and sets the fleet size before the
   relay wing so the wing is not clamped by a stale slider maximum.
@@ -155,8 +166,12 @@ the commit messages carry the per-finding detail.
   fleet, refuses repeated seeds, uses sample SD, and integrates energy
   across battery swaps.
 - Compare reports objective uptime and fleet contact as separate columns,
-  prints k/N arrived and a censored median arrival time, and by default
-  runs for twice the longest transit.
+  prints k/N arrived and a censored median arrival time (">duration" when
+  half or fewer seeds arrive), and by default runs for twice the longest
+  transit.
+- The batch API server sizes its per-run time budget from the batch limits
+  instead of a fixed 5 minutes, its 504 says how to split the batch or run
+  it with the CLI, and its usage line names `--host`.
 
 ### UI and accessibility
 
@@ -179,14 +194,20 @@ the commit messages carry the per-finding detail.
 - The drone decision card shows ground speed, prices the home leg from the
   nav belief, quotes the real hold threshold, and explains a landed drone
   correctly.
-- The chain-throughput KPI uses each hop's own radio rate and duty cycle.
+- The chain-throughput KPI uses each hop's own radio rate and duty cycle
+  and subtracts only C2's airtime, and the channel line splits busy air
+  into C2 and video.
+- The hop table reads 100% loss when a hop's instantaneous margin is at or
+  below 0 dB, matching the delivery gate.
+- The spectrum-agility label, its log line and the Disrupted pack say
+  anti-jam spectrum agility instead of frequency hopping.
 - The 2D hillshade is a cached layer rebuilt only on zoom, resize, terrain
   change or when the view leaves it, and the 3D camera basis is built once
   per frame.
 - Smaller fixes: landscape-phone layout, map halo for the selected source
   or zone, lost-drone ghosts in red, legend colours, the 'Target distance'
   slider measured from C2, '&' in place names, the after-action EW line,
-  and a dismissible first-run tip.
+  and a dismissible first-run tip that clears the scale bar's label.
 - The page loads no Google Fonts and carries a Content-Security-Policy.
 
 ### Maps and TAK
@@ -225,6 +246,9 @@ the commit messages carry the per-finding detail.
 - The bridge sends a 1 Hz GCS heartbeat, listens only to each vehicle's own
   autopilot, uses ArduPilot's position-only setpoint mask, and revokes
   READY when the vehicle leaves GUIDED or disarms.
+- `run_ardupilot_sitl.sh` starts every instance with `FS_GCS_ENABLE=1`
+  (RTL; override with the `FS_GCS_ENABLE` environment variable), so a dead
+  bridge brings the vehicles home and lands them.
 - An abort is confirmed only by a heartbeat newer than the request, abort
   hold no longer floods setpoints, and a resume during confirm-abort is
   refused until then.
@@ -238,6 +262,13 @@ the commit messages carry the per-finding detail.
 - Landing is re-sent until acknowledged and can be retried; a failed
   relaunch parks as failed, and a vehicle can be relaunched from aborted
   or after a refused relaunch.
+- In external mode a drone lands when its nav belief reaches the home it
+  last learned, as an internal one does, and gets no battery swap where
+  there is no ground crew.
+- A vehicle that touches down after its landing timed out, or whose land
+  retry was refused because it was already down, goes on to the swap
+  handshake; a refused relaunch is retried after 3 s, up to 3 relaunches,
+  then reported as failed with the vehicle on the pad.
 - The mock behaves like ArduCopter on land, refused arm and refused
   GUIDED, and the conformance suite runs those cases against both servers.
 
