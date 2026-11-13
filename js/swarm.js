@@ -2306,7 +2306,12 @@ function stepAdversaries(s, dt) {
           if (bandOk && dist <= maxDetectRange &&
               !losBlocked(s.terrain, j.x, j.y, jAlt, p.x, p.y, nodeAltAbsM(s, id, p))) {
             const bearing = Math.atan2(p.y - j.y, p.x - j.x) + gaussian(s.net.rng) * 0.03; // ~1.7° error
-            fix = { x: j.x + dist * Math.cos(bearing), y: j.y + dist * Math.sin(bearing), age: t };
+            // DF measures bearing, not range (audit ADV-01): range is the
+            // received power inverted through the band's path-loss law, off
+            // by one packet's multipath fading.
+            const fadeDb = gaussian(s.net.rng) * (typeof ADVERSARY !== 'undefined' ? ADVERSARY.rssiSigmaDb : 6);
+            const range = dist * Math.pow(10, -fadeDb / (10 * pathLossExponent(rad)));
+            fix = { x: j.x + range * Math.cos(bearing), y: j.y + range * Math.sin(bearing), age: t };
           }
         }
         j._obs[id] = { t, fix }; // a failed measurement is recorded too — no retry until the next emission

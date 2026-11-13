@@ -4,9 +4,12 @@
 // plans, or routes. What it can do is exactly what a real EW platform can:
 // receive the swarm's own transmissions and direction-find them. Every
 // packet hop in this sim already occupies the shared channel (net.js), so
-// "who transmitted recently" is sensor-available data. The adversary walks
-// toward the recency-weighted centroid of those transmissions at a limited
-// ground speed — a crawling denial zone that chases whoever is talking.
+// "who transmitted recently" is sensor-available data. A lone passive DF
+// station measures BEARING; range it can only guess from received power
+// through the band's path-loss law, and one packet's RSSI carries multipath
+// fading — so each fix is a good bearing at a poor range. The adversary walks
+// toward the recency-weighted centroid of those fixes at a limited ground
+// speed — a crawling denial zone that chases whoever is talking.
 //
 // Pure functions here; js/swarm.js feeds them from live network state.
 
@@ -14,6 +17,7 @@ const ADVERSARY = {
   senseWindowSec: 20,   // how far back the DF receiver remembers emissions
   weightTauSec: 8,      // newer transmissions weigh more (exp decay)
   holdOffM: 25,         // close enough — stop jittering on top of the emitter
+  rssiSigmaDb: 6,       // single-packet RSSI fading behind each range guess (log-normal)
 };
 
 // Recency-weighted centroid of contacts [{x, y, age}] (age in seconds,
