@@ -35,6 +35,7 @@ test('R15: the Replay capture button replays an exported capture in the page', (
   assert.ok(dl && /\.jsonl$/.test(dl.name) && dl.text, 'capture export must produce a .jsonl download');
   el('replayInput').files = [makeFile(dl.name, dl.text)];
   fire('replayInput', 'change');
+  for (let i = 0; i < 100 && el('replayBtn').disabled; i++) ctx.__timers.run(); // the replay runs in slices
   assert.deepStrictEqual(ctx.__alerts, [], 'replay must not fail');
   assert.ok(ctx.sim.swarm.events.some(e => /Replayed capture/.test(e.msg)), 'replay result must be reported');
 });

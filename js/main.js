@@ -860,20 +860,48 @@
     download(exportCaptureJSONL(swarm), 'swarm-capture-' + Math.floor(swarm.time) + 's.jsonl', 'application/x-ndjson');
   });
   const replayBtn = el('replayBtn'), replayInput = el('replayInput');
+  // The replay runs in slices between frames (a 10-minute capture is tens of
+  // seconds of stepping), with progress on the button, and ends with a
+  // parity check against the capture's own deliveries (audit
+  // ui-render/replay-button-blocking-and-invisible). The step cap keeps a
+  // slice short even when the clock cannot be read.
+  const REPLAY_SLICE_MS = 16, REPLAY_SLICE_STEPS = 200;
   if (replayBtn && replayInput) {
     replayBtn.addEventListener('click', () => replayInput.click());
     replayInput.addEventListener('change', ev => {
       const file = ev.target.files[0]; if (!file) return;
       const reader = new FileReader();
       reader.onload = () => {
-        try {
-          if (typeof replayMission === 'function') {
-            const res = replayMission(String(reader.result || ''));
-            logEvent(swarm, 'Replayed capture: ' + file.name + ' (' + res.time.toFixed(1) + 's, ' + res.delivered + ' pkts delivered)', 'info');
+        if (typeof Replay === 'undefined' || replayBtn.disabled) return;
+        const label = replayBtn.textContent;
+        const end = () => { replayBtn.disabled = false; replayBtn.textContent = label; };
+        let run;
+        const slice = () => {
+          try {
+            if (!run) run = Replay.startReplay(String(reader.result || ''));
+            const t0 = performance.now();
+            let steps = 0, done = false;
+            while (!(done = run.advance(10)) && (steps += 10) < REPLAY_SLICE_STEPS && performance.now() - t0 < REPLAY_SLICE_MS);
+            if (!done) {
+              replayBtn.textContent = 'Replaying… ' + Math.floor(100 * run.swarm.time / run.untilTime) + '%';
+              setTimeout(slice, 0);
+              return;
+            }
+            end();
+            const res = run.result(), par = res.parity;
+            window.sim.lastReplay = res;
+            logEvent(swarm, 'Replayed capture: ' + file.name + ' (' + res.time.toFixed(1) + 's, ' + res.delivered + ' pkts delivered'
+              + (!par ? ')' : '; ' + (par.replayed === par.captured ? 'matches' : 'DIVERGES from') + ' the capture: '
+                + par.replayed + ' vs ' + par.captured + ' deliveries over ' + fmtSimClock(par.from) + '–' + fmtSimClock(par.to) + ')'),
+              par && par.replayed !== par.captured ? 'warn' : 'info');
+          } catch (e) {
+            end();
+            alert('Could not replay capture: ' + e.message);
           }
-        } catch (e) {
-          alert('Could not replay capture: ' + e.message);
-        }
+        };
+        replayBtn.disabled = true;
+        replayBtn.textContent = 'Replaying… 0%';
+        slice();
       };
       reader.readAsText(file);
       ev.target.value = '';

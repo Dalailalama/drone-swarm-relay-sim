@@ -97,7 +97,11 @@
   const REPLAY_SETTABLE = new Set(['altitudeM', 'deployFrac', 'corridorRouting', 'broadcastC2',
     'spectrumAgility', 'lpiMode', 'videoOn', 'videoKbps', 'adversaryMode']);
 
-  function replayMission(captureInput, options) {
+  // A replay that advances in slices, so the page can yield between them
+  // instead of freezing the tab for the whole mission (audit
+  // ui-render/replay-button-blocking-and-invisible). replayMission() below
+  // runs one to the end in a single call; the trajectory is identical.
+  function startReplay(captureInput, options) {
     const opts = options || {};
     const events = parseCapture(captureInput);
     if (!events.length) throw new Error('Empty or invalid capture input');
@@ -196,34 +200,65 @@
       untilTime = maxEventT > 0 ? maxEventT : 10;
     }
 
-    while (s.time < untilTime) {
-      while (actionIdx < userActions.length && userActions[actionIdx].t <= s.time) {
-        applyReplayAction(s, userActions[actionIdx], core);
-        actionIdx++;
-      }
-      stepSwarmFn(s, SIM_DT_SEC);
-      if (typeof opts.onStep === 'function') {
-        opts.onStep(s, SIM_DT_SEC);
-      }
-    }
-
-    // Process any remaining actions at terminal boundary
-    while (actionIdx < userActions.length && userActions[actionIdx].t <= s.time) {
-      applyReplayAction(s, userActions[actionIdx], core);
-      actionIdx++;
-    }
-
     return {
       swarm: s,
-      time: s.time,
-      delivered: s.net ? s.net.delivered : 0,
-      dropped: s.net ? s.net.dropped : 0,
-      dronePositions: s.drones.map(d => ({ id: d.id, x: d.x, y: d.y, mode: d.mode, batteryPct: d.batteryPct })),
+      untilTime,
+      get done() { return s.time >= untilTime; },
+      // Run at most maxSteps fixed steps; true once the capture's end is reached.
+      advance(maxSteps) {
+        for (let n = 0; n < maxSteps && s.time < untilTime; n++) {
+          while (actionIdx < userActions.length && userActions[actionIdx].t <= s.time) {
+            applyReplayAction(s, userActions[actionIdx], core);
+            actionIdx++;
+          }
+          stepSwarmFn(s, SIM_DT_SEC);
+          if (typeof opts.onStep === 'function') {
+            opts.onStep(s, SIM_DT_SEC);
+          }
+        }
+        if (s.time < untilTime) return false;
+        // Process any remaining actions at terminal boundary
+        while (actionIdx < userActions.length && userActions[actionIdx].t <= s.time) {
+          applyReplayAction(s, userActions[actionIdx], core);
+          actionIdx++;
+        }
+        return true;
+      },
+      result() {
+        return {
+          swarm: s,
+          time: s.time,
+          delivered: s.net ? s.net.delivered : 0,
+          dropped: s.net ? s.net.dropped : 0,
+          dronePositions: s.drones.map(d => ({ id: d.id, x: d.x, y: d.y, mode: d.mode, batteryPct: d.batteryPct })),
+          parity: deliveryParity(events, s),
+        };
+      },
     };
+  }
+
+  // Deliveries the capture recorded vs. deliveries the replay produced, over
+  // the time both packet logs cover (each is a rolling window, and a capture
+  // switched on late starts mid-mission). The window opens just after the
+  // later first event, so a step the rolling trim cut in half never counts.
+  function deliveryParity(events, s) {
+    const capt = events.filter(e => e.ev !== 'meta' && typeof e.t === 'number');
+    const rep = (s.net && s.net.cap) || [];
+    if (!capt.length || !rep.length) return null;
+    const from = Math.max(capt[0].t, rep[0].t), to = capt[capt.length - 1].t;
+    const count = list => list.filter(e => e.ev === 'deliver' && e.t > from && e.t <= to).length;
+    return { from, to, captured: count(capt), replayed: count(rep) };
+  }
+
+  function replayMission(captureInput, options) {
+    const run = startReplay(captureInput, options);
+    run.advance(Infinity);
+    return run.result();
   }
 
   return {
     parseCapture,
     replayMission,
+    startReplay,
   };
 });
