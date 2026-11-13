@@ -136,12 +136,13 @@
     airframeSel.value = AIRFRAMES[1].id;
     airframe = AIRFRAMES[1];
     heteroChk.checked = false;
+    countRange.value = 10;
+    countOut.textContent = '10';
+    updateHeteroRow(); // frees the wing's max (clamped by a smaller fleet) before the default goes in
     wingRange.value = 4;
     wingOut.textContent = '4';
     relayAirframeSel.value = 'x8';
     relayRadioSel.value = 'rfd900x';
-    countRange.value = 10;
-    countOut.textContent = '10';
     altRange.value = 50;
     altOut.textContent = '50 m';
     distRange.value = 100;

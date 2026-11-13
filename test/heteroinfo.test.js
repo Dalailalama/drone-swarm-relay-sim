@@ -91,3 +91,19 @@ test('a loaded scenario keeps a relay wing larger than the default fleet allows'
   assert.strictEqual(s.drones.length, 20);
   assert.strictEqual(s.relayIdx.length, 12, 'the swarm flies the file\'s 12-drone wing');
 });
+
+// The same clamp on the reset to defaults: after a 3-drone fleet (wing max
+// 2) the default wing of 4 was written while max was still 2, so a scenario
+// that does not name a wing size got a 2-drone wing instead of the default.
+test('a scenario without a wing size gets the default wing even after a small fleet', () => {
+  const { ctx, el, fire } = loadUI({ rangeClamp: true });
+  el('countRange').value = '3'; fire('countRange', 'input'); fire('countRange', 'change');
+  assert.strictEqual(el('wingRange').max, '2', 'precondition: a 3-drone fleet caps the wing at 2');
+  const sc = { version: 1, radio: 'sik-v3', env: 'open', airframe: 'q450', count: 10, hetero: true,
+    relayAirframe: 'x8', relayRadio: 'rfd900x', base: { x: 0, y: 0 }, target: { x: 500, y: -120 } };
+  el('loadScenarioInput').files = [makeFile('nowing.json', JSON.stringify(sc))];
+  fire('loadScenarioInput', 'change');
+  assert.deepStrictEqual(ctx.__alerts, []);
+  assert.strictEqual(el('wingRange').value, '4', 'the default relay wing');
+  assert.strictEqual(ctx.sim.swarm.relayIdx.length, 4);
+});
