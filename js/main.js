@@ -1582,13 +1582,18 @@
     kpiContact.textContent = status.freshCount + '/' + status.aliveCount;
     kpiPackets.textContent = swarm.net.delivered.toLocaleString();
     // Payload capacity: hop-divided air rate, minus what C2 traffic is already
-    // burning, capped by any legal duty cycle.
-    const effKbps = chainCapacityKbps(status.hops) * Math.max(0, 1 - swarm.net.utilization);
+    // burning, capped by any legal duty cycle. Video is the payload, so its
+    // own airtime is not subtracted from it.
+    const net = swarm.net;
+    const effKbps = chainCapacityKbps(status.hops) * Math.max(0, 1 - net.ctlUtilization);
     kpiThroughput.textContent = status.fleetConnected
       ? (effKbps >= 1000 ? (effKbps / 1000).toFixed(1) + ' Mbps'
         : effKbps.toFixed(effKbps < 10 ? 1 : 0) + ' kbps')
       : '—';
-    chanLine.textContent = 'Channel busy ' + (swarm.net.utilization * 100).toFixed(1) + '% with C2 traffic'
+    chanLine.textContent = 'Channel busy ' + (net.utilization * 100).toFixed(1) + '%'
+      + (swarm.videoOn || net.vidUtilization > 0
+        ? ' · C2 ' + (net.ctlUtilization * 100).toFixed(1) + '% · video ' + (net.vidUtilization * 100).toFixed(1) + '%'
+        : ' with C2 traffic')
       + (radio.dutyCycle ? ' · ' + (radio.dutyCycle * 100) + '% legal duty cycle' : '');
     kpiClock.textContent = fmtSimClock(swarm.time)
       + (!paused && achievedRate && Math.abs(achievedRate - rateScale) > 0.05 * rateScale ? ' · ' + Math.round(achievedRate) + '×' : '');
