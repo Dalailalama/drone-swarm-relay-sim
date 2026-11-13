@@ -90,3 +90,13 @@ test('config validation rejects garbage loudly', () => {
   assert.ok(B.validateConfig(big).includes('cap'), 'total-run cap enforced');
   assert.strictEqual(B.validateConfig(miniConfig()), null, 'the good config passes');
 });
+
+// audit tools-data-integrations/batch-500-runs-claim: the header promised
+// "500 seeded missions overnight" against a 200-run cap.
+test('the batch engine header states the run cap the engine enforces', () => {
+  const src = require('node:fs').readFileSync(require('node:path').join(__dirname, '..', 'tools', 'batch.js'), 'utf8');
+  const header = src.slice(0, src.indexOf('const fs'));
+  const claimed = [...header.matchAll(/\((\d+)\)\s+seeded runs/g)].map(m => +m[1]);
+  assert.deepStrictEqual(claimed, [B.LIMITS.maxTotalRuns], header);
+  assert.ok(!/500|overnight/.test(header), header);
+});
