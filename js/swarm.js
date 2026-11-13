@@ -1917,11 +1917,18 @@ function droneComms(s, d) {
   }
 }
 
-// Deadline for reaching the current relink point: generous transit time at
-// full airspeed from where the drone believes it is, plus the listen time.
+// Deadline for reaching the current relink point: generous transit time from
+// where the drone believes it is, plus the listen time. Transit is flown at
+// the ground speed the wind leaves along the leg, as the energy feasibility
+// flies it: sized on airspeed, a reachable point in a strong headwind expired
+// before the drone got there. A leg that can't be flown keeps the airspeed
+// allowance, so the ladder still moves on.
 function relinkGiveUpAt(s, d) {
-  const legM = Math.hypot(d.relinkGoalX - d.belX, d.relinkGoalY - d.belY);
-  return s.time + FAILSAFE.relinkTransitFactor * legM / afOf(s, d).maxSpeedMs + relinkListenSec(d);
+  const af = afOf(s, d);
+  const here = { x: d.belX, y: d.belY }, goal = { x: d.relinkGoalX, y: d.relinkGoalY };
+  const legM = dist2d(here, goal);
+  const g = groundSpeedAlong(af, s.wind, here, goal);
+  return s.time + FAILSAFE.relinkTransitFactor * legM / (g >= 0.5 ? g : af.maxSpeedMs) + relinkListenSec(d);
 }
 
 function updateBattery(s, d, dt, vAirMs) {
