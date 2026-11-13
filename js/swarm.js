@@ -1303,6 +1303,12 @@ function c2Step(s) {
       s.c2.relays.push(best);
       logEvent(s, 'C2 orders ' + best + ' to relay slot ' + s.c2.relays.length, 'relay');
     }
+  } else if (!plan.feasible && k > 0) {
+    // No route: the k-1 hysteresis below kept one relay on a plan with no
+    // slots, and its order (slotPos null) made the drone mint the straight-
+    // line slot inside the very blockage that failed the search (C2-02).
+    logEvent(s, 'C2 releases ' + s.c2.relays.join(', ') + ' from relay duty — no route to hold', 'relay');
+    s.c2.relays = [];
   } else if (kNeeded < k - 1 && k > 0) {
     // Plan wants a visibly shorter chain (>1 spare, so replan jitter can't flap)
     const freed = s.c2.relays.pop();
