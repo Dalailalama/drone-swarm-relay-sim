@@ -45,6 +45,12 @@
   // vehicle still hovers armed over the pad, up to LAND_MAX_ATTEMPTS in all.
   const LAND_RETRY_SEC = 3;
   const LAND_MAX_ATTEMPTS = 3;
+  // A relaunch the autopilot refused parks the vehicle; once the bridge has
+  // it back in 'landed', the swap handshake is redone under the same request
+  // id (PROTOCOL.md §5.2) after this many wall seconds, up to
+  // RELAUNCH_MAX_ATTEMPTS relaunches in all.
+  const RELAUNCH_RETRY_SEC = 3;
+  const RELAUNCH_MAX_ATTEMPTS = 3;
 
   function wallSec() {
     return (typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now()) / 1000;
@@ -132,6 +138,17 @@
     return positionFresh(t) && t.armed === false && Number.isFinite(t.heartbeatAge) &&
       t.heartbeatAge >= 0 && t.heartbeatAge + wallSec() - t.rxAt < EXT_STALE_SEC &&
       t.landed === true && sampleAge(t, 'landed') >= 0 && sampleAge(t, 'landed') < EXT_STALE_SEC;
+  }
+
+  // The ground crew is wherever the base TRULY is, as stepDrone rules: a
+  // vehicle that set down at a stale last-known home has nobody to swap it.
+  function crewAt(s, t) {
+    return Math.hypot(t.x + ExternalMode.origin.x - s.base.x, t.y + ExternalMode.origin.y - s.base.y) < DRONE.landThresholdM;
+  }
+
+  function landedWithoutCrew(s, id) {
+    const svc = ExternalMode.services[id], t = ExternalMode.telem[id];
+    return Boolean(svc && t && svc.id === t.serviceId && t.state === 'landed' && grounded(id) && !crewAt(s, t));
   }
 
   function serviceSend(id, action, extra) {
@@ -335,13 +352,45 @@
             setStatus(s, v.id + ' landing failed on the bridge (' + v.state + ')' +
               (attempt < LAND_MAX_ATTEMPTS ? ' — retrying' : ' after ' + attempt + ' attempts — vehicle left holding'));
           }
+          if (svc && svc.id === v.serviceId && (svc.phase === 'relaunch' || svc.pendingAction === 'relaunch') &&
+              v.servicePhase === 'failed') {
+            // The autopilot refused the relaunch (mode, arm or climb). The
+            // bridge parks the vehicle and, back on the pad, takes the swap
+            // handshake again under this id: say so, and redo it below.
+            const attempt = svc.relaunchAttempt || 1;
+            svc.phase = 'failed';
+            svc.pendingAction = null;
+            svc.failureReason = String(v.state);
+            svc.relaunchFailedAt = attempt < RELAUNCH_MAX_ATTEMPTS ? wallSec() : null;
+            setStatus(s, v.id + ' relaunch failed on the bridge (' + v.state + ')' +
+              (attempt < RELAUNCH_MAX_ATTEMPTS ? ' — redoing the swap handshake once it is back on the pad'
+                : ' after ' + attempt + ' attempts — vehicle left on the pad'));
+          }
+          // A landing the bridge gave up on can still end on the pad (a slow
+          // descent setting down late, an autopilot failsafe landing). The
+          // bridge then reports the vehicle 'landed' again under that
+          // landing's id, and the land retry, which wants it armed, never
+          // comes: carry on from there exactly as after a normal touchdown.
+          // A retry the bridge never took up (the vehicle was down first)
+          // gives way to that landing the same way.
+          if (svc && v.servicePhase === 'landed' && typeof v.serviceId === 'string' && v.serviceId.length <= 64 &&
+              (svc.phase === 'failed' && svc.landFailedAt !== undefined && svc.id === v.serviceId ||
+               svc.phase === 'landing' && svc.landAttempt > 1 && svc.id !== v.serviceId)) {
+            svc = ExternalMode.services[v.id] = { id: v.serviceId, phase: 'landed' };
+          }
+          // A refused relaunch is redone from the pad the same way, once
+          // RELAUNCH_RETRY_SEC have passed: authorize, complete, relaunch.
+          if (svc && svc.phase === 'failed' && svc.relaunchFailedAt != null && svc.id === v.serviceId &&
+              v.servicePhase === 'landed' && wallSec() - svc.relaunchFailedAt >= RELAUNCH_RETRY_SEC) {
+            svc = ExternalMode.services[v.id] = { id: v.serviceId, phase: 'landed', relaunchAttempt: (svc.relaunchAttempt || 1) + 1 };
+          }
           if (svc && svc.id === v.serviceId && svc.phase !== 'failed') {
             if (v.state === 'landing' || v.servicePhase === 'landing') {
               if (svc.pendingAction === 'land') { svc.pendingAction = null; svc.lastAction = null; svc.retries = 0; }
             }
             if (v.state === 'landed' && grounded(v.id) && (svc.phase === 'landing' || svc.phase === 'landed')) {
               if (svc.pendingAction === 'land') { svc.pendingAction = null; svc.lastAction = null; svc.retries = 0; }
-              if (svc.phase !== 'swapping') {
+              if (svc.phase !== 'swapping' && crewAt(s, ExternalMode.telem[v.id])) {
                 dispatchServiceAction(s, v.id, 'authorize');
               }
             }
@@ -473,14 +522,22 @@
         }
         d.extLinkDown = false;
       }
-      if (externalServiceGrounded(d.id) && d.mode !== 'landed' && d.mode !== 'dead') {
+      const parked = externalServiceGrounded(d.id);
+      if ((parked || landedWithoutCrew(s, d.id)) && d.mode !== 'landed' && d.mode !== 'dead') {
         d.mode = 'landed';
         d.vx = 0;
         d.vy = 0;
         d.endpointDeadAt = s.time;
         if (typeof interruptEndpointAttempts === 'function') interruptEndpointAttempts(s, d.id);
-        d.swapAt = s.time + (typeof BATTERY !== 'undefined' && BATTERY.swapSec ? BATTERY.swapSec : 90);
-        logEvent(s, d.id + ' grounded for battery service', 'info');
+        if (parked) {
+          d.swapAt = s.time + (typeof BATTERY !== 'undefined' && BATTERY.swapSec ? BATTERY.swapSec : 90);
+          logEvent(s, d.id + ' grounded for battery service', 'info');
+        } else {
+          // Set down at a stale last-known home (the operator moved while C2
+          // was silent): no swap is authorized, so it stays landed for good.
+          d.swapAt = null;
+          logEvent(s, d.id + ' landed at its last-known base — no ground crew there', 'warn');
+        }
       }
       const p = ExternalMode.prev[d.id];
       d.vx = d.vy = 0;
@@ -520,7 +577,13 @@
     for (const d of s.drones) {
       if (!alive(d) || d.goalX == null) continue;
       const svc = ExternalMode.services[d.id];
-      const overPad = (d.mode === 'rtb' || d.mode === 'rtl') && dist2d(d, s.base) < DRONE.landThresholdM;
+      // Touchdown is the drone's own call, on stepDrone's rule (ONB-01): its
+      // nav belief within the land threshold of the home it last learned,
+      // never the live true base — a drone flying home to a stale fix never
+      // reaches that one, and hovered there until its pack was empty.
+      const homeK = d.baseKnown || s.base;
+      const overPad = (d.mode === 'rtb' || d.mode === 'rtl') &&
+        Math.hypot(d.belX - homeK.x, d.belY - homeK.y) < DRONE.landThresholdM;
       const origin = ExternalMode.origin;
       const t = ExternalMode.telem[d.id];
       const landFailed = svc && overPad && positionFresh(t) && t.armed === true && t.servicePhase === 'failed';

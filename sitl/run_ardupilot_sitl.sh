@@ -31,6 +31,17 @@
 # ArduPilot's console output goes to /tmp/ArduCopter.log (sim_vehicle.py
 # names that file per vehicle type, so instances share it).
 #
+# GCS-loss failsafe: bridge.py is each vehicle's GCS and sends it a 1 Hz GCS
+# heartbeat, but ArduCopter ignores the loss of it unless FS_GCS_ENABLE is
+# set, and a dead bridge then leaves every vehicle flying its last setpoint.
+# Every instance therefore starts with FS_GCS_ENABLE=1, which is RTL: once
+# the heartbeats stop for FS_GCS_TIMEOUT (5 s by default) the vehicle flies
+# back to its launch point and lands. Set the FS_GCS_ENABLE environment
+# variable to override it (e.g. 5 = LAND, 0 = failsafe off). It goes in
+# through sim_vehicle.py's --add-param-file as a parameter defaults file, so
+# a value an earlier run saved into an instance's eeprom.bin (a `param set`)
+# still takes precedence.
+#
 # Usage:
 #   ./run_ardupilot_sitl.sh [N]      # N defaults to 3
 #
@@ -46,6 +57,14 @@ BASE_PORT=14550
 # Adjust this if sim_vehicle.py isn't already on PATH.
 SIM_VEHICLE="${SIM_VEHICLE:-sim_vehicle.py}"
 RUN_DIR="${SITL_RUN_DIR:-$PWD/sitl_runs}"
+# GCS-loss failsafe action (see above): 1 = RTL.
+FS_GCS_ENABLE="${FS_GCS_ENABLE:-1}"
+case "$FS_GCS_ENABLE" in
+    '' | *[!0-9]*)
+        echo "run_ardupilot_sitl.sh: FS_GCS_ENABLE must be a whole number (1 = RTL, 0 = off), got '$FS_GCS_ENABLE'" >&2
+        exit 1
+        ;;
+esac
 
 PIDS=()
 
@@ -91,6 +110,10 @@ fi
 echo "run_ardupilot_sitl.sh: launching $N ArduCopter SITL instance(s)"
 echo ""
 mkdir -p "$RUN_DIR"
+# Absolute, since sim_vehicle.py runs each instance from its own --use-dir.
+PARAM_FILE="$(cd "$RUN_DIR" && pwd)/gcs_failsafe.parm"
+echo "FS_GCS_ENABLE $FS_GCS_ENABLE" >"$PARAM_FILE"
+echo "  GCS-loss failsafe: FS_GCS_ENABLE=$FS_GCS_ENABLE (1 = RTL) via $PARAM_FILE"
 
 for ((i = 0; i < N; i++)); do
     PORT=$((BASE_PORT + 10 * i))
@@ -102,7 +125,9 @@ for ((i = 0; i < N; i++)); do
     # the raw MAVLink stream forwarded to the bridge.
     # -A "--serial0=udpclient:127.0.0.1:${PORT}": direct serial link to bridge's
     # udpin listener without depending on MAVProxy routing.
+    # --add-param-file: FS_GCS_ENABLE on top of the stock copter defaults.
     setsid "$SIM_VEHICLE" -v ArduCopter -I"$i" -N --no-mavproxy --use-dir "$RUN_DIR/inst$i" \
+        --add-param-file="$PARAM_FILE" \
         -A "--serial0=udpclient:127.0.0.1:${PORT}" \
         >"sitl_instance_${i}.log" 2>&1 &
     PIDS+=("$!")
