@@ -54,6 +54,35 @@ for (const [name, patch] of Object.entries(BAD)) {
   });
 }
 
+// audit ui-render/scenario-unknown-ids-silent: ids were only type-checked, so
+// a file naming an env, airframe, terrain or radio this page does not have
+// loaded "successfully" with blank selects and silent fallbacks (and a blank
+// relay airframe quietly emptied the relay wing).
+test('a scenario naming unknown env/airframe/terrain/radio ids is rejected, naming each one', () => {
+  const { ctx, el, fire } = loadUI();
+  const { ENVIRONMENTS, RADIOS } = require('../js/radios.js');
+  const before = { swarm: ctx.sim.swarm, env: el('envSel').value, airframe: el('airframeSel').value,
+    terrain: el('terrainSel').value, radio: el('radioSel').value, relayAirframe: el('relayAirframeSel').value };
+  const bad = Object.assign({}, GOOD, { env: 'moon', airframe: 'blimp', terrain: 'lava', radio: 'tin-can',
+    hetero: true, relayAirframe: 'zzz', relayRadio: 'smoke-signal' });
+  el('loadScenarioInput').files = [makeFile('ids.json', JSON.stringify(bad))];
+  fire('loadScenarioInput', 'change');
+  assert.strictEqual(ctx.__alerts.length, 1, JSON.stringify(ctx.__alerts));
+  assert.match(ctx.__alerts[0], /^Bad scenario file: /);
+  for (const v of ['moon', 'blimp', 'lava', 'tin-can', 'zzz', 'smoke-signal']) assert.ok(ctx.__alerts[0].includes('"' + v + '"'), 'names ' + v + ': ' + ctx.__alerts[0]);
+  assert.strictEqual(ctx.sim.swarm, before.swarm, 'nothing is relaunched');
+  assert.deepStrictEqual({ env: el('envSel').value, airframe: el('airframeSel').value, terrain: el('terrainSel').value,
+    radio: el('radioSel').value, relayAirframe: el('relayAirframeSel').value, swarm: before.swarm }, before);
+  assert.ok(ENVIRONMENTS.some(e => e.id === el('envSel').value) && RADIOS.some(r => r.id === el('radioSel').value));
+
+  // A preset carried in the file still resolves its own id.
+  const preset = Object.assign({}, RADIOS.find(r => r.id === 'sik-v3'), { id: 'my-sik', name: 'My SiK' });
+  el('loadScenarioInput').files = [makeFile('preset.json', JSON.stringify(Object.assign({}, GOOD, { radio: 'my-sik', radioPreset: preset })))];
+  fire('loadScenarioInput', 'change');
+  assert.strictEqual(ctx.__alerts.length, 1, 'a file-borne preset id is known: ' + JSON.stringify(ctx.__alerts));
+  assert.strictEqual(ctx.sim.radio.id, 'my-sik');
+});
+
 test('R6: every shipped pack and mission, and a save->load round trip, still load cleanly', () => {
   const { ctx, el, fire } = loadUI();
   SCENARIO_PACK.forEach((p, i) => { el('packSel').value = String(i); fire('packSel', 'change'); el('loadPackBtn').click(); });

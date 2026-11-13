@@ -357,6 +357,22 @@
     for (const k of ['radio', 'relayRadio']) {
       if (sc[k] != null && typeof sc[k] !== 'string' && !obj(sc[k])) return k + ' must be a radio id';
     }
+    // Ids must name something this page has (audit ui-render/scenario-unknown-ids-silent):
+    // an unknown one left its select blank and the sim on a silent fallback.
+    // A radio id may also be a preset the file itself carries.
+    const unknown = [];
+    const known = (k, ok) => {
+      if (sc[k] != null && sc[k] !== '' && !ok(sc[k])) unknown.push(k + ' ' + (typeof sc[k] === 'string' ? JSON.stringify(sc[k].slice(0, 48)) : '(invalid preset)'));
+    };
+    const radioOk = preset => v => (typeof v === 'object' ? !!sanitizeRadioPreset(v)
+      : RADIOS.some(r => r.id === v) || (sanitizeRadioPreset(preset) || {}).id === v);
+    known('env', v => ENVIRONMENTS.some(e => e.id === v));
+    known('airframe', v => AIRFRAMES.some(a => a.id === v));
+    known('relayAirframe', v => AIRFRAMES.some(a => a.id === v));
+    known('terrain', v => Array.from(terrainSel.options).some(o => o.value === v));
+    known('radio', radioOk(sc.radioPreset));
+    known('relayRadio', radioOk(sc.relayRadioPreset));
+    if (unknown.length) return 'unknown ' + unknown.join(', ');
     for (const k of ['base', 'target', 'baseVelMps', 'targetVelMps']) {
       if (sc[k] != null && (!obj(sc[k]) || !num(sc[k].x) || !num(sc[k].y))) return k + ' must be {x, y} with numeric x and y';
     }
