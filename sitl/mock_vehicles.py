@@ -331,6 +331,10 @@ class Vehicle:
                     self.init_state = "landed"
                     self.service_phase = "landed"
                     self.failed_at = None
+                    # Same as bridge.py: the handshake's later steps run again
+                    # under this requestId, so their acks must not replay.
+                    for action in ("authorize", "complete", "relaunch"):
+                        self.service_action_history.pop((self.service_id, action), None)
                 return
             elif self.service_phase == "relaunch":
                 if not self.armed:
@@ -566,6 +570,10 @@ class World:
                 # A new session: an earlier one's request ids must not replay.
                 v.service_id = None
                 v.service_history.clear()
+                v.service_action_history.clear()
+            elif v.service_phase not in ("landing", "landed", "swapping", "swapped"):
+                # Same as bridge.py: nor may the acks of a transaction the
+                # new session cannot pick up from telemetry.
                 v.service_action_history.clear()
             if isinstance(origin, dict):
                 v.origin = {

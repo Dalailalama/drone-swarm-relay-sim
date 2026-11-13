@@ -885,6 +885,11 @@ async def _advance_init(vehicle: Vehicle) -> None:
             vehicle.init_state = "landed"
             vehicle.service_phase = "landed"
             vehicle.failed_at = None
+            # Back on the pad (a relaunch that failed, a landing confirmed
+            # late): the handshake's later steps run again under this
+            # requestId, so their earlier acks must not replay as duplicates.
+            for action in ("authorize", "complete", "relaunch"):
+                vehicle.service_action_history.pop((vehicle.service_id, action), None)
             await _vehicle_status(vehicle, f"vehicle {vehicle.id}: confirmed landed after timeout - recovered to landed")
         return
 
@@ -1187,6 +1192,11 @@ def _keep_vehicle(v: Vehicle, websocket, origin: dict) -> None:
         # numbers from 1 again) must not replay as duplicates of old acks.
         v.service_id = None
         v.service_history.clear()
+        v.service_action_history.clear()
+    elif v.service_phase not in ("landing", "landed", "swapping", "swapped"):
+        # Nor may the acks of a transaction the new session cannot pick up
+        # from telemetry (only landing to swapped, docs/PROTOCOL.md 3.1), e.g.
+        # a relaunch that completes after this init.
         v.service_action_history.clear()
 
 
@@ -1562,7 +1572,10 @@ async def handle_service(websocket, msg: dict) -> None:
 
     if action == "resume":
         if v.init_state in (INIT_ABORT_HOLD, INIT_CONFIRM_ABORT) or (v.service_phase == "aborted" and not v.service_grounded and v.armed):
-            if v.mode_confirmed and v.position_fresh and v.connected and v.armed:
+            # Still confirming the abort: as there, only a heartbeat newer than
+            # the request shows GUIDED is back, not one from before a NAV_LAND.
+            confirmed = v.init_state != INIT_CONFIRM_ABORT or (v.connected and v.last_heartbeat > v.abort_requested_at)
+            if confirmed and v.mode_confirmed and v.position_fresh and v.connected and v.armed:
                 v.service_phase = None
                 v.service_id = None
                 v.init_state = INIT_READY

@@ -1985,6 +1985,31 @@ async def scenario_token_gate() -> None:
         bridge.serve = real_serve
 
 
+async def scenario_token_plus_typed_as_is() -> None:
+    """A base64 secret (`openssl rand -base64`) often holds '+', and a browser
+    sends a typed ?token=a+b as is: reading that '+' as a form-encoded space
+    answered the exact secret with 401. Percent-encoded and form-encoded
+    spellings of the secret still match; a different secret still does not."""
+
+    class Req:
+        def __init__(self, path):
+            self.path = path
+            self.headers = {"Origin": "http://localhost:8000"}
+
+    class Conn:
+        def respond(self, status, body):
+            return (int(status), body)
+
+    check = bridge.make_origin_check((), None, "Zm9v+YmFy/cXV4==")
+    for path in ("/?token=Zm9v+YmFy/cXV4==", "/?token=Zm9v%2BYmFy%2FcXV4%3D%3D", "/?a=1&token=Zm9v+YmFy/cXV4=="):
+        assert check(Conn(), Req(path)) is None, path
+    for path in ("/?token=Zm9v%20YmFy/cXV4==", "/?token=Zm9vYmFy/cXV4==", "/?token=Zm9v"):
+        assert check(Conn(), Req(path))[0] == 401, path
+    check = bridge.make_origin_check((), None, "two words")
+    for path in ("/?token=two%20words", "/?token=two+words"):
+        assert check(Conn(), Req(path)) is None, path
+
+
 async def scenario_init_count_bounded() -> None:
     """An init's count comes off the network: a huge one is clamped (with a
     status) instead of building a vehicle and UDP task per requested unit."""
@@ -2372,9 +2397,141 @@ async def scenario_failed_landing_can_be_retried():
     await h.close()
 
 
+async def scenario_failed_relaunch_redone_by_handshake():
+    """A relaunch whose arm is refused parks the vehicle, back in 'landed' once
+    grounded: the handshake must then run again under its requestId. The
+    cached acks of the first authorize/complete/relaunch were replayed as
+    duplicates that changed nothing, stranding the vehicle on the pad."""
+    h = Harness()
+    ws = h.client("controller")
+    await h.init(ws, count=0, alt=30.0)
+    clock = Clock()
+
+    async def service(action, **extra):
+        await _service(ws, action, **extra)
+        return ws.of_type("service_ack")[-1]
+
+    with patch.object(bridge, "_now", clock):
+        v = current_vehicle()
+        conn = v.conn
+
+        async def tick():
+            clock.now += 0.1
+            conn.push(hb_msg(armed=False, custom_mode=GUIDED_MODE_ID))
+            conn.push(pos_msg(0.0, 0.0, -0.1))
+            conn.push(ext_state_msg(1))
+            bridge._drain_messages(v)
+            await bridge._advance_init(v)
+
+        assert (await service("land"))["accepted"]
+        await tick()
+        assert v.service_phase == "landed", v.service_phase
+        assert (await service("authorize"))["accepted"] and (await service("complete"))["accepted"]
+        assert (await service("relaunch", alt=20.0))["accepted"]
+        await tick()
+        assert v.init_state == bridge.INIT_CONFIRM_ARM, v.init_state
+        conn.push(ack_msg(MAV_CMD_COMPONENT_ARM_DISARM, MAV_RESULT_DENIED))
+        await tick()
+        await tick()
+        assert v.service_phase == "landed" and conn.count("arm") == 1, (v.service_phase, v.init_state)
+
+        for action, phase in (("authorize", "swapping"), ("complete", "swapped"), ("relaunch", "relaunch")):
+            ack = await service(action, alt=20.0)
+            assert ack["accepted"] and not ack["duplicate"] and v.service_phase == phase, (ack, v.service_phase)
+        await tick()
+        assert conn.count("arm") == 2, conn.kinds()
+    await h.close()
+
+
+async def scenario_reload_mid_relaunch_no_stale_ack():
+    """A page reloaded while a vehicle relaunches numbers its requests from 1
+    again and cannot pick that phase up from telemetry. The old transaction's
+    acks survived the new session's init, so once the vehicle was READY a land
+    reusing the old id was replayed as a duplicate and never flown."""
+    h = Harness()
+    old = h.client("old-tab")
+    await h.init(old, count=0, alt=30.0)
+    clock = Clock()
+    with patch.object(bridge, "_now", clock):
+        v = current_vehicle()
+        v.first_pass_done.set()
+        conn = v.conn
+
+        async def tick(armed, down, *acks):
+            clock.now += 0.1
+            for ack in acks:
+                conn.push(ack)
+            conn.push(hb_msg(armed=armed, custom_mode=GUIDED_MODE_ID))
+            conn.push(pos_msg(0.0, 0.0, down))
+            if not armed:
+                conn.push(ext_state_msg(1))
+            bridge._drain_messages(v)
+            await bridge._advance_init(v)
+
+        await _service(old, "land", "1")
+        await tick(False, -0.1)
+        for action in ("authorize", "complete", "relaunch"):
+            await _service(old, action, "1", alt=20.0)
+        assert v.service_phase == "relaunch", v.service_phase
+
+        bridge.client_disconnected(old)  # reload: the new tab inits the same fleet
+        new = h.client("new-tab")
+        await ready_reply(new, h.init(new, count=1, alt=30.0))
+        assert bridge.STATE.vehicles["DR-1"] is v and v.service_phase == "relaunch"
+        await tick(False, -0.1)
+        await tick(True, -0.1, ack_msg(MAV_CMD_COMPONENT_ARM_DISARM))
+        await tick(True, -20.0, ack_msg(MAV_CMD_NAV_TAKEOFF))
+        assert v.ready and v.service_phase is None, (v.init_state, v.service_phase)
+
+        lands = conn.count("land")
+        await _service(new, "land", "1")
+        ack = new.of_type("service_ack")[-1]
+        assert ack["accepted"] and not ack["duplicate"] and v.service_phase == "landing", (ack, v.service_phase)
+        assert conn.count("land") == lands + 1
+    await h.close()
+
+
+async def scenario_resume_needs_guided_since_abort():
+    """An abort is confirmed only by a GUIDED heartbeat newer than the request
+    (the latest one may predate a NAV_LAND that already switched to LAND).
+    A resume sent before that confirmation went READY on the old heartbeat,
+    so a vehicle still in LAND was handed goals and then lost READY."""
+    h = Harness()
+    ws = h.client("controller")
+    await h.init(ws, count=0, alt=30.0)
+    clock = Clock()
+    with patch.object(bridge, "_now", clock):
+        v = current_vehicle()
+        conn = v.conn
+        await _service(ws, "land", "svc-1")
+        clock.now = 0.2
+        await _service(ws, "abort", "svc-1")
+        assert v.init_state == bridge.INIT_CONFIRM_ABORT, v.init_state
+        clock.now = 0.3
+        conn.push(pos_msg(-8.0, 12.0, -29.0))
+        bridge._drain_messages(v)
+        await _service(ws, "resume", "svc-1")
+        ack = ws.of_type("service_ack")[-1]
+        assert not ack["accepted"] and ack["code"] == "HOLD_NOT_READY", ack
+        assert not v.ready and v.init_state == bridge.INIT_CONFIRM_ABORT, v.init_state
+
+        clock.now = 0.4
+        conn.push(hb_msg(armed=True, custom_mode=GUIDED_MODE_ID))
+        bridge._drain_messages(v)
+        await bridge._advance_init(v)
+        assert v.init_state == bridge.INIT_ABORT_HOLD, v.init_state
+        await _service(ws, "resume", "svc-1")
+        ack = ws.of_type("service_ack")[-1]
+        assert ack["accepted"] and v.ready and v.init_state == bridge.INIT_READY, (ack, v.init_state)
+    await h.close()
+
+
 SCENARIOS = [
     ("NAV_LAND is re-sent until the autopilot ACKs it", scenario_land_resent_until_acked),
     ("a failed landing can be retried under a new request id", scenario_failed_landing_can_be_retried),
+    ("a failed relaunch, once grounded, is redone through the handshake", scenario_failed_relaunch_redone_by_handshake),
+    ("a page reloaded mid-relaunch gets no stale duplicate ack for a reused request id", scenario_reload_mid_relaunch_no_stale_ack),
+    ("resume waits for the abort's GUIDED confirmation, not the pre-abort heartbeat", scenario_resume_needs_guided_since_abort),
     ("--count overriding the init's count is reported in a status line", scenario_cli_count_override_reported),
     ("an init that drops an airborne vehicle lands it and watches it down", scenario_shrinking_init_lands_dropped_vehicle),
     ("re-init keeps a vehicle parked mid-swap parked; only the handshake relaunches it", scenario_reinit_keeps_parked_vehicle),
@@ -2412,6 +2569,7 @@ SCENARIOS = [
     ("ownership: goals from a non-controller are not forwarded", scenario_goals_ownership),
     ("CSWSH: a foreign web Origin is refused at the handshake", scenario_foreign_origin_rejected),
     ("CSWSH: --token (or a LAN bind) requires ?token= at the handshake", scenario_token_gate),
+    ("CSWSH: a --token holding '+' matches when typed as is", scenario_token_plus_typed_as_is),
     ("init: a huge vehicle count is clamped", scenario_init_count_bounded),
     ("malformed messages are skipped without dropping the connection", scenario_malformed_messages_keep_connection),
     ("a malformed init is refused with a status before it can take control", scenario_malformed_init_refused_without_control),
