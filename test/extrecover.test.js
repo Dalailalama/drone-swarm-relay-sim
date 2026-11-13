@@ -3,6 +3,10 @@
 //      'failed') that still ended on the pad came back as 'landed', but the
 //      browser kept its record 'failed': no authorize was ever sent, and the
 //      land retry wants the vehicle armed, so the drone sat on the pad.
+//  relaunch-refused-redone: after a relaunch the autopilot refused the
+//      bridge has the vehicle back in 'landed' and takes the swap handshake
+//      again under its request id, but the browser stayed in 'relaunch' and
+//      the drone stayed landed in the sim until a re-init or reload.
 const { test } = require('node:test');
 const assert = require('node:assert');
 const { loadUI } = require('./helpers/dom.js');
@@ -101,4 +105,93 @@ test('land-fail-then-grounded: a land retry the bridge refused because the vehic
   const auth = services(ws, 'authorize');
   assert.strictEqual(auth.length, 1, 'the vehicle on the pad is never authorized for the swap');
   assert.strictEqual(auth[0].requestId, land.requestId, 'the swap runs under the request id the bridge holds');
+});
+
+// A vehicle the bridge kept parked in 'swapped' is adopted and relaunched;
+// returns the request id the handshake runs under.
+function parkAndRelaunch(ui, ws, d, frame) {
+  const s = ui.ctx.sim.swarm;
+  frame({ ...onPad('9'), state: 'swapped', servicePhase: 'swapped' });
+  ui.ctx.stepSwarm(s, 0.25);
+  assert.strictEqual(d.mode, 'landed');
+  const sent = until(ui, ws, 'relaunch', (ui.ctx.BATTERY.swapSec + 5) * 4,
+    () => frame({ ...onPad('9'), state: 'swapped', servicePhase: 'swapped' }));
+  assert.strictEqual(sent.length, 1, 'relaunch not requested');
+  ack(ws, d, '9', 'relaunch');
+  return '9';
+}
+
+// Steps 250 ms at a time, feeding `feed`, until `action` goes out (or n steps).
+function until(ui, ws, action, n, feed) {
+  const s = ui.ctx.sim.swarm;
+  const k = services(ws, action).length;
+  for (let i = 0; i < n && services(ws, action).length === k; i++) {
+    ui.ctx.__clock.ms += 250; feed(); ui.ctx.stepSwarm(s, 0.25);
+  }
+  return services(ws, action).slice(k);
+}
+
+// The autopilot refuses the relaunch (arm denied): the bridge parks it and,
+// grounded, has it back in 'landed'. Returns the authorize the redo sends.
+function refuseRelaunch(ui, ws, d, frame, id) {
+  frame({ ...onPad(id), state: 'failed:arm', servicePhase: 'failed' });
+  return until(ui, ws, 'authorize', 40, () => frame(onPad(id)));
+}
+
+test('relaunch-refused-redone: a relaunch the autopilot refused is redone through the swap handshake from the pad', () => {
+  const ui = loadUI();
+  const s = ui.ctx.sim.swarm;
+  const ws = connect(ui);
+  const d = s.drones[0];
+  const frame = telemetry(ui, ws, d);
+  const id = parkAndRelaunch(ui, ws, d, frame);
+  const swaps = s.stats.swaps || 0;
+
+  frame({ ...onPad(id), state: 'failed:arm', servicePhase: 'failed' });
+  assert.ok(s.events.some(e => e.msg.startsWith('External: ' + d.id + ' relaunch failed on the bridge (failed:arm)')),
+    'the refused relaunch is not surfaced');
+  frame(onPad(id));
+  ui.ctx.stepSwarm(s, 0.25);
+  assert.strictEqual(services(ws, 'authorize').length, 0, 'the redo is throttled, not fired on the first landed frame');
+  const auth = until(ui, ws, 'authorize', 40, () => frame(onPad(id)));
+  assert.strictEqual(auth.length, 1, 'the swap handshake is never redone, so the drone stays on the pad');
+  assert.strictEqual(auth[0].requestId, id, 'the redo runs under the request id the bridge holds');
+
+  ack(ws, d, id, 'authorize');
+  const complete = until(ui, ws, 'complete', 8, () => frame({ ...onPad(id), state: 'swapping', servicePhase: 'swapping' }));
+  assert.strictEqual(complete.length, 1, 'swap completion not requested again');
+  ack(ws, d, id, 'complete');
+  const relaunch = until(ui, ws, 'relaunch', 8, () => frame({ ...onPad(id), state: 'swapped', servicePhase: 'swapped' }));
+  assert.strictEqual(relaunch.length, 1, 'relaunch not requested again');
+  assert.strictEqual(relaunch[0].requestId, id);
+  ack(ws, d, id, 'relaunch');
+  frame({ alt: 60, armed: true, landed: false, ready: true, state: 'ready', servicePhase: null, serviceId: id });
+  ui.ctx.stepSwarm(s, 0.25);
+  assert.strictEqual(ui.ctx.ExternalMode.services[d.id], undefined);
+  assert.strictEqual(d.mode, 'ok', 'the relaunched vehicle is back in the fleet');
+  assert.strictEqual(s.stats.swaps, swaps + 1, 'one battery swap, counted once');
+});
+
+test('relaunch-refused-redone: relaunches are capped, and the capped failure is reported with the vehicle left on the pad', () => {
+  const ui = loadUI();
+  const s = ui.ctx.sim.swarm;
+  const ws = connect(ui);
+  const d = s.drones[0];
+  const frame = telemetry(ui, ws, d);
+  const id = parkAndRelaunch(ui, ws, d, frame);
+  for (let attempt = 1; attempt < 3; attempt++) {
+    assert.strictEqual(refuseRelaunch(ui, ws, d, frame, id).length, 1, 'redo ' + attempt + ' never starts');
+    ack(ws, d, id, 'authorize');
+    until(ui, ws, 'complete', 8, () => frame({ ...onPad(id), state: 'swapping', servicePhase: 'swapping' }));
+    ack(ws, d, id, 'complete');
+    assert.strictEqual(until(ui, ws, 'relaunch', 8, () => frame({ ...onPad(id), state: 'swapped', servicePhase: 'swapped' })).length, 1);
+    ack(ws, d, id, 'relaunch');
+  }
+  assert.strictEqual(services(ws, 'relaunch').length, 3);
+  assert.strictEqual(refuseRelaunch(ui, ws, d, frame, id).length, 0, 'a third refusal is not redone');
+  assert.ok(s.events.some(e => e.msg === 'External: ' + d.id + ' relaunch failed on the bridge (failed:arm) after 3 attempts — vehicle left on the pad'),
+    'the capped failure is not reported');
+  const diag = ui.ctx.getExternalDiagnostics().find(v => v.id === d.id);
+  assert.ok(diag.servicePhase === 'failed' && diag.failureReason === 'failed:arm', JSON.stringify(diag));
+  assert.strictEqual(d.mode, 'landed', 'the vehicle on the pad is not flying in the sim');
 });

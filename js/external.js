@@ -45,6 +45,12 @@
   // vehicle still hovers armed over the pad, up to LAND_MAX_ATTEMPTS in all.
   const LAND_RETRY_SEC = 3;
   const LAND_MAX_ATTEMPTS = 3;
+  // A relaunch the autopilot refused parks the vehicle; once the bridge has
+  // it back in 'landed', the swap handshake is redone under the same request
+  // id (PROTOCOL.md §5.2) after this many wall seconds, up to
+  // RELAUNCH_MAX_ATTEMPTS relaunches in all.
+  const RELAUNCH_RETRY_SEC = 3;
+  const RELAUNCH_MAX_ATTEMPTS = 3;
 
   function wallSec() {
     return (typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now()) / 1000;
@@ -335,6 +341,20 @@
             setStatus(s, v.id + ' landing failed on the bridge (' + v.state + ')' +
               (attempt < LAND_MAX_ATTEMPTS ? ' — retrying' : ' after ' + attempt + ' attempts — vehicle left holding'));
           }
+          if (svc && svc.id === v.serviceId && (svc.phase === 'relaunch' || svc.pendingAction === 'relaunch') &&
+              v.servicePhase === 'failed') {
+            // The autopilot refused the relaunch (mode, arm or climb). The
+            // bridge parks the vehicle and, back on the pad, takes the swap
+            // handshake again under this id: say so, and redo it below.
+            const attempt = svc.relaunchAttempt || 1;
+            svc.phase = 'failed';
+            svc.pendingAction = null;
+            svc.failureReason = String(v.state);
+            svc.relaunchFailedAt = attempt < RELAUNCH_MAX_ATTEMPTS ? wallSec() : null;
+            setStatus(s, v.id + ' relaunch failed on the bridge (' + v.state + ')' +
+              (attempt < RELAUNCH_MAX_ATTEMPTS ? ' — redoing the swap handshake once it is back on the pad'
+                : ' after ' + attempt + ' attempts — vehicle left on the pad'));
+          }
           // A landing the bridge gave up on can still end on the pad (a slow
           // descent setting down late, an autopilot failsafe landing). The
           // bridge then reports the vehicle 'landed' again under that
@@ -346,6 +366,12 @@
               (svc.phase === 'failed' && svc.landFailedAt !== undefined && svc.id === v.serviceId ||
                svc.phase === 'landing' && svc.landAttempt > 1 && svc.id !== v.serviceId)) {
             svc = ExternalMode.services[v.id] = { id: v.serviceId, phase: 'landed' };
+          }
+          // A refused relaunch is redone from the pad the same way, once
+          // RELAUNCH_RETRY_SEC have passed: authorize, complete, relaunch.
+          if (svc && svc.phase === 'failed' && svc.relaunchFailedAt != null && svc.id === v.serviceId &&
+              v.servicePhase === 'landed' && wallSec() - svc.relaunchFailedAt >= RELAUNCH_RETRY_SEC) {
+            svc = ExternalMode.services[v.id] = { id: v.serviceId, phase: 'landed', relaunchAttempt: (svc.relaunchAttempt || 1) + 1 };
           }
           if (svc && svc.id === v.serviceId && svc.phase !== 'failed') {
             if (v.state === 'landing' || v.servicePhase === 'landing') {
