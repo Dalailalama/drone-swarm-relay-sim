@@ -436,7 +436,9 @@ class Vehicle:
             return False, f"cannot complete in phase {self.service_phase}", "INVALID_PHASE", True
 
         if action == "relaunch":
-            if not (self.service_phase == "swapped" and self.service_grounded):
+            # Same as bridge.py: relaunch is also the way out of a grounded abort.
+            parked = self.service_phase == "swapped" or (self.service_phase == "aborted" and self.init_state == "aborted")
+            if not (parked and self.service_grounded):
                 return False, f"cannot relaunch in phase {self.service_phase}", "INVALID_PHASE", True
             try:
                 alt = float(msg["alt"])

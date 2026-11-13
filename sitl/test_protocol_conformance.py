@@ -356,11 +356,76 @@ async def test_ready_means_takeoff_altitude() -> None:
         assert_conform(m.ready, "Mock: 29.5 m of a 30 m takeoff not READY")
 
 
+async def test_grounded_abort_exits_by_relaunch() -> None:
+    """land -> landed -> abort (grounded) parks the vehicle in 'aborted', and
+    resume answers "relaunch required": relaunch must then be accepted, in
+    both implementations. It was refused (INVALID_PHASE), as were complete
+    and land, so the only way out was an init."""
+    h = tb.Harness()
+    ws = h.client("conformance-abort")
+    await h.init(ws, count=0, alt=30.0)
+    clock = tb.Clock()
+
+    async def service(action, **extra):
+        await bridge.handle_message(ws, json.dumps({
+            "type": "service", "id": "DR-1", "requestId": "svc-ga", "action": action, **extra}), None, 14550)
+        return json.loads(ws.messages[-1])
+
+    with patch.object(bridge, "_now", clock):
+        v = tb.current_vehicle()
+        conn = v.conn
+        await service("land")
+        for _ in range(5):
+            clock.now += 0.1
+            conn.push(tb.hb_msg(armed=False, custom_mode=GUIDED_MODE_ID))
+            conn.push(tb.pos_msg(0.0, 0.0, -0.2))
+            conn.push(tb.ext_state_msg(1))
+            bridge._drain_messages(v)
+            await bridge._advance_init(v)
+        assert_conform(v.service_phase == "landed", f"Bridge: grounded-abort setup never landed ({v.service_phase})")
+        assert_conform((await service("abort"))["accepted"] and v.init_state == "aborted",
+                       f"Bridge: grounded abort not parked in 'aborted' ({v.init_state})")
+        assert_conform((await service("resume")).get("code") == "CANNOT_RESUME_GROUNDED",
+                       "Bridge: resume of a grounded abort must say relaunch is required")
+        ack = await service("relaunch", alt=20.0)
+        assert_conform(ack["accepted"] and v.service_phase == "relaunch" and v.init_state == bridge.INIT_CONFIRM_MODE,
+                       f"Bridge: relaunch after a grounded abort refused: {ack}")
+    await h.close()
+
+    clock = [3000.0]
+    with patch.object(mv, "_now", lambda: clock[0]):
+        world = mv.World()
+        world.reset(1, 30.0)
+        m = world.vehicles["DR-1"]
+        for _ in range(1000):
+            clock[0] += 0.05
+            world.physics_tick(0.05)
+            if m.ready:
+                break
+        m.service("svc-ga", "land", {"groundAlt": 0.0})
+        for _ in range(1000):
+            clock[0] += 0.05
+            world.physics_tick(0.05)
+            if m.service_phase == "landed":
+                break
+        assert_conform(m.service_phase == "landed", f"Mock: grounded-abort setup never landed ({m.service_phase})")
+        assert_conform(m.service("svc-ga", "abort", {})[0] and m.init_state == "aborted",
+                       f"Mock: grounded abort not parked in 'aborted' ({m.init_state})")
+        assert_conform(m.service("svc-ga", "resume", {})[2] == "CANNOT_RESUME_GROUNDED",
+                       "Mock: resume of a grounded abort must say relaunch is required")
+        clock[0] += 0.05
+        world.physics_tick(0.05)
+        acc, err, code, _ = m.service("svc-ga", "relaunch", {"alt": 20.0})
+        assert_conform(acc and m.service_phase == "relaunch",
+                       f"Mock: relaunch after a grounded abort refused: {code} {err}")
+
+
 def main() -> int:
     print("Testing Protocol Conformance across Bridge and Mock implementations...")
     asyncio.run(test_bridge_conformance())
     asyncio.run(test_mock_conformance())
     asyncio.run(test_ready_means_takeoff_altitude())
+    asyncio.run(test_grounded_abort_exits_by_relaunch())
     test_service_ack_keys_match_doc()
 
     if failures:

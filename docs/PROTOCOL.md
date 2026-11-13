@@ -250,6 +250,7 @@ stateDiagram-v2
 ```
 
 - While in `confirm-abort` or `abort-hold`, all mission goals are strictly suppressed.
+- An `abort` of a grounded vehicle (landed, swapping or swapped, disarmed) parks it in `aborted`. `resume` refuses it (`CANNOT_RESUME_GROUNDED`, "relaunch required") and `relaunch` is accepted from there exactly as from `swapped`.
 - No automatic arming or takeoff commands may be issued from `abort-hold` or `aborted`.
 
 ---

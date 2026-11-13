@@ -1485,7 +1485,10 @@ async def handle_service(websocket, msg: dict) -> None:
         return
 
     if action == "relaunch":
-        if not (v.service_phase == "swapped" and v.service_grounded):
+        # A grounded abort parks the vehicle in 'aborted' (resume answers
+        # "relaunch required"), so relaunch is its way back into service too.
+        parked = v.service_phase == "swapped" or (v.service_phase == "aborted" and v.init_state == "aborted")
+        if not (parked and v.service_grounded):
             await record_and_ack(False, error=f"cannot relaunch in phase {v.service_phase}", code="INVALID_PHASE", retryable=True)
             return
         try:
