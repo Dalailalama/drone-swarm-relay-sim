@@ -54,9 +54,16 @@ test('compare honours a calibrated radioPreset instead of falling back to the st
   const base = resolveScenario('ddil-disrupted').scenario;
   const stock = R.RADIOS.find(r => r.id === base.radio);
   const preset = { ...stock, id: base.radio + '-calibrated', rangeLosM: stock.rangeLosM / 5, txDbm: stock.txDbm - 25 };
+  // The swarm must fly the preset itself. Delivered/dropped/uptime alone tied
+  // once ddil-disrupted's base left the denial zone: neither radio drops a
+  // packet in the first 40 s, though the weak preset plans a 9-relay chain.
+  let flown = null;
+  const wrapped = Object.create(ctx);
+  wrapped.makeSwarm = opts => { flown = opts.radio; return ctx.makeSwarm(opts); };
   const a = runScenarioSeed(ctx, { id: 'a', title: 'a', scenario: base }, 101, 40);
-  const b = runScenarioSeed(ctx, { id: 'b', title: 'b', scenario: { ...base, radio: preset.id, radioPreset: preset } }, 101, 40);
-  assert.notDeepStrictEqual([a.delivered, a.dropped, a.uptimePct], [b.delivered, b.dropped, b.uptimePct]);
+  const b = runScenarioSeed(wrapped, { id: 'b', title: 'b', scenario: { ...base, radio: preset.id, radioPreset: preset } }, 101, 40);
+  assert.deepStrictEqual(flown, preset);
+  assert.notDeepStrictEqual(a, b);
 });
 
 test('compare lays the city along the real base->target corridor and honours cityDensity 0', () => {
