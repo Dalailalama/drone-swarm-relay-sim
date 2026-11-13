@@ -122,6 +122,23 @@ test('every bundled scenario and mission has enough drones for the relay chain i
   }
 });
 
+// The shipped batch study (README: node tools/batch.js --config
+// batch/example.json) copied ddil-intermittent's SiK-over-a-modelled-city
+// setup with the urban clutter factor SCN-01 removed there: 42 m of usable
+// range, 15 relays for the span with 12 drones, so every cell read 0% uptime.
+test('the example batch study has enough drones for the relay chain in every sweep cell', () => {
+  const cfg = require('../batch/example.json');
+  const env = R.ENVIRONMENTS.find(e => e.id === cfg.env);
+  const chain = R.RADIOS.find(r => r.id === cfg.radio);
+  const D = Math.hypot(cfg.mission.targetX, cfg.mission.targetY); // the batch base is fixed at 0,0
+  for (const cell of cfg.sweep) {
+    const alt = cell.altitudeM ?? cfg.altitudeM ?? 70;
+    const usable = Math.min(R.usableRangeM(chain, env.factor, ctx.planLossDb({ lpiMode: false })), R.radioHorizonM(6, alt));
+    const k = relaysForSpan(D, usable * (cell.spacingPct ?? cfg.spacingPct ?? 80) / 100);
+    assert.ok(k < cfg.count, `${cell.name}: ${k} relays for ${D.toFixed(0)} m vs ${cfg.count} drones`);
+  }
+});
+
 test('ddil-intermittent reaches its objective and the link flickers rather than holding or never forming', () => {
   const p = SCENARIO_PACK.find(x => x.id === 'ddil-intermittent');
   let S = null, drops = 0, was = false;

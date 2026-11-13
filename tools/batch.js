@@ -278,6 +278,11 @@ function validateConfig(cfg) {
   return null;
 }
 
+// videoOn without videoKbps: the bitrate makeSwarm (and the page's slider)
+// defaults to. runOne and the report header both read it, so the header
+// names the load the runs actually carried.
+const DEFAULT_VIDEO_KBPS = 500;
+
 function runOne(ctx, cfg, cell, seed) {
   const envMap = { open: [1, 2.5], suburban: [0.45, 4.5], urban: [0.2, 6.5] };
   const [envFactor, sigma] = envMap[cfg.env];
@@ -299,7 +304,7 @@ function runOne(ctx, cfg, cell, seed) {
       density: (cfg.cityDensity != null ? cfg.cityDensity : 40) / 100,
       heightScale: (cfg.cityHeight != null ? cfg.cityHeight : 40) / 100,
     }),
-    videoOn: !!f.videoOn, videoKbps: f.videoKbps || 0,
+    videoOn: !!f.videoOn, videoKbps: f.videoKbps || DEFAULT_VIDEO_KBPS,
     spectrumAgility: !!f.spectrumAgility, lpiMode: !!f.lpiMode,
     adversaryMode: !!f.adversaryMode,
     relayWing: f.hetero ? (f.relayWing ?? Math.min(3, cfg.count)) : 0,
@@ -354,7 +359,7 @@ function runBatch(rawCfg, progress) {
     '**Mission:** ' + Math.round(Math.hypot(cfg.mission.targetX, cfg.mission.targetY)) +
       ' m from base · **Duration:** ' + cfg.durationSec + ' s/run · **Terrain:** ' + (cfg.terrain || 'flat'),
   ];
-  if (cfg.features && cfg.features.videoOn) meta.push('**Payload:** video backhaul at ' + (cfg.features.videoKbps || 250) + ' kbps');
+  if (cfg.features && cfg.features.videoOn) meta.push('**Payload:** video backhaul at ' + (cfg.features.videoKbps || DEFAULT_VIDEO_KBPS) + ' kbps');
   if (cfg.features && cfg.features.adversaryMode) meta.push('**Red team:** hunting jammers active');
   const md = stats.reportMd(cfg.label || 'unnamed sweep', summary, meta);
   const csv = stats.toCsv(rows);

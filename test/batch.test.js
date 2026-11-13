@@ -100,3 +100,15 @@ test('the batch engine header states the run cap the engine enforces', () => {
   assert.deepStrictEqual(claimed, [B.LIMITS.maxTotalRuns], header);
   assert.ok(!/500|overnight/.test(header), header);
 });
+
+// videoOn without videoKbps flew makeSwarm's default bitrate while the report
+// header named another, so the video-loss column read against the wrong load.
+test('the batch report names the video bitrate the runs actually flew', () => {
+  const cfg = features => ({ label: 'v', radio: 'rfd900x', env: 'suburban', airframe: 'q450', terrain: 'flat',
+    count: 4, durationSec: 60, seeds: [11], mission: { targetX: 300, targetY: -100 }, features });
+  const implicit = B.runBatch(cfg({ videoOn: true }));
+  const m = implicit.md.match(/video backhaul at (\d+) kbps/);
+  assert.ok(m, implicit.md);
+  const named = B.runBatch(cfg({ videoOn: true, videoKbps: +m[1] }));
+  assert.deepStrictEqual(implicit.rows, named.rows, 'the report says ' + m[1] + ' kbps; the runs must be that experiment');
+});
