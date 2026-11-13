@@ -1280,8 +1280,16 @@
   });
 
   // --- Canvas interaction ---------------------------------------------------
-  let dragMode = null; // 'target' | 'pan' | 'orbit' | 'jammer' | 'pinch'
+  let dragMode = null; // 'pending' | 'target' | 'base' | 'pan' | 'orbit' | 'jammer' | 'zone' | 'pinch'
   let lastMouse = null;
+  // Taps select, drags move (audit ui-render/tap-drone-moves-target). A press
+  // on something only notes what is under it ('pending'); moving past the
+  // slop turns it into a drag of the nearest draggable object, and releasing
+  // before that is a tap on the nearest thing hit. On phones every orbiting
+  // drone sits inside the target's widened hit radius, so grabbing on press
+  // moved the objective instead of selecting the drone.
+  const DRAG_SLOP_PX = { mouse: 4, touch: 8 }; // CSS px, scaled by uiScale
+  let press = null; // { p, w, drag: { kind, obj, x, y } | null, tap: { kind, obj } | null }
   let lastHopsHtml = null, lastFleetHtml = null, lastEvHtml = null; // O7 panel-diff caches
   const pointers = new Map(); // active pointers on the canvas — 2 fingers = pinch zoom
   let lastPinch = null;       // { dist, mid } of the previous pinch frame
@@ -1317,40 +1325,36 @@
       return;
     }
     const w = screenToWorld(view, cv, p.x, p.y);
-    // Interference source hit test first (they're draggable, like the target)
-    let jHit = null;
-    for (const j of swarm.jammers) {
-      const js = worldToScreen(view, cv, j.x, j.y);
-      if (Math.hypot(p.x - js.x, p.y - js.y) < 16 * hitU) { jHit = j; break; }
-    }
-    let zHit = null;
-    for (const z of (swarm.gpsZones || [])) {
-      const zs = worldToScreen(view, cv, z.x, z.y);
-      if (Math.hypot(p.x - zs.x, p.y - zs.y) < 16 * hitU) { zHit = z; break; }
-    }
-    const tScreen = worldToScreen(view, cv, swarm.target.x, swarm.target.y);
-    const bScreen = worldToScreen(view, cv, swarm.base.x, swarm.base.y);
-    if (jHit) {
-      selectedJammer = jHit; selectedZone = null; dragMode = 'jammer'; updateJammerPanel(); updateZonePanel();
-    } else if (zHit) {
-      selectedZone = zHit; selectedJammer = null; dragMode = 'zone'; updateZonePanel(); updateJammerPanel();
-    } else if (Math.hypot(p.x - tScreen.x, p.y - tScreen.y) < 26 * hitU) {
-      dragMode = 'target';
-    } else if (Math.hypot(p.x - bScreen.x, p.y - bScreen.y) < 26 * hitU) {
-      dragMode = 'base'; // the operator moves too — chain re-plans live
+    // Everything under the press (screen space): interference sources, GPS
+    // zones, the target and the operator are draggable; drones are tap-only.
+    const hits = [];
+    const hitTest = (kind, obj, radius) => {
+      const s = worldToScreen(view, cv, obj.x, obj.y);
+      const dist = Math.hypot(p.x - s.x, p.y - s.y);
+      if (dist < radius * hitU) hits.push({ kind, obj, dist });
+    };
+    for (const j of swarm.jammers) hitTest('jammer', j, 16);
+    for (const z of (swarm.gpsZones || [])) hitTest('zone', z, 16);
+    hitTest('target', swarm.target, 26);
+    hitTest('base', swarm.base, 26); // the operator moves too — chain re-plans live
+    for (const d of swarm.drones) hitTest('drone', d, 14);
+    const nearest = list => list.reduce((a, h) => (!a || h.dist < a.dist ? h : a), null);
+    if (hits.length) {
+      const g = nearest(hits.filter(h => h.kind !== 'drone'));
+      press = { p, w, drag: g && { kind: g.kind, obj: g.obj, x: g.obj.x, y: g.obj.y }, tap: nearest(hits) };
+      dragMode = 'pending';
     } else {
-      // Drone hit test (screen space)
-      let hit = null;
-      for (const d of swarm.drones) {
-        const s = worldToScreen(view, cv, d.x, d.y);
-        if (Math.hypot(p.x - s.x, p.y - s.y) < 14 * hitU) { hit = d; break; }
-      }
-      if (hit) { selected = hit; dragMode = null; }
-      else dragMode = 'pan';
+      dragMode = 'pan';
     }
     lastMouse = p;
     cv.setPointerCapture(e.pointerId);
   });
+
+  function selectSource(kind, obj) {
+    if (kind === 'jammer') { selectedJammer = obj; selectedZone = null; }
+    else { selectedZone = obj; selectedJammer = null; }
+    updateJammerPanel(); updateZonePanel();
+  }
 
   cv.addEventListener('pointermove', e => {
     const p = canvasPos(e);
@@ -1384,18 +1388,21 @@
       lastMouse = p;
       return;
     }
-    if (dragMode === 'target') {
-      const w = screenToWorld(view, cv, p.x, p.y);
-      swarm.target.x = w.x; swarm.target.y = w.y;
-    } else if (dragMode === 'base') {
-      const w = screenToWorld(view, cv, p.x, p.y);
-      swarm.base.x = w.x; swarm.base.y = w.y;
-    } else if (dragMode === 'jammer' && selectedJammer) {
-      const w = screenToWorld(view, cv, p.x, p.y);
-      selectedJammer.x = w.x; selectedJammer.y = w.y;
-    } else if (dragMode === 'zone' && selectedZone) {
-      const w = screenToWorld(view, cv, p.x, p.y);
-      selectedZone.x = w.x; selectedZone.y = w.y;
+    if (dragMode === 'pending') {
+      const slop = (DRAG_SLOP_PX[e.pointerType] || DRAG_SLOP_PX.mouse) * (window.uiScale || 1);
+      if (Math.hypot(p.x - press.p.x, p.y - press.p.y) <= slop) return;
+      const g = press.drag;
+      if (!g) dragMode = 'pan'; // pressed only drones: the drag pans the map
+      else {
+        dragMode = g.kind;
+        if (g.kind === 'jammer' || g.kind === 'zone') selectSource(g.kind, g.obj);
+      }
+    }
+    if (press && press.drag && dragMode === press.drag.kind) {
+      // Keep the grab offset: the object follows the pointer's motion and
+      // never jumps to where the press landed.
+      const w = screenToWorld(view, cv, p.x, p.y), g = press.drag;
+      g.obj.x = g.x + (w.x - press.w.x); g.obj.y = g.y + (w.y - press.w.y);
     }
     recordDrag();
     if (dragMode === 'pan' && lastMouse) {
@@ -1421,13 +1428,19 @@
       // cleanly rather than falling back into a surprise pan.
       if (pointers.size < 2) { dragMode = null; lastPinch = null; }
     } else {
+      // Released before the slop: a tap. It selects a drone or a source and
+      // never moves anything, so nothing goes into the capture.
+      const tap = dragMode === 'pending' && press.tap;
+      if (tap && tap.kind === 'drone') { selected = tap.obj; syncKillBtn(); }
+      else if (tap && (tap.kind === 'jammer' || tap.kind === 'zone')) selectSource(tap.kind, tap.obj);
       dragMode = null;
+      press = null;
     }
     lastMouse = null;
   });
   cv.addEventListener('pointercancel', e => {
     pointers.delete(e.pointerId);
-    dragMode = null; lastPinch = null; lastMouse = null;
+    dragMode = null; lastPinch = null; lastMouse = null; press = null;
   });
 
   cv.addEventListener('wheel', e => {
