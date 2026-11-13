@@ -52,9 +52,10 @@ Rules:
   knowledge honest. C2 code may only read `s.c2.*` (its beliefs); drone code
   may only read its own fields; only physics reads truth. If your feature
   needs a node to know something, send it a packet. One known simplification:
-  drone-side energy planning (smart-RTH and order feasibility) plans from
-  the drone's belief position and last-known base but reads the true wind
-  vector, because no onboard wind estimate is modelled.
+  drone-side leg planning (smart-RTH, order feasibility and the relink
+  transit allowance) plans from the drone's belief position and last-known
+  base but reads the true wind vector, because no onboard wind estimate is
+  modelled.
 - **Determinism**: never call `Math.random()` in simulation code — use the
   seeded RNG (`s.net.rng` / `gaussian(s.net.rng)`). Same seed must produce a
   bit-identical run; `test/hygiene.test.js` fails on any `Math.random` call
