@@ -1029,7 +1029,9 @@ function stepNet(s, dt) {
     const intermediate = nodePos(s, to);
     const aliveAtHop = intermediate && (alive(intermediate) || (intermediate.endpointDeadAt != null && intermediate.endpointDeadAt >= p.tArrive));
     if (!aliveAtHop) {
-      discardPacket(s, p, 'dead-dst');
+      // the hop just received is the one whose receiver died (p.hop has moved on)
+      dropPacketBookkeeping(s, p, 'dead-dst', from, to, p.marginDb);
+      p._gone = true;
       continue;
     }
 
