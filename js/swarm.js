@@ -159,6 +159,12 @@ function droneCadence(d) {
   return d.linkCadence || { tlmSec: C2.tlmIntervalSec, cmdSec: C2.cmdIntervalSec };
 }
 
+// C2 silence before the drone holds: three announced order rounds, never
+// under FAILSAFE.holdSec (like PX4's COM_DL_LOSS_T).
+function holdAfterSec(d) {
+  return Math.max(FAILSAFE.holdSec, 3 * droneCadence(d).cmdSec);
+}
+
 let droneSeq = 0;
 const droneBootSeq = new WeakMap();
 
@@ -1844,7 +1850,7 @@ function droneComms(s, d) {
   // Link-loss failsafe ladder. Timeouts scale with the expected command rate
   // (like PX4's COM_DL_LOSS_T) so a slow duty-limited link isn't mistaken for
   // a dead one — the rate C2 last advertised, not one read off its plan.
-  const holdAfter = Math.max(FAILSAFE.holdSec, 3 * droneCadence(d).cmdSec);
+  const holdAfter = holdAfterSec(d);
   const rtlAfter = d.order.role === 'relay'
     ? Math.max(FAILSAFE.rtlRelaySec, 3 * holdAfter)
     : Math.max(FAILSAFE.rtlMissionSec, 2 * holdAfter);
@@ -2507,6 +2513,10 @@ function stepSwarm(s, dt) {
       d.swapAt = null;
       d.lastC2 = s.time;
       d.order = { role: 'mission', slot: -1, k: 0, upstream: 'C2', target: { x: s.target.x, y: s.target.y } };
+      // A decline spoke for the old pack: one not yet reported (RTB stops
+      // telemetry) must not bench the drone on its fresh one. rejectSeq keeps
+      // counting, so C2 just marks the old decline seen.
+      d.rejectedRole = null; d.rejectedSig = null;
       if (s.stats) s.stats.swaps = (s.stats.swaps || 0) + 1; // one completed swap, counted once
       logEvent(s, d.id + ' battery swapped — relaunching', 'info');
     }
@@ -2623,8 +2633,11 @@ function explainDroneDecision(s, d) {
   const af = afOf(s, d);
   const groundSpeedMs = Math.hypot(d.vx, d.vy); // d.vx/vy are ground velocity, wind included
   const homeK = d.baseKnown || s.base;
-  const gHome = groundSpeedAlong(af, s.wind, d, homeK);
-  const secsHome = gHome > 0.05 ? dist2d(d, homeK) / gHome : Infinity;
+  // Priced as updateBattery prices it — from the nav belief — so the card
+  // explains the call the drone actually made.
+  const here = { x: d.belX, y: d.belY };
+  const gHome = groundSpeedAlong(af, s.wind, here, homeK);
+  const secsHome = gHome > 0.05 ? dist2d(here, homeK) / gHome : Infinity;
   const homeFlyable = isFinite(secsHome);
   const whHome = flightPowerW(af, af.maxSpeedMs) * secsHome / 3600 * BATTERY.homeMargin;
   // An unflyable home leg has no finite energy cost: report null, not Infinity
@@ -2637,6 +2650,9 @@ function explainDroneDecision(s, d) {
   let summary = '';
   if (d.mode === 'dead') {
     summary = 'Vehicle down (destroyed or battery exhausted)';
+  } else if (d.mode === 'landed' && d.swapAt == null) {
+    // Set down at a stale last-known home: no crew there, no relaunch.
+    summary = 'Landed at its last-known base — no ground crew there to swap the battery';
   } else if (d.mode === 'landed') {
     summary = 'Landed on base pad (swapping or waiting for launch)';
   } else if (d.mode === 'rtb' && !homeFlyable) {
@@ -2648,7 +2664,7 @@ function explainDroneDecision(s, d) {
   } else if (d.mode === 'relink') {
     summary = 'Regaining link (attempt ' + (d.relinkAttempt || 1) + '/' + FAILSAFE.relinkAttempts + '): retreating to last-known good link point';
   } else if (d.mode === 'hold') {
-    summary = 'Holding position: C2 link lost (' + silenceSec.toFixed(1) + 's silence, threshold ' + FAILSAFE.holdSec + 's)';
+    summary = 'Holding position: C2 link lost (' + silenceSec.toFixed(1) + 's silence, threshold ' + holdAfterSec(d).toFixed(1) + 's)';
   } else if (d.tethered) {
     summary = 'Tethered: upstream margin to ' + (d.order.upstream || 'neighbor') + ' degraded to ' + (d.upMarginEma != null ? d.upMarginEma.toFixed(1) : '?') + ' dB — throttling outward motion to protect chain';
   } else if (d.order && d.order.role === 'relay') {

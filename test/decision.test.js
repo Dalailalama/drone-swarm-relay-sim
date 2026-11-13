@@ -61,8 +61,9 @@ test('Item 9: explainDroneDecision provides plain-English reasons and measuremen
   assert.strictEqual(expRtb.mode, 'rtb');
   assert.ok(expRtb.summary.includes('Returning to base: low battery'));
 
-  // 8. Landed mode
+  // 8. Landed mode (at base, the crew swapping the pack)
   d.mode = 'landed';
+  d.swapAt = s.time + 90;
   const expLanded = ctx.explainDroneDecision(s, d);
   assert.strictEqual(expLanded.mode, 'landed');
   assert.ok(expLanded.summary.includes('Landed on base pad'));
@@ -136,4 +137,60 @@ test('a drone landed for a swap is shown as landed, not as down', () => {
   ui.ctx.__raf.pump(200);
   ui.ctx.__raf.pump(200);
   assert.ok(ui.el('droneDecisionCard').innerHTML.includes('is down'));
+});
+
+// The card explains the drone's own RTB call, which prices the home leg from
+// its nav belief (audit EN-8). Priced from truth, a GNSS-denied drone that
+// turned for home was explained as needing less than half the energy it had.
+test('the RTB explanation prices the home leg from the nav belief the drone decided on', () => {
+  const ctx = loadCore();
+  const SIK = R.RADIOS.find(r => r.id === 'sik-v3');
+  const Q450 = A.AIRFRAMES.find(a => a.id === 'q450');
+  const s = ctx.makeSwarm({ count: 1, seed: 101, radio: SIK, airframe: Q450, targetX: 3000, targetY: 0 });
+  const d = s.drones[0];
+  d.x = 100; d.y = 0; d.belX = 3000; d.belY = 0; d.gpsDenied = true; // truth near home, belief 3 km out
+  const pw = A.flightPowerW(Q450, Q450.maxSpeedMs);
+  d.energyWh = A.usableWh(Q450) * 0.07 + pw * (1500 / Q450.maxSpeedMs) / 3600 * 1.3; // between the two home legs
+  ctx.updateBattery(s, d, 0.05, 0);
+  assert.strictEqual(d.mode, 'rtb', 'setup: the drone turns for home on its belief');
+  const exp = ctx.explainDroneDecision(s, d);
+  assert.ok(exp.requiredWh >= d.energyWh,
+    'the card says it needs ' + exp.requiredWh.toFixed(1) + ' Wh with ' + d.energyWh.toFixed(1) + ' Wh left, yet it turned for home');
+});
+
+// A drone holds after 3 order rounds of silence at the cadence C2 announced
+// (never under FAILSAFE.holdSec); on a slow link that is far past 8 s.
+test('the hold explanation quotes the silence threshold the drone actually holds at', () => {
+  const ctx = loadCore();
+  const s = ctx.makeSwarm({ count: 1, seed: 101, radio: R.RADIOS[0], airframe: A.AIRFRAMES[0] });
+  const d = s.drones[0];
+  d.linkCadence = { tlmSec: 30, cmdSec: 40 }; // a slow link: one order round every 40 s
+  s.time = 300;
+  d.lastC2 = s.time - 100;
+  ctx.droneComms(s, d);
+  assert.strictEqual(d.mode, 'ok', 'setup: 100 s is inside the 120 s tolerance');
+  d.lastC2 = s.time - 125;
+  ctx.droneComms(s, d);
+  assert.strictEqual(d.mode, 'hold', 'setup: 125 s is past it');
+  const exp = ctx.explainDroneDecision(s, d);
+  assert.ok(/threshold 120(\.0)?\s?s/.test(exp.summary), exp.summary);
+});
+
+// A drone that set down at a stale last-known home has no crew to swap it
+// and never relaunches (ONB-01); the card must not promise a swap.
+test('a drone landed at a stale home is not explained as swapping on the base pad', () => {
+  const ctx = loadCore();
+  const SIK = R.RADIOS.find(r => r.id === 'sik-v3');
+  const Q450 = A.AIRFRAMES.find(a => a.id === 'q450');
+  const s = ctx.makeSwarm({ count: 1, seed: 42, radio: SIK, airframe: Q450, targetX: 600, targetY: 0 });
+  const d = s.drones[0];
+  s.c2.nextCmd = Infinity;
+  d.x = d.belX = 1500; d.y = d.belY = 0; d.vx = d.vy = 0;
+  d.mode = 'rtb';
+  s.base.x = 0; s.base.y = 3000; // operator relocates while the drone is deaf
+  while (s.time < 600 && d.mode === 'rtb') ctx.stepSwarm(s, 0.05);
+  assert.strictEqual(d.mode, 'landed', 'setup');
+  assert.strictEqual(d.swapAt, null, 'setup: no crew at the stale home');
+  const exp = ctx.explainDroneDecision(s, d);
+  assert.ok(!/swapping|base pad/.test(exp.summary), exp.summary);
 });
