@@ -126,6 +126,12 @@ test('compare sizes its default duration from the missions, so the CLI defaults 
   assert.strictEqual(censoredMedian([3, null, null]), Infinity);
 });
 
+// Same seed => bit-identical run (the batch engine already refuses repeats):
+// --seeds 101,101,101 reported ±0.0 on every column, a copy read as certainty.
+test('compare refuses repeated seeds instead of shrinking every spread to zero', () => {
+  assert.throws(() => compareScenarios(['ddil-limited'], { seeds: [101, 101], durationSec: 1 }), /distinct/);
+});
+
 // audit swarm-onboard/TOOL-01: 'Uptime' read fleetConnSec (C2 reaches a
 // mission drone anywhere), so a scenario with 0% objective uptime showed 76%.
 test('compare Uptime is the objective-connected metric; fleet contact is its own column', () => {

@@ -222,6 +222,9 @@ function runScenarioSeed(ctx, scenarioObj, seed, durationSec) {
 function compareScenarios(scenarioSpecs, options = {}) {
   const ctx = loadCore(['scenarios.js']);
   const seeds = options.seeds || [101, 102, 103, 104, 105];
+  // A repeated seed is a bit-identical copy, not a sample: it would shrink
+  // every reported ± toward zero (batch.js refuses them the same way).
+  if (new Set(seeds).size !== seeds.length) throw new Error('seeds must be distinct: ' + seeds.join(','));
   const scenarios = scenarioSpecs.map(resolveScenario);
   // No duration given: long enough for every scenario's transit, so the
   // arrival column is not N/A by construction. A shorter explicit one warns.
