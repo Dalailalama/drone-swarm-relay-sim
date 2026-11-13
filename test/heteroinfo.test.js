@@ -15,9 +15,9 @@ function heteroOn() {
 
 test('tactical radio change refreshes the band warning', () => {
   const { el, fire } = heteroOn();
-  assert.doesNotMatch(el('heteroInfo').innerHTML, /different band/);
+  assert.doesNotMatch(el('heteroInfo').innerHTML, /different radio protocol\/band/);
   el('radioSel').value = 'espnow'; fire('radioSel', 'change');
-  assert.match(el('heteroInfo').innerHTML, /different band/);
+  assert.match(el('heteroInfo').innerHTML, /different radio protocol\/band/);
   assert.match(el('heteroInfo').innerHTML, /ESP-NOW/);
 });
 
@@ -44,5 +44,5 @@ test('a loaded hetero scenario describes the file\'s wing and tactical radios', 
   fire('loadScenarioInput', 'change');
   assert.deepStrictEqual(ctx.__alerts, []);
   assert.match(el('heteroInfo').innerHTML, /ESP-NOW/);
-  assert.match(el('heteroInfo').innerHTML, /different band/);
+  assert.match(el('heteroInfo').innerHTML, /different radio protocol\/band/);
 });
