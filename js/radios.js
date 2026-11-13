@@ -222,7 +222,9 @@ function radioHorizonM(h1M, h2M) {
 
 // Probability a single packet transmission succeeds, given the link's mean
 // margin above sensitivity. Logistic curve: ~16% at 0 dB, 50% at 2 dB,
-// ~95% at 6 dB — the reason nobody plans a link at 0 dB margin.
+// ~97% at 6 dB — the reason nobody plans a link at 0 dB margin. Datasheet
+// sensitivity is quoted at a low error rate, so this is pessimistic at 0 dB:
+// the rated range (margin 0) is the model's ~84%-loss edge (RADIOS.md).
 function pktSuccessProb(marginDb) {
   return 1 / (1 + Math.exp(-(marginDb - 2) / 1.2));
 }

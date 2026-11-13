@@ -50,6 +50,26 @@ test('packet success probability: anchor points of the logistic', () => {
   assert.ok(R.pktSuccessProb(20) > 0.999, 'near-perfect at +20 dB');
 });
 
+// Audit rf-physics/per-curve-vs-sensitivity-definition: datasheet
+// sensitivities are quoted at a low error rate (SX1276 FSK: 0.1% BER), but the
+// model puts 0 dB margin at the rated range and delivers ~16% there. The
+// chosen semantics (keep the curve, call the rated range the ~84%-loss edge)
+// must be stated where the presets and the curve live, with the right numbers.
+test('the packet-success curve\'s meaning at datasheet sensitivity is documented', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  assert.ok(Math.abs(R.pktSuccessProb(0) - 0.159) < 0.001, 'pinned: ~16% at 0 dB');
+  assert.ok(Math.abs(R.pktSuccessProb(6) - 0.966) < 0.001, 'pinned: ~97% at +6 dB');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'js/radios.js'), 'utf8');
+  const at = src.indexOf('function pktSuccessProb');
+  const doc = src.slice(at - 600, at); // the comment above the curve
+  assert.doesNotMatch(doc, /~95% at 6 dB/, 'P(6 dB) is 96.6%');
+  assert.match(doc, /~97% at 6 dB/);
+  const md = fs.readFileSync(path.join(__dirname, '..', 'RADIOS.md'), 'utf8');
+  assert.match(md, /84%-loss/, 'RADIOS.md must say the rated range is the model\'s ~84%-loss edge');
+  assert.match(md, /0\.1% BER/);
+});
+
 test('radio horizon: 4.12(√h1+√h2) km', () => {
   assert.ok(Math.abs(R.radioHorizonM(2, 50) - 34955) < 50);   // ~35.0 km
   assert.ok(Math.abs(R.radioHorizonM(2, 120) - 50956) < 60);  // ~51.0 km

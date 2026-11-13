@@ -7,6 +7,16 @@ The rated LOS range is what the vendor claims (or the community reliably
 reproduces) with the stock antennas listed, near ground level — it is the
 calibration anchor for the path-loss model.
 
+What the anchor means: the path-loss exponent is solved so the link margin
+is 0 dB (the datasheet sensitivity) exactly at the rated range, and the
+model's packet-success curve delivers ~16% of packets at 0 dB (50% at
++2 dB, ~97% at +6 dB; nothing decodes below 0 dB). Datasheets quote
+sensitivity at a low error rate — the SX1276 at 0.1% BER for FSK, so a
+~300-bit frame would still get through about 74% of the time — which makes
+the model pessimistic there: treat the rated range as the model's
+~84%-loss edge. Hops are planned at the 6 dB fade reserve (70% of the rated
+range for the SiK V3), well inside it.
+
 | Preset | Freq | TX | RX sens | Air rate | Rated LOS | Source |
 |---|---|---|---|---|---|---|
 | Holybro SiK V3 telemetry | 915 MHz | 20 dBm | −105 dBm | 64 kbps | 300 m | [Holybro V3 spec](https://docs.holybro.com/radio/sik-telemetry-radio-v3) |
