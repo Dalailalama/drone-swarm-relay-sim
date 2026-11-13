@@ -146,3 +146,29 @@ test('a received C2 packet teaches the drone the new base position (guard)', () 
   assert.ok(d.goalY > 3000,
     'after hearing from C2, home is the real base (goalY=' + (d.goalY == null ? 'null' : d.goalY.toFixed(0)) + ')');
 });
+
+test('ONB-05: a returning drone routes along the spine to its LAST-KNOWN base, not the live one', () => {
+  const s = ctx.makeSwarm({
+    count: 1, airframe: Q450, radio: SIK, envFactor: 1,
+    targetX: 3000, targetY: 0, altitudeM: 50, seed: 42,
+  });
+  const d = s.drones[0];
+  s.c2.nextCmd = Infinity;
+  d.x = d.belX = 3000; d.y = d.belY = 0; d.vx = d.vy = 0;
+  d.mode = 'rtb';
+  s.base.x = 0; s.base.y = 3000; // operator relocates while the drone is deaf
+  let maxAbsY = 0;
+  while (s.time < 600 && d.mode === 'rtb') {
+    ctx.stepSwarm(s, 0.05);
+    maxAbsY = Math.max(maxAbsY, Math.abs(d.y));
+  }
+  assert.ok(maxAbsY < 50,
+    'the corridor bent the return ' + maxAbsY.toFixed(0) + ' m toward a base the drone never heard had moved');
+});
+
+test('ONB-05: a relay slot with no explicit position lies on the line from the C2 that issued the order', () => {
+  const s = mk();
+  s.base.x = 0; s.base.y = 3000; // C2 has since moved; the order predates that
+  const p = ctx.slotFromOrder(s, { role: 'relay', slot: 0, k: 1, target: { x: 1000, y: 0 }, c2: { x: 0, y: 0, at: 0 } });
+  assert.deepStrictEqual({ x: p.x, y: p.y }, { x: 500, y: 0 });
+});

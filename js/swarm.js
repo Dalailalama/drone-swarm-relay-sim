@@ -1037,12 +1037,15 @@ function liveMarginDb(s, aId, bId) {
 function corridorGoal(s, d, g) {
   if (!s.corridorRouting) return g;
   const hop = usableRangeM(droneRadio(d) || s.radio, s.envFactor) * 0.8;
-  if (dist2d(d, g) <= hop) return g;                    // final hop: go direct
-  const B = s.base, T = d.order.target;
+  // From where the drone BELIEVES it is, along the spine from the base it
+  // last LEARNED (finding #18) — the live base bent silent returns (ONB-05).
+  const me = { x: d.belX, y: d.belY };
+  if (dist2d(me, g) <= hop) return g;                   // final hop: go direct
+  const B = d.baseKnown || s.base, T = d.order.target;
   const L = dist2d(B, T);
   if (L < 1) return g;
   const ux = (T.x - B.x) / L, uy = (T.y - B.y) / L;
-  const tMe = Math.max(0, Math.min(L, (d.x - B.x) * ux + (d.y - B.y) * uy));
+  const tMe = Math.max(0, Math.min(L, (me.x - B.x) * ux + (me.y - B.y) * uy));
   const tGoal = Math.max(0, Math.min(L, (g.x - B.x) * ux + (g.y - B.y) * uy));
   if (Math.abs(tGoal - tMe) < hop * 0.5) return g;      // same stretch: direct
   const step = Math.sign(tGoal - tMe) * Math.min(hop * 0.75, Math.abs(tGoal - tMe));
@@ -1101,13 +1104,16 @@ function orderFeasible(s, d, order) {
 }
 
 // Slot i of k relays: fraction (i+1)/(k+1) along base → ordered target.
-// If C2 supplied an explicit (coverage-adjusted) position, that wins.
+// If C2 supplied an explicit (coverage-adjusted) position, that wins. The
+// base is the one the order itself names (C2's position rides in it), so a
+// drone never reads the live base; C2's own call passes none and uses its own.
 function slotFromOrder(s, order) {
   if (order.slotPos) return order.slotPos;
   const f = (order.slot + 1) / (order.k + 1);
+  const B = order.c2 || s.base;
   return {
-    x: s.base.x + (order.target.x - s.base.x) * f,
-    y: s.base.y + (order.target.y - s.base.y) * f,
+    x: B.x + (order.target.x - B.x) * f,
+    y: B.y + (order.target.y - B.y) * f,
   };
 }
 

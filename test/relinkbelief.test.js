@@ -28,7 +28,7 @@ test('ONB-02: GNSS-denied, the relink ladder still advances to rtl well before t
   const s = mk({ gpsZones: [{ id: 'GZ-1', x: 0, y: 0, rM: 5000, on: true }] });
   const d = s.drones[0];
   let relinkAt = null, hold = null, holdDrift = null;
-  while (s.time < 1500 && d.mode !== 'rtl' && d.mode !== 'rtb' && alive(d)) {
+  while (s.time < 1500 && (d.mode === 'ok' || d.mode === 'hold' || d.mode === 'relink')) {
     if (s.time >= 120) s.c2.nextCmd = Infinity; // C2 falls silent
     const before = d.mode;
     ctx.stepSwarm(s, DT);
@@ -39,7 +39,9 @@ test('ONB-02: GNSS-denied, the relink ladder still advances to rtl well before t
   assert.ok(hold && holdDrift != null, 'the drone must hold for 20 s first');
   assert.ok(holdDrift < 5, 'holding moved the nav belief ' + holdDrift.toFixed(1) + ' m — it chased its truth position');
   assert.ok(relinkAt != null, 'the ladder must reach relink');
-  assert.strictEqual(d.mode, 'rtl', 'ended ' + d.mode + ' at t=' + s.time.toFixed(0) + ' s, attempt ' + d.relinkAttempt);
+  // The ladder's end is rtl — or straight to 'landed' when the last point was home already.
+  assert.ok(s.events.some(e => e.msg.startsWith(d.id + ' no contact after')) && (d.mode === 'rtl' || d.mode === 'landed'),
+    'ended ' + d.mode + ' at t=' + s.time.toFixed(0) + ' s, attempt ' + d.relinkAttempt);
   assert.ok(s.time - relinkAt < 400, 'rtl took ' + (s.time - relinkAt).toFixed(0) + ' s after relink began');
 });
 
@@ -66,5 +68,3 @@ test('ONB-02: a relink point inside a tower times out and the ladder moves on', 
     'stuck in attempt ' + d.relinkAttempt + ' (' + d.mode + ') at t=' + s.time.toFixed(0) + ' s');
   assert.ok(s.time - attempt2At < 300, 'attempt 2 lasted ' + (s.time - attempt2At).toFixed(0) + ' s');
 });
-
-function alive(d) { return d.mode !== 'dead' && d.mode !== 'landed'; }
