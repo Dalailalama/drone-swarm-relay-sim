@@ -2615,8 +2615,11 @@ function explainDroneDecision(s, d) {
   const af = afOf(s, d);
   const groundSpeedMs = Math.hypot(d.vx, d.vy); // d.vx/vy are ground velocity, wind included
   const homeK = d.baseKnown || s.base;
-  const gHome = groundSpeedAlong(af, s.wind, d, homeK);
-  const secsHome = gHome > 0.05 ? dist2d(d, homeK) / gHome : Infinity;
+  // Priced as updateBattery prices it — from the nav belief — so the card
+  // explains the call the drone actually made.
+  const here = { x: d.belX, y: d.belY };
+  const gHome = groundSpeedAlong(af, s.wind, here, homeK);
+  const secsHome = gHome > 0.05 ? dist2d(here, homeK) / gHome : Infinity;
   const homeFlyable = isFinite(secsHome);
   const whHome = flightPowerW(af, af.maxSpeedMs) * secsHome / 3600 * BATTERY.homeMargin;
   // An unflyable home leg has no finite energy cost: report null, not Infinity

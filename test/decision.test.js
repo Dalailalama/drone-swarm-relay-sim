@@ -137,3 +137,22 @@ test('a drone landed for a swap is shown as landed, not as down', () => {
   ui.ctx.__raf.pump(200);
   assert.ok(ui.el('droneDecisionCard').innerHTML.includes('is down'));
 });
+
+// The card explains the drone's own RTB call, which prices the home leg from
+// its nav belief (audit EN-8). Priced from truth, a GNSS-denied drone that
+// turned for home was explained as needing less than half the energy it had.
+test('the RTB explanation prices the home leg from the nav belief the drone decided on', () => {
+  const ctx = loadCore();
+  const SIK = R.RADIOS.find(r => r.id === 'sik-v3');
+  const Q450 = A.AIRFRAMES.find(a => a.id === 'q450');
+  const s = ctx.makeSwarm({ count: 1, seed: 101, radio: SIK, airframe: Q450, targetX: 3000, targetY: 0 });
+  const d = s.drones[0];
+  d.x = 100; d.y = 0; d.belX = 3000; d.belY = 0; d.gpsDenied = true; // truth near home, belief 3 km out
+  const pw = A.flightPowerW(Q450, Q450.maxSpeedMs);
+  d.energyWh = A.usableWh(Q450) * 0.07 + pw * (1500 / Q450.maxSpeedMs) / 3600 * 1.3; // between the two home legs
+  ctx.updateBattery(s, d, 0.05, 0);
+  assert.strictEqual(d.mode, 'rtb', 'setup: the drone turns for home on its belief');
+  const exp = ctx.explainDroneDecision(s, d);
+  assert.ok(exp.requiredWh >= d.energyWh,
+    'the card says it needs ' + exp.requiredWh.toFixed(1) + ' Wh with ' + d.energyWh.toFixed(1) + ' Wh left, yet it turned for home');
+});
