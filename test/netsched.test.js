@@ -558,6 +558,28 @@ test('NET-06: a relay death invalidates the cached C2 tree on the same tick', ()
   assert.strictEqual(ctx.pathToC2(s, far.id), null, 'route through a dead relay');
 });
 
+// A relay radio picked on the page while the relay wing is off flies on no
+// drone, yet it widened the C2 tree's candidate-link span, so the page and
+// the replay of its capture (which leaves the unflown radio out) could build
+// different routes.
+test('C2 tree: a relay radio with no relay wing does not change the routes', () => {
+  const RFD = R.RADIOS.find(r => r.id === 'rfd900x');
+  const X8 = A.AIRFRAMES.find(a => a.id === 'x8');
+  const route = relayRadio => {
+    const s = ctx.makeSwarm({
+      count: 1, airframe: Q450, radio: SIK, envFactor: 1, targetX: 600, targetY: 0,
+      altitudeM: 50, seed: 42, relayWing: 0, relayAirframe: X8, relayRadio,
+    });
+    s.time = 0;
+    const d = s.drones[0];
+    d.x = 3 * ctx.usableRangeM(SIK, 1); d.y = 0; // past the SiK fleet's 2.5x search span
+    s.net.fades.set('C2|' + d.id, { db: 40, lastUsed: 0 }); // a deep up-fade keeps it linked
+    const p = ctx.pathToC2(s, d.id);
+    return p && p.join('>');
+  };
+  assert.strictEqual(route(RFD), route(null));
+});
+
 // NET-04: a drone that never heard a broadcast order table produced no drop
 // anywhere, so broadcast C2 reported 0 % loss where unicast reported 50 % for
 // the same unreachable drone. Broadcast reach is now scored per addressed

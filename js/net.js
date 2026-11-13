@@ -737,7 +737,11 @@ function c2Tree(s) {
   const done = new Set();
   rank.set('C2', 0);
   dist.set('C2', 0);
-  const maxRadio = (s.relayRadio && s.relayRadio.rangeLosM > s.radio.rangeLosM) ? s.relayRadio : s.radio;
+  // Only a flying relay wing carries the relay radio (chainRadio): a relay
+  // radio merely selected for a homogeneous fleet must not widen the search
+  // (the capture omits it, so replays diverged from the page).
+  const wingRadio = chainRadio(s);
+  const maxRadio = wingRadio.rangeLosM > s.radio.rangeLosM ? wingRadio : s.radio;
   const maxSpan = usableRangeM(maxRadio, s.envFactor) * 2.5;
   for (;;) {
     let cur = null, best = Infinity;
