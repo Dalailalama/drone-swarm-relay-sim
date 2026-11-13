@@ -41,6 +41,7 @@ const FAILSAFE = {
   relinkArriveM: 40,   // "close enough" to an attempt point
   relinkAttempts: 3,   // tries before giving up and flying home to C2
   relinkStepFrac: 0.7, // each failed attempt falls back this fraction of usable range toward base
+  relinkTransitFactor: 2, // an unreachable point expires after this × its straight-line transit + the listen time
 };
 
 const RESCUE = {
@@ -146,6 +147,13 @@ function c2StaleAfterSec(s) {
   return Math.max(C2.staleSec, 3 * tlmIntervalSec(s));
 }
 
+// The cadence a DRONE times itself by: what it was last told (launch
+// briefing, then every order — a GCS sets SR*/COM_DL_LOSS_T the same way),
+// never C2's private plan or the channel's internals (audit ONB-06).
+function droneCadence(d) {
+  return d.linkCadence || { tlmSec: C2.tlmIntervalSec, cmdSec: C2.cmdIntervalSec };
+}
+
 let droneSeq = 0;
 const droneBootSeq = new WeakMap();
 
@@ -178,6 +186,7 @@ function makeDrone(x, y, target, rng, airframe, radio, cls) {
     holdX: 0, holdY: 0,
     lastLinkX: x, lastLinkY: y, // where the link last provably worked
     relinkUntil: null,
+    relinkGiveUpAt: null,
     relinkAttempt: 0,
     relinkGoalX: 0, relinkGoalY: 0,
     rejectedRole: null, rejectedSig: null, rejectSeq: 0,
@@ -194,7 +203,8 @@ function makeDrone(x, y, target, rng, airframe, radio, cls) {
 
 function makeSwarm(opts) {
   droneSeq = 0;
-  const wingOn = !!(opts.relayWing > 0 && opts.relayAirframe && opts.relayRadio);
+  const wingIdx = (opts.relayWing > 0 && opts.relayAirframe && opts.relayRadio)
+    ? relayClassIndices(opts.count, opts.relayWing) : [];
   const s = {
     base: {
       x: (opts.base && opts.base.x != null) ? opts.base.x : (opts.baseX != null ? opts.baseX : 0),
@@ -219,9 +229,9 @@ function makeSwarm(opts) {
     // radio + endurance airframe and hold the chain; the rest fly tactical.
     // Only a flown wing has them: the page passes its selectors even with the
     // wing off, and an unflown radio must not widen routing or draw airtime.
-    relayAirframe: wingOn ? opts.relayAirframe : null,
-    relayRadio: wingOn ? opts.relayRadio : null,
-    relayIdx: wingOn ? relayClassIndices(opts.count, opts.relayWing) : [],
+    relayAirframe: wingIdx.length ? opts.relayAirframe : null,
+    relayRadio: wingIdx.length ? opts.relayRadio : null,
+    relayIdx: wingIdx,
     terrain: opts.terrain || makeTerrain('flat'),
     jammers: opts.jammers ? opts.jammers.map(j => ({ ...j })) : [],
     gpsZones: opts.gpsZones ? opts.gpsZones.map(z => ({ ...z })) : [],
@@ -265,6 +275,9 @@ function makeSwarm(opts) {
     dr.baseKnown = { x: s.base.x, y: s.base.y, at: 0 };
     s.drones.push(dr);
   }
+  // ...and the link cadence C2 will open with; orders retune it later.
+  const cadence = { tlmSec: tlmIntervalSec(s), cmdSec: cmdIntervalSec(s, s.drones.length) };
+  for (const dr of s.drones) dr.linkCadence = { ...cadence };
   s.initialSettings = captureInitialSettings(s);
   return s;
 }
@@ -1104,12 +1117,15 @@ function liveMarginDb(s, aId, bId) {
 function corridorGoal(s, d, g) {
   if (!s.corridorRouting) return g;
   const hop = usableRangeM(droneRadio(d) || s.radio, s.envFactor, planLossDb(s)) * 0.8;
-  if (dist2d(d, g) <= hop) return g;                    // final hop: go direct
-  const B = s.base, T = d.order.target;
+  // From where the drone BELIEVES it is, along the spine from the base it
+  // last LEARNED (finding #18) — the live base bent silent returns (ONB-05).
+  const me = { x: d.belX, y: d.belY };
+  if (dist2d(me, g) <= hop) return g;                   // final hop: go direct
+  const B = d.baseKnown || s.base, T = d.order.target;
   const L = dist2d(B, T);
   if (L < 1) return g;
   const ux = (T.x - B.x) / L, uy = (T.y - B.y) / L;
-  const tMe = Math.max(0, Math.min(L, (d.x - B.x) * ux + (d.y - B.y) * uy));
+  const tMe = Math.max(0, Math.min(L, (me.x - B.x) * ux + (me.y - B.y) * uy));
   const tGoal = Math.max(0, Math.min(L, (g.x - B.x) * ux + (g.y - B.y) * uy));
   if (Math.abs(tGoal - tMe) < hop * 0.5) return g;      // same stretch: direct
   const step = Math.sign(tGoal - tMe) * Math.min(hop * 0.75, Math.abs(tGoal - tMe));
@@ -1174,13 +1190,16 @@ function orderEnergyWh(s, d, order) {
 }
 
 // Slot i of k relays: fraction (i+1)/(k+1) along base → ordered target.
-// If C2 supplied an explicit (coverage-adjusted) position, that wins.
+// If C2 supplied an explicit (coverage-adjusted) position, that wins. The
+// base is the one the order itself names (C2's position rides in it), so a
+// drone never reads the live base; C2's own call passes none and uses its own.
 function slotFromOrder(s, order) {
   if (order.slotPos) return order.slotPos;
   const f = (order.slot + 1) / (order.k + 1);
+  const B = order.c2 || s.base;
   return {
-    x: s.base.x + (order.target.x - s.base.x) * f,
-    y: s.base.y + (order.target.y - s.base.y) * f,
+    x: B.x + (order.target.x - B.x) * f,
+    y: B.y + (order.target.y - B.y) * f,
   };
 }
 
@@ -1558,12 +1577,14 @@ function c2Step(s) {
     };
   };
 
-  const tlmEvery = tlmIntervalSec(s);
+  // The cadence C2 paces traffic at rides in every order, so each drone
+  // times its telemetry and link-loss failsafe from what it was told.
+  const cadence = { tlmSec: tlmIntervalSec(s), cmdSec: cmdIntervalSec(s, s.drones.length) };
   const orderFor = id => {
     const order = buildOrder(id);
     const up = known[order.upstream];
-    order.tlmEvery = tlmEvery;
     order.c2 = { x: s.base.x, y: s.base.y, at: s.time };
+    order.cadence = cadence;
     order.upstreamPos = order.upstream === 'C2' ? { ...order.c2 }
       : up && Number.isFinite(up.posAt) ? { x: up.x, y: up.y, at: up.posAt } : null;
     return order;
@@ -1611,9 +1632,9 @@ function c2Step(s) {
     for (const id of ids) orders[id] = orderFor(id);
     s.c2.bcastSeq += 1;
     const bcastBytes = NET.bcastHeaderBytes + 4 + (NET.bcastRowBytes + 12) * ids.length;
-    sendBroadcast(s, 'C2', { seq: s.c2.bcastSeq, orders, tlmEvery, c2: { x: s.base.x, y: s.base.y, at: s.time } }, bcastBytes);
+    sendBroadcast(s, 'C2', { seq: s.c2.bcastSeq, orders, cadence, c2: { x: s.base.x, y: s.base.y, at: s.time } }, bcastBytes);
     if (s.relayRadio && !bandCompatible(s.radio, s.relayRadio)) {
-      sendBroadcast(s, 'C2', { seq: s.c2.bcastSeq, orders, tlmEvery, c2: { x: s.base.x, y: s.base.y, at: s.time } }, bcastBytes, s.relayRadio);
+      sendBroadcast(s, 'C2', { seq: s.c2.bcastSeq, orders, cadence, c2: { x: s.base.x, y: s.base.y, at: s.time } }, bcastBytes, s.relayRadio);
     }
   } else {
     // Unicast: one routed packet per drone — best effort, dies without a route
@@ -1651,8 +1672,12 @@ function droneComms(s, d) {
     // Any heard C2 transmission proves the link works here — even a
     // broadcast without a row for us (C2 hasn't met us yet)
     d.lastC2 = s.time;
-    d.lastLinkX = d.x; d.lastLinkY = d.y;
+    // Every onboard set-point lives in the frame the drone steers in — its
+    // nav belief. Truth set-points made a GNSS-denied drone chase its own
+    // nav error (audit ONB-02).
+    d.lastLinkX = d.belX; d.lastLinkY = d.belY;
     d.relinkUntil = null;
+    d.relinkGiveUpAt = null;
     d.relinkAttempt = 0;
     // C2's own position rides in every packet it sends (a real GCS streams
     // its location). This is the ONLY way a drone learns the base moved
@@ -1663,10 +1688,13 @@ function droneComms(s, d) {
         Number.isFinite(c2at) && c2at <= s.time && (!d.baseKnown || c2at >= d.baseKnown.at)) {
       d.baseKnown = { x: c2pos.x, y: c2pos.y, at: c2at };
     }
-    // The report interval C2 announces rides in every table, even one
-    // without a row for us yet.
-    const every = p.payload && p.payload.tlmEvery;
-    if (Number.isFinite(every) && every > 0) d.tlmEvery = every;
+    // Link cadence is configuration, not tasking: it rides in every table
+    // (even one without a row for us yet) and every order, and is taken even
+    // from an order the commitment rule goes on to decline.
+    const cad = p.payload && p.payload.cadence;
+    if (cad && Number.isFinite(cad.tlmSec) && Number.isFinite(cad.cmdSec) && cad.tlmSec > 0 && cad.cmdSec > 0) {
+      d.linkCadence = { tlmSec: cad.tlmSec, cmdSec: cad.cmdSec };
+    }
     const inExternalService = (typeof externalServiceActive === 'function' && externalServiceActive(d.id)) ||
                               (typeof ExternalMode !== 'undefined' && ExternalMode.services && ExternalMode.services[d.id] && ExternalMode.services[d.id].phase !== 'failed') ||
                               (typeof window !== 'undefined' && window.ExternalMode && window.ExternalMode.services && window.ExternalMode.services[d.id] && window.ExternalMode.services[d.id].phase !== 'failed');
@@ -1726,8 +1754,7 @@ function droneComms(s, d) {
   // Any dead-zone samples collected while disconnected ride along (black box
   // upload) and are retained until network delivery is confirmed by ACK.
   if (s.time >= d.nextTlm) {
-    // Before C2's first table: the manifest-sized single-hop interval.
-    d.nextTlm = s.time + (d.tlmEvery || tlmIntervalSec(s, 1));
+    d.nextTlm = s.time + droneCadence(d).tlmSec;
     // Report what the drone's navigation believes — GNSS denial poisons the
     // position C2 sees, which is exactly how a real jammed airframe lies.
     const repX = d.gpsDenied ? d.belX : d.x + GPS_SIGMA_M * gaussian(s.net.rng);
@@ -1804,14 +1831,14 @@ function droneComms(s, d) {
 
   // Link-loss failsafe ladder. Timeouts scale with the expected command rate
   // (like PX4's COM_DL_LOSS_T) so a slow duty-limited link isn't mistaken for
-  // a dead one.
-  const holdAfter = Math.max(FAILSAFE.holdSec, 3 * cmdIntervalSec(s, s.drones.length));
+  // a dead one — the rate C2 last advertised, not one read off its plan.
+  const holdAfter = Math.max(FAILSAFE.holdSec, 3 * droneCadence(d).cmdSec);
   const rtlAfter = d.order.role === 'relay'
     ? Math.max(FAILSAFE.rtlRelaySec, 3 * holdAfter)
     : Math.max(FAILSAFE.rtlMissionSec, 2 * holdAfter);
   const age = s.time - d.lastC2;
   if (d.mode === 'ok' && age > holdAfter) {
-    d.mode = 'hold'; d.holdX = d.x; d.holdY = d.y;
+    d.mode = 'hold'; d.holdX = d.belX; d.holdY = d.belY;
     logEvent(s, d.id + ' lost C2 link — holding position', 'warn');
   }
   if (d.mode === 'hold' && age > rtlAfter) {
@@ -1821,31 +1848,47 @@ function droneComms(s, d) {
     d.relinkAttempt = 1;
     d.relinkGoalX = d.lastLinkX; d.relinkGoalY = d.lastLinkY;
     d.relinkUntil = null;
+    d.relinkGiveUpAt = relinkGiveUpAt(s, d);
     logEvent(s, d.id + ' link timeout — retreating to last-link point (attempt 1/' + FAILSAFE.relinkAttempts + ')', 'warn');
   }
   if (d.mode === 'relink') {
-    if (dist2d(d, { x: d.relinkGoalX, y: d.relinkGoalY }) < FAILSAFE.relinkArriveM) {
-      if (d.relinkUntil === null) d.relinkUntil = s.time + FAILSAFE.relinkWaitSec;
-      else if (s.time > d.relinkUntil) {
-        // Attempt failed. Fall back one radio-range step toward base and
-        // listen again; after the last attempt, go home for real.
-        const homeK = d.baseKnown || s.base; // last KNOWN base — never live truth (finding #18)
-        const dHome = dist2d(d, homeK);
-        const step = usableRangeM(droneRadio(d) || s.radio, s.envFactor) * FAILSAFE.relinkStepFrac;
-        if (d.relinkAttempt >= FAILSAFE.relinkAttempts || dHome <= step) {
-          d.mode = 'rtl';
-          logEvent(s, d.id + ' no contact after ' + d.relinkAttempt + ' attempts — returning to C2', 'warn');
-        } else {
-          d.relinkAttempt += 1;
-          const f = step / dHome;
-          d.relinkGoalX = d.x + (homeK.x - d.x) * f;
-          d.relinkGoalY = d.y + (homeK.y - d.y) * f;
-          d.relinkUntil = null;
-          logEvent(s, d.id + ' still silent — falling back toward C2 (attempt ' + d.relinkAttempt + '/' + FAILSAFE.relinkAttempts + ')', 'warn');
-        }
+    // Arrival is judged where the drone BELIEVES it is, the frame it steers
+    // in — a truth test never fired while GNSS-denied (audit ONB-02).
+    if (d.relinkUntil === null &&
+        Math.hypot(d.belX - d.relinkGoalX, d.belY - d.relinkGoalY) < FAILSAFE.relinkArriveM) {
+      d.relinkUntil = s.time + FAILSAFE.relinkWaitSec;
+    }
+    // A point it can't get to (inside a tower, upwind of what it can beat)
+    // still expires, so the ladder always moves on.
+    const expired = d.relinkUntil !== null ? s.time > d.relinkUntil
+      : d.relinkGiveUpAt != null && s.time > d.relinkGiveUpAt;
+    if (expired) {
+      // Attempt failed. Fall back one radio-range step toward base and
+      // listen again; after the last attempt, go home for real.
+      const homeK = d.baseKnown || s.base; // last KNOWN base — never live truth (finding #18)
+      const dHome = Math.hypot(homeK.x - d.belX, homeK.y - d.belY);
+      const step = usableRangeM(droneRadio(d) || s.radio, s.envFactor) * FAILSAFE.relinkStepFrac;
+      if (d.relinkAttempt >= FAILSAFE.relinkAttempts || dHome <= step) {
+        d.mode = 'rtl';
+        logEvent(s, d.id + ' no contact after ' + d.relinkAttempt + ' attempts — returning to C2', 'warn');
+      } else {
+        d.relinkAttempt += 1;
+        const f = step / dHome;
+        d.relinkGoalX = d.belX + (homeK.x - d.belX) * f;
+        d.relinkGoalY = d.belY + (homeK.y - d.belY) * f;
+        d.relinkUntil = null;
+        d.relinkGiveUpAt = relinkGiveUpAt(s, d);
+        logEvent(s, d.id + ' still silent — falling back toward C2 (attempt ' + d.relinkAttempt + '/' + FAILSAFE.relinkAttempts + ')', 'warn');
       }
     }
   }
+}
+
+// Deadline for reaching the current relink point: generous transit time at
+// full airspeed from where the drone believes it is, plus the listen time.
+function relinkGiveUpAt(s, d) {
+  const legM = Math.hypot(d.relinkGoalX - d.belX, d.relinkGoalY - d.belY);
+  return s.time + FAILSAFE.relinkTransitFactor * legM / afOf(s, d).maxSpeedMs + FAILSAFE.relinkWaitSec;
 }
 
 function updateBattery(s, d, dt, vAirMs) {
@@ -1853,7 +1896,7 @@ function updateBattery(s, d, dt, vAirMs) {
   d.energyWh = Math.max(0, d.energyWh - flightPowerW(af, vAirMs) * dt / 3600);
   d.batteryPct = d.energyWh / usableWh(af) * 100;
 
-  if (d.mode === 'ok' || d.mode === 'hold' || d.mode === 'relink') {
+  if (d.mode === 'ok' || d.mode === 'hold' || d.mode === 'relink' || d.mode === 'rtl') {
     // Onboard smart-RTH: energy to fly home at cruise, with pessimism +
     // reserve, along the ACTUAL home track against the wind vector (review
     // finding #2). A home leg that can't be flown at all reads as infinite
@@ -1945,10 +1988,14 @@ function tetherGoal(s, d, goal) {
   const m = d.upMarginEma;
 
   if (m >= slowDb) return goal;
-  const staleAfter = Math.max(C2.staleSec, 3 * (tlmIntervalSec(s) + cmdIntervalSec(s, s.drones.length)));
-  if (!upPos || !Number.isFinite(upPos.at) || s.time - upPos.at > staleAfter) return { x: d.x, y: d.y };
+  // Goals live in the frame the drone steers in — its nav belief. Built on
+  // truth, a GNSS-denied drone chased a target that moved with it (ONB-03).
+  const me = { x: d.belX, y: d.belY };
+  const cad = droneCadence(d);
+  const staleAfter = Math.max(C2.staleSec, 3 * (cad.tlmSec + cad.cmdSec));
+  if (!upPos || !Number.isFinite(upPos.at) || s.time - upPos.at > staleAfter) return me;
   // only throttle motion that takes us FARTHER from the upstream node
-  if (dist2d(goal, upPos) <= dist2d(d, upPos)) return goal;
+  if (dist2d(goal, upPos) <= dist2d(me, upPos)) return goal;
 
   if (m <= stopDb) {
     // link nearly gone: step back toward the upstream neighbor. The retreat
@@ -1957,11 +2004,19 @@ function tetherGoal(s, d, goal) {
     // at the threshold made fading drones lurch tens of metres and back (#18).
     if (!d.tethered) { d.tethered = true; logEvent(s, d.id + ' tether: link to ' + d.order.upstream + ' thin — closing up', 'warn'); }
     const k = 0.4 * Math.min(1, (stopDb - m) / 3);
-    return { x: d.x + (upPos.x - d.x) * k, y: d.y + (upPos.y - d.y) * k };
+    return { x: me.x + (upPos.x - me.x) * k, y: me.y + (upPos.y - me.y) * k };
   }
-  // in the slow band: freeze outbound progress proportionally
+  // In the slow band: throttle outbound SPEED proportionally. stepDrone flies
+  // at full speed until the goal is inside one braking distance, then at
+  // speed × (distance / braking distance) — so a goal f × that distance out
+  // is f × full speed. Scaling the distance to a goal kilometres away left
+  // it hundreds of metres out: full speed into the floor, then back (ONB-04).
   const f = (m - stopDb) / (slowDb - stopDb);
-  return { x: d.x + (goal.x - d.x) * f, y: d.y + (goal.y - d.y) * f };
+  const vG = groundSpeedAlong(afOf(s, d), s.wind, me, goal);
+  const reach = f * vG * vG / (2 * DRONE.accelMs2);
+  const gl = dist2d(me, goal);
+  const k = gl > reach ? reach / gl : 1;
+  return { x: me.x + (goal.x - me.x) * k, y: me.y + (goal.y - me.y) * k };
 }
 
 // --- Separation spatial grid ---------------------------------------------------
@@ -2013,7 +2068,8 @@ function stepDrone(s, d, dt) {
 
   // GNSS: is the truth position inside a denial zone? Healthy → belief snaps
   // to truth. Denied → dead reckoning (js/gpsnav.js): belief integrates
-  // airspeed + drift, so the drone steers by where it THINKS it is.
+  // airspeed + the wind estimate frozen at GNSS loss + drift, so the drone
+  // steers by where it THINKS it is.
   const wasDenied = d.gpsDenied;
   d.gpsDenied = gpsDeniedAt(s.gpsZones, d.x, d.y);
   if (!wasDenied && d.gpsDenied) logEvent(s, d.id + ' GNSS degraded — dead reckoning', 'warn');
@@ -2024,8 +2080,9 @@ function stepDrone(s, d, dt) {
       s.maxNavErrM = Math.max(s.maxNavErrM || 0, err);
     }
   }
-  const bel = stepBelief(d, dt, s.net.rng, d.gpsDenied);
+  const bel = stepBelief(d, dt, s.net.rng, d.gpsDenied, s.wind);
   d.belX = bel.belX; d.belY = bel.belY; d.dvx = bel.dvx; d.dvy = bel.dvy;
+  d.windEstX = bel.windEstX; d.windEstY = bel.windEstY;
   // Instrumentation (sim-side observables, like batteryPct): whether this
   // drone ever lost GNSS, and the worst truth-vs-belief error seen.
   if (d.gpsDenied) {
@@ -2145,17 +2202,28 @@ function stepDrone(s, d, dt) {
     updateBattery(s, d, dt, Math.min(va, maxV));
   }
 
-  if ((d.mode === 'rtb' || (external && d.mode === 'rtl')) && dist2d(d, s.base) < DRONE.landThresholdM) {
+  // Touchdown is the drone's own call: it lands when its NAV BELIEF reaches
+  // the home it last learned (finding #18) — an rtl drone still silent at
+  // home lands too, as PX4's RTL does, instead of hovering the pack flat.
+  const homeK = d.baseKnown || s.base;
+  if ((d.mode === 'rtb' || d.mode === 'rtl') &&
+      Math.hypot(d.belX - homeK.x, d.belY - homeK.y) < DRONE.landThresholdM) {
     // Internal physics is a 2D abstraction — touchdown is instantaneous.
     const grounded = !external || externalServiceGrounded(d.id);
-    if ((d.mode === 'rtb' || d.mode === 'rtl') && grounded) {
+    if (grounded) {
       d.mode = 'landed'; d.vx = d.vy = 0;
       d.endpointDeadAt = s.time;
       if (typeof interruptEndpointAttempts === 'function') interruptEndpointAttempts(s, d.id);
-      d.swapAt = s.time + BATTERY.swapSec;
-      logEvent(s, d.id + ' landed at base — battery swap in progress', 'info');
+      // The ground crew is wherever the base TRULY is: a drone that set down
+      // at a stale home (operator moved in radio silence) gets no swap.
+      if (dist2d(d, s.base) < DRONE.landThresholdM) {
+        d.swapAt = s.time + BATTERY.swapSec;
+        logEvent(s, d.id + ' landed at base — battery swap in progress', 'info');
+      } else {
+        d.swapAt = null;
+        logEvent(s, d.id + ' landed at its last-known base — no ground crew there', 'warn');
+      }
     }
-    // rtl drones hovering at base will regain link and be re-tasked
   }
 }
 
@@ -2351,7 +2419,12 @@ function stepAdversaries(s, dt) {
           if (bandOk && dist <= maxDetectRange &&
               !losBlocked(s.terrain, j.x, j.y, jAlt, p.x, p.y, nodeAltAbsM(s, id, p), rad.freqMHz)) {
             const bearing = Math.atan2(p.y - j.y, p.x - j.x) + gaussian(s.net.rng) * 0.03; // ~1.7° error
-            fix = { x: j.x + dist * Math.cos(bearing), y: j.y + dist * Math.sin(bearing), age: t };
+            // DF measures bearing, not range (audit ADV-01): range is the
+            // received power inverted through the band's path-loss law, off
+            // by one packet's multipath fading.
+            const fadeDb = gaussian(s.net.rng) * (typeof ADVERSARY !== 'undefined' ? ADVERSARY.rssiSigmaDb : 6);
+            const range = dist * Math.pow(10, -fadeDb / (10 * pathLossExponent(rad)));
+            fix = { x: j.x + range * Math.cos(bearing), y: j.y + range * Math.sin(bearing), age: t };
           }
         }
         j._obs[id] = { t, fix }; // a failed measurement is recorded too — no retry until the next emission

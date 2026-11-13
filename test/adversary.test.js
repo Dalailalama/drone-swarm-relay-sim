@@ -88,3 +88,31 @@ test('hunted swarm loses uptime versus static jammer of equal power', () => {
     'a moving hunter should not help the swarm: hunted=' + hunted.toFixed(1) +
     '% static=' + still.toFixed(1) + '%');
 });
+
+// Audit swarm-onboard/ADV-01: a single passive DF station measures BEARING.
+// The fix used to sit at the emitter's exact true range (only the bearing
+// carried noise), so every contact was ~3 % off at most. Range now comes
+// from received power through the band's path-loss law, with single-packet
+// multipath fading on top — RSSI ranging, and as poor as it is in the field.
+test('ADV-01: a DF fix ranges by received power, not by the true distance', () => {
+  const s = makeSw({ count: 1 });
+  const j = s.jammers[0];
+  const d = s.drones[0];
+  const J = { x: j.x, y: j.y };
+  d.x = J.x + 1500; d.y = J.y; // one emitter 1500 m due east, clear line of sight
+  const rel = [];
+  for (let i = 0; i < 200; i++) {
+    j.x = J.x; j.y = J.y; j._obs = {};
+    s.time += 1;
+    s.net.txAt = { [d.id]: s.time };
+    ctx.stepAdversaries(s, 0.05);
+    const fix = j._obs[d.id].fix;
+    assert.ok(fix, 'the emission must be measured');
+    rel.push(Math.hypot(fix.x - J.x, fix.y - J.y) / 1500 - 1);
+  }
+  const mean = rel.reduce((a, b) => a + b, 0) / rel.length;
+  const sd = Math.sqrt(rel.reduce((a, b) => a + (b - mean) * (b - mean), 0) / rel.length);
+  const exact = rel.filter(e => Math.abs(e) < 0.03).length / rel.length;
+  assert.ok(sd >= 0.2, 'fix range error SD only ' + (sd * 100).toFixed(1) + ' % — the DF still knows the true range');
+  assert.ok(exact <= 0.5, (exact * 100).toFixed(0) + ' % of fixes land within 3 % of the true range');
+});

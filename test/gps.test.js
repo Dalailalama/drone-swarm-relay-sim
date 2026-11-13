@@ -130,3 +130,63 @@ test('toggling a zone off restores honest navigation instantly', () => {
   const after = s.drones.map(d => d.gpsDenied);
   assert.deepStrictEqual(after, before.map(() => false), 'no drone stays denied after toggle-off');
 });
+
+// Audit swarm-onboard/NAV-01: dead reckoning integrated the TRUE ground
+// velocity, so a GNSS-denied drone knew the wind perfectly — even a wind
+// that rose after the fix was lost. It now integrates airspeed plus the
+// wind estimate it held when GNSS went away.
+function lcg(seed) {
+  let st = seed;
+  return () => { st = (st * 1103515245 + 12345) & 0x7fffffff; return st / 0x7fffffff; };
+}
+
+test('NAV-01: a wind that rises after GNSS is lost drifts the drone where its belief cannot follow', () => {
+  // Calm when the fix dropped; then 10 m/s from the west. Zero airspeed, so
+  // the drone is blown 600 m east in a minute — its belief knows only calm.
+  const rng = lcg(9);
+  const wind = { x: 10, y: 0 };
+  const d = { x: 0, y: 0, vx: 10, vy: 0, belX: 0, belY: 0, dvx: 0, dvy: 0, windEstX: 0, windEstY: 0 };
+  for (let t = 0; t < 60; t += 0.25) {
+    d.x += d.vx * 0.25;
+    const b = G.stepBelief(d, 0.25, rng, true, wind);
+    d.belX = b.belX; d.belY = b.belY; d.dvx = b.dvx; d.dvy = b.dvy;
+  }
+  const err = Math.hypot(d.belX - d.x, d.belY - d.y);
+  assert.ok(err > 400 && err < 800, 'nav error ' + err.toFixed(0) + ' m — expected ~600 m of unmodelled wind');
+});
+
+test('NAV-01: an unchanged wind cancels exactly — only the OU drift remains', () => {
+  const run = (windArg, est) => {
+    const rng = lcg(9);
+    const d = { x: 0, y: 0, vx: 10, vy: 0, belX: 0, belY: 0, dvx: 0, dvy: 0, windEstX: est, windEstY: 0 };
+    for (let t = 0; t < 60; t += 0.25) {
+      d.x += d.vx * 0.25;
+      const b = G.stepBelief(d, 0.25, rng, true, windArg);
+      d.belX = b.belX; d.belY = b.belY; d.dvx = b.dvx; d.dvy = b.dvy;
+    }
+    return [d.belX, d.belY];
+  };
+  assert.deepStrictEqual(run({ x: 10, y: 0 }, 10), run(undefined, 0));
+});
+
+test('NAV-01: while GNSS is healthy the wind estimate tracks the wind', () => {
+  const b = G.stepBelief({ x: 1, y: 2, vx: 0, vy: 0, belX: 0, belY: 0, dvx: 0, dvy: 0 }, 0.05, Math.random, false, { x: 3, y: -4 });
+  assert.strictEqual(b.windEstX, 3);
+  assert.strictEqual(b.windEstY, -4);
+});
+
+test('NAV-01: in the sim the wind estimate freezes at GNSS loss and resumes with the fix', () => {
+  const s = ctx.makeSwarm({
+    count: 1, airframe: Q450, radio: RFD, envFactor: 1, targetX: 600, targetY: 0,
+    altitudeM: 60, seed: 11, windX: 3, windY: 0,
+    gpsZones: [{ id: 'GZ-w', x: 0, y: 0, rM: 5000, on: true }],
+  });
+  const d = s.drones[0];
+  ctx.stepSwarm(s, 0.05);
+  s.wind.x = 8; // the wind rises after the fix is gone
+  for (let i = 0; i < 20; i++) ctx.stepSwarm(s, 0.05);
+  assert.strictEqual(d.windEstX, 3, 'a denied drone cannot track a wind change');
+  s.gpsZones[0].on = false;
+  ctx.stepSwarm(s, 0.05);
+  assert.strictEqual(d.windEstX, 8, 'with GNSS back the estimate catches up');
+});
