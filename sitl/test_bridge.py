@@ -2397,9 +2397,56 @@ async def scenario_failed_landing_can_be_retried():
     await h.close()
 
 
+async def scenario_failed_relaunch_redone_by_handshake():
+    """A relaunch whose arm is refused parks the vehicle, back in 'landed' once
+    grounded: the handshake must then run again under its requestId. The
+    cached acks of the first authorize/complete/relaunch were replayed as
+    duplicates that changed nothing, stranding the vehicle on the pad."""
+    h = Harness()
+    ws = h.client("controller")
+    await h.init(ws, count=0, alt=30.0)
+    clock = Clock()
+
+    async def service(action, **extra):
+        await _service(ws, action, **extra)
+        return ws.of_type("service_ack")[-1]
+
+    with patch.object(bridge, "_now", clock):
+        v = current_vehicle()
+        conn = v.conn
+
+        async def tick():
+            clock.now += 0.1
+            conn.push(hb_msg(armed=False, custom_mode=GUIDED_MODE_ID))
+            conn.push(pos_msg(0.0, 0.0, -0.1))
+            conn.push(ext_state_msg(1))
+            bridge._drain_messages(v)
+            await bridge._advance_init(v)
+
+        assert (await service("land"))["accepted"]
+        await tick()
+        assert v.service_phase == "landed", v.service_phase
+        assert (await service("authorize"))["accepted"] and (await service("complete"))["accepted"]
+        assert (await service("relaunch", alt=20.0))["accepted"]
+        await tick()
+        assert v.init_state == bridge.INIT_CONFIRM_ARM, v.init_state
+        conn.push(ack_msg(MAV_CMD_COMPONENT_ARM_DISARM, MAV_RESULT_DENIED))
+        await tick()
+        await tick()
+        assert v.service_phase == "landed" and conn.count("arm") == 1, (v.service_phase, v.init_state)
+
+        for action, phase in (("authorize", "swapping"), ("complete", "swapped"), ("relaunch", "relaunch")):
+            ack = await service(action, alt=20.0)
+            assert ack["accepted"] and not ack["duplicate"] and v.service_phase == phase, (ack, v.service_phase)
+        await tick()
+        assert conn.count("arm") == 2, conn.kinds()
+    await h.close()
+
+
 SCENARIOS = [
     ("NAV_LAND is re-sent until the autopilot ACKs it", scenario_land_resent_until_acked),
     ("a failed landing can be retried under a new request id", scenario_failed_landing_can_be_retried),
+    ("a failed relaunch, once grounded, is redone through the handshake", scenario_failed_relaunch_redone_by_handshake),
     ("--count overriding the init's count is reported in a status line", scenario_cli_count_override_reported),
     ("an init that drops an airborne vehicle lands it and watches it down", scenario_shrinking_init_lands_dropped_vehicle),
     ("re-init keeps a vehicle parked mid-swap parked; only the handshake relaunches it", scenario_reinit_keeps_parked_vehicle),

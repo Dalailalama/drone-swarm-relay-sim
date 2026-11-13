@@ -331,6 +331,10 @@ class Vehicle:
                     self.init_state = "landed"
                     self.service_phase = "landed"
                     self.failed_at = None
+                    # Same as bridge.py: the handshake's later steps run again
+                    # under this requestId, so their acks must not replay.
+                    for action in ("authorize", "complete", "relaunch"):
+                        self.service_action_history.pop((self.service_id, action), None)
                 return
             elif self.service_phase == "relaunch":
                 if not self.armed:

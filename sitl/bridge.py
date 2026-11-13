@@ -885,6 +885,11 @@ async def _advance_init(vehicle: Vehicle) -> None:
             vehicle.init_state = "landed"
             vehicle.service_phase = "landed"
             vehicle.failed_at = None
+            # Back on the pad (a relaunch that failed, a landing confirmed
+            # late): the handshake's later steps run again under this
+            # requestId, so their earlier acks must not replay as duplicates.
+            for action in ("authorize", "complete", "relaunch"):
+                vehicle.service_action_history.pop((vehicle.service_id, action), None)
             await _vehicle_status(vehicle, f"vehicle {vehicle.id}: confirmed landed after timeout - recovered to landed")
         return
 
