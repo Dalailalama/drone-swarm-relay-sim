@@ -95,3 +95,115 @@ test('R16: every procedural terrain is recorded by name', () => {
     assert.strictEqual(meta.settings.terrain, name);
   }
 });
+
+// Audit C-replay: every mid-run UI action that changes the sim must be in
+// the capture and replay at its sim time. Only kill and drag-release were
+// recorded, and only while capture was on, so adding interference, a GPS
+// outage, wind, a new objective, a toggle or a city edit mid-run (or acting
+// before capture was switched on) made the replay silently diverge.
+const MIDRUN_SCENARIO = {
+  version: 1, radio: 'sik-v3', env: 'suburban', airframe: 'q450', count: 6, altitudeM: 60, spacingPct: 80,
+  terrain: 'urban', cityDensity: 40, cityHeight: 45, seed: 77,
+  base: { x: 0, y: 0 }, target: { x: 420, y: -160 }, windSpd: 3, windDir: 40,
+  jammers: [{ x: 210, y: -60, erpDbm: 18, band: 'all', altM: 15, on: true }],
+  gpsZones: [{ x: 300, y: -120, rM: 120, on: true }],
+};
+
+function setVal(ui, id, v, evName) { ui.el(id).value = String(v); ui.fire(id, evName || 'input'); }
+function flip(ui, id) { ui.el(id).checked = !ui.el(id).checked; ui.fire(id, 'change'); }
+function killSecondDrone(ui) {
+  const d = ui.ctx.sim.swarm.drones[1];
+  const row = ui.el('fleetBody').querySelector('[data-id="' + d.id + '"]');
+  ui.el('fleetBody').fire('click', { target: row });
+  ui.ctx.__raf.pump(200);
+  ui.el('killBtn').click();
+  assert.strictEqual(d.mode, 'dead', 'the UI kill must land');
+}
+
+const MIDRUN_ACTIONS = {
+  'add interference source': ui => ui.el('addJammerBtn').click(),
+  'jammer power, toggle and remove': ui => {
+    ui.el('addJammerBtn').click();
+    setVal(ui, 'jammerPowerRange', 30);
+    ui.ctx.__raf.pump(200);
+    ui.el('jammerToggleBtn').click();
+    ui.ctx.__raf.pump(200);
+    ui.el('jammerToggleBtn').click();
+    ui.ctx.__raf.pump(200);
+    ui.el('jammerRemoveBtn').click();
+  },
+  'clear interference': ui => ui.el('clearJammersBtn').click(),
+  'add GPS outage, toggle, remove': ui => {
+    ui.el('addGpsZoneBtn').click();
+    ui.ctx.__raf.pump(200);
+    ui.el('zoneToggleBtn').click();
+    ui.ctx.__raf.pump(200);
+    ui.el('zoneRemoveBtn').click();
+    ui.ctx.__raf.pump(200);
+    ui.el('addGpsZoneBtn').click();
+  },
+  'wind 12 m/s': ui => setVal(ui, 'windSpdRange', 12),
+  'target distance slider': ui => setVal(ui, 'distRange', 160),
+  'altitude slider': ui => setVal(ui, 'altRange', 120),
+  'spacing slider': ui => setVal(ui, 'spacingRange', 100),
+  'environment urban': ui => setVal(ui, 'envSel', 'urban', 'change'),
+  'broadcast C2 off': ui => flip(ui, 'bcastChk'),
+  'corridor routing off': ui => flip(ui, 'corridorChk'),
+  'spectrum agility + LPI': ui => { flip(ui, 'agilityChk'); flip(ui, 'lpiChk'); },
+  'video backhaul on': ui => flip(ui, 'videoChk'),
+  'red team on': ui => flip(ui, 'advChk'),
+  'city density': ui => { setVal(ui, 'cityDensityRange', 90); ui.ctx.__timers.run(); },
+  'TAK objective': ui => {
+    ui.ctx.sim.swarm.takMarks = [{ id: 'm1', callsign: 'OBJ', lat: 0, lon: 0, x: 600, y: 140 }];
+    const btn = { dataset: { i: '0' } };
+    btn.closest = () => btn;
+    ui.el('takList').fire('click', { target: btn });
+  },
+  'kill': killSecondDrone,
+};
+
+function runMidrun(action, opts) {
+  const o = opts || {};
+  const ui = loadUI();
+  const { ctx, el, fire } = ui;
+  el('loadScenarioInput').files = [makeFile('ui.json', JSON.stringify(MIDRUN_SCENARIO))];
+  fire('loadScenarioInput', 'change');
+  assert.deepStrictEqual(ctx.__alerts, []);
+  if (!o.lateCapture) el('captureChk').click();
+  for (let i = 0; i < 25; i++) ctx.__raf.pump(200);
+  action(ui);
+  for (let i = 0; i < 10; i++) ctx.__raf.pump(200);
+  if (o.lateCapture) el('captureChk').click();
+  for (let i = 0; i < 15; i++) ctx.__raf.pump(200);
+  const s = ctx.sim.swarm;
+  el('exportBtn').click();
+  const text = ctx.__downloads[ctx.__downloads.length - 1].text;
+  const rep = replayMission(text, { untilTime: s.time, core: loadCore() });
+  return { s, rep, text };
+}
+
+function assertReplayMatches(s, rep) {
+  // Spread first: arrays from the page's vm realm fail deepStrictEqual.
+  const sig = a => [...(a || [])].map(x => [x.id, x.on, x.erpDbm, x.x, x.y].join(':')).sort().join(' ');
+  assert.strictEqual(sig(rep.swarm.jammers), sig(s.jammers), 'jammer set diverged');
+  assert.strictEqual(sig(rep.swarm.gpsZones), sig(s.gpsZones), 'GPS zone set diverged');
+  const dead = sw => [...sw.drones].filter(d => d.mode === 'dead').map(d => d.id).join(' ');
+  assert.strictEqual(dead(rep.swarm), dead(s), 'dead set diverged');
+  assert.strictEqual(rep.delivered, s.net.delivered, 'packet outcomes must reproduce');
+  assert.ok(maxPositionError(s, rep) < 1e-9, 'replay diverged by ' + maxPositionError(s, rep) + ' m');
+}
+
+for (const [name, action] of Object.entries(MIDRUN_ACTIONS)) {
+  test('C-replay: a mid-run "' + name + '" replays exactly', () => {
+    const { s, rep } = runMidrun(action);
+    assertReplayMatches(s, rep);
+  });
+}
+
+test('C-replay: an action taken before capture is switched on still replays', () => {
+  const { s, rep, text } = runMidrun(ui => { killSecondDrone(ui); ui.el('addJammerBtn').click(); }, { lateCapture: true });
+  const meta = JSON.parse(text.split('\n')[0]);
+  assert.ok(meta.captureStartT > 0, 'the header must say when packet capture began');
+  assertReplayMatches(s, rep);
+});
+

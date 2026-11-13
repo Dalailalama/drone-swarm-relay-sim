@@ -71,8 +71,31 @@
     } else if (act.type === 'zone_toggle') {
       const z = s.gpsZones && s.gpsZones.find(x => x.id === act.id);
       if (z) { z.on = act.on; }
+    } else if (act.type === 'jammer_power') {
+      const j = s.jammers && s.jammers.find(x => x.id === act.id);
+      if (j) { j.erpDbm = act.erpDbm; }
+    } else if (act.type === 'jammer_remove') {
+      s.jammers = (s.jammers || []).filter(x => x.id !== act.id);
+    } else if (act.type === 'jammer_clear') {
+      s.jammers = [];
+    } else if (act.type === 'zone_remove') {
+      s.gpsZones = (s.gpsZones || []).filter(x => x.id !== act.id);
+    } else if (act.type === 'wind') {
+      s.wind.x = act.x;
+      s.wind.y = act.y;
+    } else if (act.type === 'set' && REPLAY_SETTABLE.has(act.key)) {
+      s[act.key] = act.value; // whitelisted: a capture file cannot write arbitrary swarm fields
+    } else if (act.type === 'env') {
+      s.envFactor = act.envFactor;
+      s.shadowSigmaDb = act.shadowSigmaDb;
+    } else if (act.type === 'terrain' && act.gen) {
+      const mk = (core && core.makeTerrain) || TerrainMod.makeTerrain || (typeof makeTerrain === 'function' ? makeTerrain : null);
+      if (mk) s.terrain = mk(act.name, act.gen);
     }
   }
+  // Mission settings the page's controls change mid-run ({type:'set'}).
+  const REPLAY_SETTABLE = new Set(['altitudeM', 'deployFrac', 'corridorRouting', 'broadcastC2',
+    'spectrumAgility', 'lpiMode', 'videoOn', 'videoKbps', 'adversaryMode']);
 
   function replayMission(captureInput, options) {
     const opts = options || {};
