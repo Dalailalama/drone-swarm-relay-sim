@@ -9,14 +9,16 @@ TAK multicast group every ATAK client listens on by default:
 
 Usage:
     python tak_bridge.py [--ws-host localhost] [--ws-port 8087] [--group 239.2.3.1]
-                         [--port 6969] [--ttl 3] [--unicast HOST:PORT ...]
+                         [--port 6969] [--ttl 1] [--unicast HOST:PORT ...]
                          [--allow-origin ORIGIN ...] [--token SECRET]
 
 The WebSocket binds loopback only by default and refuses handshakes from web
 pages on other origins (see ws_origin.py), so neither a LAN host nor a page
 open in the operator's browser can inject CoT into the TAK group. With
 --token (generated when bound beyond loopback) a client must also connect
-with ?token=SECRET in its URL.
+with ?token=SECRET in its URL. Only well-formed, bounded CoT <event> atoms
+are put on the network (see is_valid_atom); anything else is dropped and
+counted.
 
 Only dependency: `websockets` (already in requirements.txt for bridge.py).
 ATAK side: add the multicast stream, or point a TAK Client / FOG server at
@@ -27,14 +29,32 @@ port.
 import argparse
 import asyncio
 import socket
+import xml.etree.ElementTree as ET
 
 from websockets.asyncio.server import serve
+from websockets.exceptions import ConnectionClosed
 
 from ws_origin import add_origin_argument, make_origin_check, resolve_token
 
 # TAK's conventional CoT multicast: everyone who matters already listens here.
 DEFAULT_GROUP = "239.2.3.1"
 DEFAULT_PORT = 6969
+# One atom is one UDP datagram (a few hundred bytes from js/tak.js); a whole
+# frame carries every drone's atom. Larger is not CoT from the sim.
+MAX_ATOM_BYTES = 16384
+MAX_FRAME_BYTES = 256 * 1024
+
+
+def is_valid_atom(line: str) -> bool:
+    """True for one well-formed CoT <event> document with a uid and a type,
+    within MAX_ATOM_BYTES, and with no DOCTYPE/ENTITY (no "<!")."""
+    if not line.startswith("<event") or "<!" in line or len(line.encode("utf-8")) > MAX_ATOM_BYTES:
+        return False
+    try:
+        root = ET.fromstring(line)
+    except ET.ParseError:
+        return False
+    return root.tag == "event" and bool(root.get("uid")) and bool(root.get("type"))
 
 
 def make_udp_sock(ttl: int) -> socket.socket:
@@ -46,35 +66,50 @@ def make_udp_sock(ttl: int) -> socket.socket:
 async def handle_client(ws, udp: socket.socket, targets):
     peer = getattr(ws, "remote_address", None) or ("?", "?")
     print(f"[tak_bridge] sim connected from {peer}")
-    forwarded = 0
+    forwarded = rejected = 0
     try:
         async for message in ws:
             # One WS frame may carry one atom or several newline-separated atoms.
             for line in str(message).splitlines():
                 line = line.strip()
-                if not line or "<event" not in line:
+                if not line:
+                    continue
+                if not is_valid_atom(line):
+                    rejected += 1
+                    if rejected == 1 or rejected % 100 == 0:
+                        print(f"[tak_bridge] dropped {rejected} line(s) that are not a valid CoT <event>")
                     continue
                 payload = line.encode("utf-8")
                 for host, port in targets:
-                    udp.sendto(payload, (host, port))
+                    try:
+                        udp.sendto(payload, (host, port))
+                    except OSError as exc:  # one unsendable datagram must not end the session
+                        print(f"[tak_bridge] send to {host}:{port} failed: {exc}")
                 forwarded += 1
                 if forwarded % 100 == 0:
                     print(f"[tak_bridge] forwarded {forwarded} atoms")
+    except ConnectionClosed as exc:  # e.g. a frame over MAX_FRAME_BYTES (1009)
+        print(f"[tak_bridge] connection closed: {exc}")
     finally:
-        print(f"[tak_bridge] sim disconnected ({forwarded} atoms forwarded total)")
+        print(f"[tak_bridge] sim disconnected ({forwarded} atoms forwarded, {rejected} dropped)")
 
 
-async def main() -> None:
+def parse_args(argv=None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--ws-host", default="localhost", help="WebSocket host to bind (default: localhost)")
     ap.add_argument("--ws-port", type=int, default=8087, help="WebSocket port for the browser sim (default 8087)")
     ap.add_argument("--group", default=DEFAULT_GROUP, help=f"TAK multicast group (default {DEFAULT_GROUP})")
     ap.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"CoT UDP port (default {DEFAULT_PORT})")
-    ap.add_argument("--ttl", type=int, default=3, help="multicast TTL: 1 = same subnet only (default 3)")
+    ap.add_argument("--ttl", type=int, default=1,
+                    help="multicast TTL: 1 = same subnet only (default 1; raise it only for routed multicast)")
     ap.add_argument("--unicast", action="append", default=[], metavar="HOST:PORT",
                     help="also send unicast to HOST:PORT (repeatable); e.g. a FOG server relay")
     add_origin_argument(ap)
-    args = ap.parse_args()
+    return ap.parse_args(argv)
+
+
+async def main() -> None:
+    args = parse_args()
 
     targets = [(args.group, args.port)]
     for u in args.unicast:
@@ -92,7 +127,7 @@ async def main() -> None:
         print(f"[tak_bridge] {line}")
 
     check = make_origin_check(args.allow_origin, say, resolve_token(args.token, args.ws_host, say))
-    async with serve(handler, args.ws_host, args.ws_port, process_request=check):
+    async with serve(handler, args.ws_host, args.ws_port, process_request=check, max_size=MAX_FRAME_BYTES):
         print(f"[tak_bridge] WebSocket on {args.ws_host}:{args.ws_port} -> CoT UDP -> {mode} (ttl {args.ttl})")
         await asyncio.Future()
 
