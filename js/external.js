@@ -37,6 +37,14 @@
   const EXT_JUMP_SLACK_M = 50;     // jitter / back-to-back fixes allowance on top of the speed bound
   const EXT_MAX_COORD_M = 1e6;
   const EXT_MAX_ALT_M = 1e5;
+  // Bridge service phases a rebuilt swarm takes over (see the telemetry
+  // handler): the grounded part of the swap handshake, which it can finish.
+  const ADOPTABLE_SERVICE_PHASES = ['landing', 'landed', 'swapping', 'swapped'];
+  // A landing the bridge reports failed (rejected, or no descent progress) is
+  // retried under a new request id after this many wall seconds, while the
+  // vehicle still hovers armed over the pad, up to LAND_MAX_ATTEMPTS in all.
+  const LAND_RETRY_SEC = 3;
+  const LAND_MAX_ATTEMPTS = 3;
 
   function wallSec() {
     return (typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now()) / 1000;
@@ -223,7 +231,9 @@
       const s = getSwarm();
       if (m.type === 'ready') {
         ExternalMode.ids = Array.isArray(m.ids) ? m.ids.filter(validVehicleId) : [];
-        ExternalMode.expectedCount = ExternalMode.ids.length;
+        // Readiness counts against what the sim asked for: a bridge started
+        // with --count 3 under a 10-drone swarm is 3/10, not "all ready".
+        ExternalMode.expectedCount = Math.max(ExternalMode.expectedCount, ExternalMode.ids.length);
         for (const v of vehicleList(m.vehicles)) {
           if (!ExternalMode.telem[v.id]) ExternalMode.vehicleStates[v.id] = { ready: v.ready === true, state: v.state };
         }
@@ -293,7 +303,29 @@
           }
           ExternalMode.telem[v.id] = t;
           ExternalMode.vehicleStates[v.id] = { ready: v.ready === true, state: v.state };
-          const svc = ExternalMode.services[v.id];
+          let svc = ExternalMode.services[v.id];
+          // The bridge keeps a vehicle parked mid-swap through a re-init or a
+          // page reload. Pick its service up where it stands, so the swap
+          // finishes and it relaunches through the handshake instead of
+          // sitting on the pad unseen by the rebuilt swarm.
+          if (!svc && typeof v.serviceId === 'string' && v.serviceId.length <= 64 &&
+              ADOPTABLE_SERVICE_PHASES.includes(v.servicePhase)) {
+            svc = ExternalMode.services[v.id] = { id: v.serviceId, phase: v.servicePhase };
+            const n = Number(v.serviceId);
+            if (Number.isSafeInteger(n) && n > ExternalMode.serviceSeq) ExternalMode.serviceSeq = n;
+          }
+          if (svc && svc.id === v.serviceId && svc.phase === 'landing' && v.servicePhase === 'failed') {
+            // The bridge gave up on this landing. Say so (it used to leave
+            // the drone silently hovering over the pad, never commanded
+            // again); externalPushGoals retries it after LAND_RETRY_SEC.
+            const attempt = svc.landAttempt || 1;
+            svc.phase = 'failed';
+            svc.pendingAction = null;
+            svc.failureReason = String(v.state);
+            svc.landFailedAt = attempt < LAND_MAX_ATTEMPTS ? wallSec() : null;
+            setStatus(s, v.id + ' landing failed on the bridge (' + v.state + ')' +
+              (attempt < LAND_MAX_ATTEMPTS ? ' — retrying' : ' after ' + attempt + ' attempts — vehicle left holding'));
+          }
           if (svc && svc.id === v.serviceId && svc.phase !== 'failed') {
             if (v.state === 'landing' || v.servicePhase === 'landing') {
               if (svc.pendingAction === 'land') { svc.pendingAction = null; svc.lastAction = null; svc.retries = 0; }
@@ -360,6 +392,25 @@
     return ExternalMode.controlMode === 'external';
   }
 
+  // The link-loss ladder: a frozen vehicle is declared down after
+  // EXT_LOST_DEAD_SEC of sustained loss, or at once when the bridge has no
+  // vehicle for it (`absent`). Either way the death is the ladder's own and
+  // is undone if the vehicle's telemetry turns up.
+  function extLinkLost(s, d, absent) {
+    if (d.extLostSince == null) {
+      d.extLostSince = s.time;
+      if (!absent) return;
+    }
+    if (alive(d) && (absent || s.time - d.extLostSince > EXT_LOST_DEAD_SEC)) {
+      d.mode = 'dead';
+      d.extLinkDown = true; // this ladder's own verdict — the only recoverable death
+      d.endpointDeadAt = s.time;
+      if (typeof interruptEndpointAttempts === 'function') interruptEndpointAttempts(s, d.id);
+      logEvent(s, absent ? d.id + ' has no vehicle on the bridge — marking down'
+        : d.id + ' vehicle link lost >' + EXT_LOST_DEAD_SEC + 's — marking down', 'error');
+    }
+  }
+
   // Called at the TOP of each swarm tick when active: pull real positions into
   // the sim's drones so all downstream logic sees ground truth from the
   // vehicles. Velocity is estimated from consecutive telemetry so heading
@@ -377,6 +428,11 @@
       if (!t) {
         d.vx = 0;
         d.vy = 0;
+        // Once the bridge has answered 'ready', a drone with no telemetry at
+        // all has no vehicle behind it. One the bridge did not list (its
+        // --count is below the sim's) goes down at once, so C2 never plans a
+        // relay chain through it; a listed one goes down the ladder below.
+        if (ExternalMode.ids) extLinkLost(s, d, !ExternalMode.ids.includes(d.id));
         continue;
       }
       if (!positionFresh(t)) {
@@ -387,14 +443,7 @@
         // permanently kill a drone that's still flying. Only a SUSTAINED
         // loss escalates to 'dead'.
         d.vx = d.vy = 0;
-        if (d.extLostSince == null) d.extLostSince = s.time;
-        else if (alive(d) && s.time - d.extLostSince > EXT_LOST_DEAD_SEC) {
-          d.mode = 'dead';
-          d.extLinkDown = true; // this ladder's own verdict — the only recoverable death
-          d.endpointDeadAt = s.time;
-          if (typeof interruptEndpointAttempts === 'function') interruptEndpointAttempts(s, d.id);
-          logEvent(s, d.id + ' vehicle link lost >' + EXT_LOST_DEAD_SEC + 's — marking down', 'error');
-        }
+        extLinkLost(s, d, false);
         continue;
       }
       if (d.extLostSince != null) {
@@ -460,10 +509,17 @@
     const goals = [];
     for (const d of s.drones) {
       if (!alive(d) || d.goalX == null) continue;
-      if (!vehicleReady(d.id)) continue;
       const svc = ExternalMode.services[d.id];
       const overPad = (d.mode === 'rtb' || d.mode === 'rtl') && dist2d(d, s.base) < DRONE.landThresholdM;
       const origin = ExternalMode.origin;
+      const t = ExternalMode.telem[d.id];
+      if (svc && svc.landFailedAt != null && overPad && wallSec() - svc.landFailedAt >= LAND_RETRY_SEC &&
+          positionFresh(t) && t.armed === true && t.servicePhase === 'failed') {
+        ExternalMode.services[d.id] = { id: String(++ExternalMode.serviceSeq), phase: 'landing', landAttempt: (svc.landAttempt || 1) + 1 };
+        dispatchServiceAction(s, d.id, 'land', { groundAlt: terrainGroundAt(s.terrain, d.x, d.y) - origin.groundM });
+        continue;
+      }
+      if (!vehicleReady(d.id)) continue;
       if (svc) {
         if (overPad && svc.phase === 'landing' && svc.phase !== 'failed') {
           dispatchServiceAction(s, d.id, 'land', { groundAlt: terrainGroundAt(s.terrain, d.x, d.y) - origin.groundM });

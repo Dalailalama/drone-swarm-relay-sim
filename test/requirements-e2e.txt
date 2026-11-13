@@ -1,0 +1,5 @@
+# Optional browser end-to-end test (test/test_integration_mock.py). Not part
+# of the default suites; run on demand (see CONTRIBUTING.md). Also needs a
+# browser: python -m playwright install chromium
+playwright==1.49.1
+websockets>=13.0

@@ -186,7 +186,7 @@ async def run():
         v.init_state = b.INIT_READY
         v.first_pass_done.set()
     with h.patch.object(b, 'vehicle_task', start):
-        await b.handle_message(ws, json.dumps(data['init']), None, 14550)
+        await (await b.handle_message(ws, json.dumps(data['init']), None, 14550))  # the init's ready-reply task
     v = b.STATE.vehicles['DR-1']
     samples = [v.to_telemetry()]
     for north, east, down in [(-4, 10, -120), (-4, 10, -50)]:

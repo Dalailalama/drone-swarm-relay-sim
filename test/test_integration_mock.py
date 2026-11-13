@@ -8,8 +8,15 @@ complete lifecycle:
 
 Saves complete failure (and success) trace artifacts using Playwright's trace viewer.
 
-Usage:
+OPTIONAL: not part of `npm test` or the default CI. It needs Playwright and a
+Chromium download:
+
+    pip install -r test/requirements-e2e.txt
+    python -m playwright install chromium
     python test/test_integration_mock.py
+
+In CI it runs only on demand: Actions -> "Browser E2E (opt-in)" -> Run
+workflow (.github/workflows/e2e.yml), which uploads test-results/.
 """
 from __future__ import annotations
 
@@ -22,7 +29,11 @@ import threading
 import time
 from pathlib import Path
 
-from playwright.sync_api import sync_playwright, expect
+try:
+    from playwright.sync_api import sync_playwright, expect
+except ImportError:  # pragma: no cover - optional dependency
+    sys.exit("playwright is not installed: pip install -r test/requirements-e2e.txt && "
+             "python -m playwright install chromium")
 
 ROOT = Path(__file__).resolve().parent.parent
 SITL_DIR = ROOT / "sitl"
@@ -132,6 +143,16 @@ def test_browser_mock_integration():
                 }
             """)
             print(f"[TEST] dispatchServiceAction result: {res}")
+            # Record what the page sends, so the end check can require that a
+            # relaunch was actually requested for DR-1.
+            page.evaluate("""
+                () => {
+                    const ws = window.ExternalMode.ws;
+                    const send = ws.send.bind(ws);
+                    window.__e2eSent = [];
+                    ws.send = (m) => { window.__e2eSent.push(m); send(m); };
+                }
+            """)
 
             # Wait for DR-1 to enter landing phase in diagnostics
             page.wait_for_function("""
@@ -152,13 +173,21 @@ def test_browser_mock_integration():
             """, timeout=30000)
             print("[TEST] Touchdown and swap cycle underway.")
 
-            # 8. Observe relaunch and return to ready
+            # 8. Observe relaunch and return to ready. Positive evidence only:
+            # a relaunch was requested, and DR-1 is back READY with no service
+            # phase and no failure. (Checking that the row no longer said
+            # "landing"/"swapping"/"relaunch" also passed for a service that
+            # FAILED, e.g. 'retries exhausted', or one parked in 'swapped'.)
             print("[TEST] Observing relaunch and climb back to airborne/ready…")
             page.wait_for_function("""
                 () => {
-                    const row = document.querySelector('#extDiagBody tr');
-                    // After relaunch, phase returns to ready/ok/airborne
-                    return row && !row.textContent.includes('landing') && !row.textContent.includes('swapping') && !row.textContent.includes('relaunch');
+                    const relaunched = (window.__e2eSent || []).some(m => {
+                        const msg = JSON.parse(m);
+                        return msg.type === 'service' && msg.action === 'relaunch' && msg.id === 'DR-1';
+                    });
+                    const d = window.getExternalDiagnostics().find(v => v.id === 'DR-1');
+                    return relaunched && d && d.servicePhase === 'none' && d.state === 'ready' &&
+                        d.ready === true && !d.failureReason;
                 }
             """, timeout=35000)
             print("[TEST] DR-1 successfully relaunched and returned to active fleet service.")
@@ -188,7 +217,8 @@ def test_browser_mock_integration():
 
             # Shutdown HTTP server
             httpd.shutdown()
-            print("[TEST] Integration test completed successfully.")
+
+    print("[TEST] Integration test completed successfully.")
 
 
 if __name__ == "__main__":

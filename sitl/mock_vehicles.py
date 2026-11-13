@@ -51,7 +51,7 @@ from typing import Optional
 from websockets.asyncio.server import serve
 from websockets.exceptions import ConnectionClosed
 
-from ws_origin import add_origin_argument, make_origin_check
+from ws_origin import add_origin_argument, make_origin_check, resolve_token
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("mock_vehicles")
@@ -87,6 +87,7 @@ INIT_ABORT_HOLD = "abort-hold"
 FAILED_PREFIX = "failed:"
 
 MAV_CMD_NAV_LAND = 21
+LAND_MODE_ID = 9  # ArduCopter's LAND custom_mode: NAV_LAND switches the autopilot to it
 
 
 def _now() -> float:
@@ -141,6 +142,11 @@ class Vehicle:
     descent_ref_alt: float = 0.0
     last_descent_at: float = 0.0
     climb_ref_alt: float = 0.0
+    # Autopilot refusals the real bridge has to handle, so tests can make the
+    # mock exhibit them: GUIDED is refused (an abort is never confirmed, a
+    # relaunch fails:mode), or the pre-arm checks fail (a relaunch fails:arm).
+    stuck_mode: bool = False
+    arm_refused: bool = False
 
     # --- link/telemetry truth ---
     @property
@@ -327,6 +333,13 @@ class Vehicle:
                     self.failed_at = None
                 return
             elif self.service_phase == "relaunch":
+                if not self.armed:
+                    # As the bridge does on a DENIED arm ACK, or on GUIDED never
+                    # confirmed within the step timeout: park, never retried.
+                    if self.arm_refused or now - self.step_started_at >= INIT_STEP_TIMEOUT_S:
+                        self._fail("arm" if self.mode_confirmed else "mode", now)
+                        self.service_phase = "failed"
+                    return
                 if self.mode_confirmed and self.armed and self.airborne and self.alt >= self.takeoff_alt - TAKEOFF_CONFIRM_ALT_M:
                     self._become_ready(now)
                     self.service_phase = None
@@ -390,11 +403,14 @@ class Vehicle:
     def service(self, request_id: str, action: str, msg: dict) -> tuple[bool, Optional[str], Optional[str], bool]:
         """Explicit browser-driven lifecycle handshake; returns (accepted, error, code, retryable)."""
         if action == "land":
-            if self.service_phase not in (None, "complete"):
+            # Same as bridge.py: a failed landing may be retried under a new
+            # request id while the vehicle is still up and armed.
+            retry = self.service_phase == "failed" and self.init_state == FAILED_PREFIX + "land"
+            if self.service_phase not in (None, "complete") and not retry:
                 if self.service_id == request_id and self.service_phase == "landing":
                     return True, None, None, False
                 return False, f"service busy in phase {self.service_phase}", "SERVICE_BUSY", True
-            if not (self.ready and self.init_state == INIT_READY and self.connected
+            if not ((retry or (self.ready and self.init_state == INIT_READY)) and self.connected
                     and self.position_fresh and self.armed):
                 return False, "vehicle not ready to land", "VEHICLE_NOT_READY", True
             self.service_history.add(request_id)
@@ -415,6 +431,7 @@ class Vehicle:
                 ground = 0.0
             self.target_ground_alt = ground
             self.goal_alt = ground
+            self.custom_mode = LAND_MODE_ID
             return True, None, None, False
 
         if request_id != self.service_id:
@@ -433,7 +450,9 @@ class Vehicle:
             return False, f"cannot complete in phase {self.service_phase}", "INVALID_PHASE", True
 
         if action == "relaunch":
-            if not (self.service_phase == "swapped" and self.service_grounded):
+            # Same as bridge.py: relaunch is also the way out of a grounded abort.
+            parked = self.service_phase == "swapped" or (self.service_phase == "aborted" and self.init_state == "aborted")
+            if not (parked and self.service_grounded):
                 return False, f"cannot relaunch in phase {self.service_phase}", "INVALID_PHASE", True
             try:
                 alt = float(msg["alt"])
@@ -444,11 +463,13 @@ class Vehicle:
             self.launch_alt = self.alt
             self.takeoff_climb_m = alt
             self.takeoff_alt = self.launch_alt + alt
-            self.goal_alt = self.takeoff_alt
             self.service_phase = "relaunch"
             self._enter_step(INIT_CONFIRM_MODE, now=_now())
-            self.custom_mode = self.guided_mode_id
-            self.armed = True
+            if not self.stuck_mode:
+                self.custom_mode = self.guided_mode_id
+            if self.mode_confirmed and not self.arm_refused:
+                self.armed = True
+                self.goal_alt = self.takeoff_alt
             return True, None, None, False
 
         if action == "abort":
@@ -462,7 +483,7 @@ class Vehicle:
                     self.failed_at = None
                     self.step_started_at = now
                     self.step_sent_at = now
-                    if not getattr(self, "stuck_mode", False):
+                    if not self.stuck_mode:
                         self.custom_mode = self.guided_mode_id
                     if self.connected and self.mode_confirmed and self.position_fresh:
                         self.hold_x = self.x
@@ -506,24 +527,46 @@ class World:
     """Holds all vehicle state and the connected browser clients.
 
     This is deliberately module-global-ish state (one World per process):
-    vehicle state survives a browser disconnect/reconnect, and only gets
-    reset when a fresh "init" message arrives (from any client).
+    vehicle state survives a browser disconnect/reconnect, and an "init"
+    only adds or drops vehicles (see reset).
     """
 
     vehicles: dict[str, Vehicle] = field(default_factory=dict)
     clients: set = field(default_factory=set)
     sim_time: float = 0.0  # seconds, advanced by the physics task's own dt
     controller: object = None
+    # id -> (position_seq, landed_seq) of a dropped vehicle, resumed if the id
+    # returns (same as bridge.py's STATE.seq_floor).
+    seq_floor: dict = field(default_factory=dict)
 
     def reset(self, count: int, alt: float, origin: dict | None = None) -> list[str]:
-        """Handle an "init": (re)create N vehicles at the origin."""
+        """Handle an "init": fit the fleet to DR-1..DR-N.
+
+        Same as bridge.py, an init is not a teardown: a vehicle that is still
+        listed keeps its position, flight and service state (a parked one is
+        never re-armed), new ids start at the origin and climb, and dropped
+        ids are removed (the mock has no aircraft to land first).
+        """
         count = max(0, min(int(count), MAX_VEHICLES))
+        old = self.vehicles
         self.vehicles = {}
         ids = []
         for i in range(1, count + 1):
             vid = f"DR-{i}"
             ids.append(vid)
-            v = Vehicle(id=vid, x=0.0, y=0.0, alt=0.0)
+            v = old.pop(vid, None)
+            if v is None:
+                position_seq, landed_seq = self.seq_floor.pop(vid, (0, 0))
+                v = Vehicle(id=vid, x=0.0, y=0.0, alt=0.0, position_seq=position_seq, landed_seq=landed_seq)
+                v.takeoff_alt = alt
+                # Start climbing immediately: goal x/y stays at the origin,
+                # goal alt is the requested cruise altitude.
+                v.set_goal(0.0, 0.0, alt)
+            elif v.service_phase is None:
+                # A new session: an earlier one's request ids must not replay.
+                v.service_id = None
+                v.service_history.clear()
+                v.service_action_history.clear()
             if isinstance(origin, dict):
                 v.origin = {
                     "frame": "common-local-origin",
@@ -531,11 +574,9 @@ class World:
                     "y": float(origin.get("y", 0.0)),
                     "groundM": float(origin.get("groundM", 0.0)),
                 }
-            v.takeoff_alt = alt
-            # Start climbing immediately: goal x/y stays at the origin,
-            # goal alt is the requested cruise altitude.
-            v.set_goal(0.0, 0.0, alt)
             self.vehicles[vid] = v
+        for v in old.values():
+            self.seq_floor[v.id] = (v.position_seq, v.landed_seq)
         return ids
 
     def apply_goals(self, goals: list[dict]) -> None:
@@ -631,6 +672,23 @@ async def send_status(websocket, msg: str) -> None:
         pass
 
 
+def _number(value) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def init_problem(msg: dict) -> Optional[str]:
+    """Why an "init" is unusable (as bridge.parse_init decides), or None."""
+    if not _number(msg.get("count", 0)):
+        return f"count {msg.get('count')!r} is not a number"
+    if not _number(msg.get("alt", 50)) or msg.get("alt", 50) <= TAKEOFF_CONFIRM_ALT_M:
+        return f"alt {msg.get('alt')!r} is not a number above {TAKEOFF_CONFIRM_ALT_M:g} m"
+    origin = msg.get("origin", {"frame": "common-local-origin", "x": 0.0, "y": 0.0, "groundM": 0.0})
+    if not (isinstance(origin, dict) and origin.get("frame") == "common-local-origin"
+            and all(_number(origin.get(k)) for k in ("x", "y", "groundM"))):
+        return "origin is not a common-local-origin with finite x, y and groundM"
+    return None
+
+
 async def handle_message(websocket, raw: str) -> None:
     try:
         msg = json.loads(raw)
@@ -641,6 +699,11 @@ async def handle_message(websocket, raw: str) -> None:
     mtype = msg.get("type")
 
     if mtype == "init":
+        # Same checks as bridge.parse_init, before taking control.
+        problem = init_problem(msg)
+        if problem is not None:
+            await send_status(websocket, f"mock: init refused: {problem}")
+            return
         if WORLD.controller is not None and WORLD.controller in WORLD.clients \
                 and WORLD.controller is not websocket:
             await send_status(websocket, "mock is controlled by another client")
@@ -675,42 +738,35 @@ async def handle_message(websocket, raw: str) -> None:
         if not isinstance(request_id, str) or v is None or not action:
             return
 
-        # Idempotency check: replay previous response if this action was already handled
-        history_key = (request_id, action)
-        if history_key in v.service_action_history:
-            cached_acc, cached_err, cached_code, cached_ret = v.service_action_history[history_key]
-            await websocket.send(json.dumps({
+        def ack(accepted, err, code, retryable, duplicate):
+            # Same keys as bridge.py's _send_service_ack, replay included.
+            ack_msg = {
                 "type": "service_ack",
                 "requestId": request_id,
                 "id": vid,
                 "action": action,
-                "accepted": cached_acc,
-                "error": cached_err,
-                "code": cached_code,
-                "retryable": cached_ret,
-                "duplicate": True,
-            }))
+                "accepted": accepted,
+                "duplicate": duplicate,
+            }
+            if err is not None:
+                ack_msg["error"] = err
+            if code is not None:
+                ack_msg["code"] = code
+            if not accepted:
+                ack_msg["retryable"] = retryable
+            return json.dumps(ack_msg)
+
+        # Idempotency check: replay previous response if this action was already handled
+        history_key = (request_id, action)
+        if history_key in v.service_action_history:
+            await websocket.send(ack(*v.service_action_history[history_key], duplicate=True))
             return
 
         accepted, err, code, retryable = v.service(request_id, action, msg)
         log.info("service req: vid=%s action=%s req_id=%s accepted=%s code=%s err=%s", vid, action, request_id, accepted, code, err)
         if accepted:
             v.service_action_history[history_key] = (accepted, err, code, retryable)
-        ack_msg = {
-            "type": "service_ack",
-            "requestId": request_id,
-            "id": vid,
-            "action": action,
-            "accepted": accepted,
-            "duplicate": False,
-        }
-        if err is not None:
-            ack_msg["error"] = err
-        if code is not None:
-            ack_msg["code"] = code
-        if not accepted:
-            ack_msg["retryable"] = retryable
-        await websocket.send(json.dumps(ack_msg))
+        await websocket.send(ack(accepted, err, code, retryable, duplicate=False))
 
     else:
         # Unknown message type: ignore gracefully, per protocol.
@@ -741,15 +797,15 @@ async def handler(websocket) -> None:
             WORLD.controller = None
         log.info("client disconnected: %s", peer)
         # Note: vehicle state in WORLD is intentionally left untouched here
-        # so a reconnecting browser can resume mid-flight; only a fresh
-        # "init" message resets vehicle state.
+        # so a reconnecting browser can resume mid-flight; its next "init"
+        # keeps every vehicle it still lists as it is.
 
 
-async def run(host: str, port: int, allow_origin=()) -> None:
+async def run(host: str, port: int, allow_origin=(), token=None) -> None:
     physics_task = asyncio.create_task(physics_loop())
     telem_task = asyncio.create_task(telemetry_loop())
     try:
-        check = make_origin_check(allow_origin, log.warning)
+        check = make_origin_check(allow_origin, log.warning, resolve_token(token, host, log.warning))
         async with serve(handler, host, port, process_request=check) as server:
             log.info("mock vehicle server listening on ws://%s:%s", host, port)
             await asyncio.get_running_loop().create_future()  # run forever
@@ -781,7 +837,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     try:
-        asyncio.run(run(args.host, args.port, args.allow_origin))
+        asyncio.run(run(args.host, args.port, args.allow_origin, args.token))
     except KeyboardInterrupt:
         log.info("shutting down (Ctrl+C)")
 

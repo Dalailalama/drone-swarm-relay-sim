@@ -551,6 +551,65 @@ async def test_foreign_origin_rejected_at_handshake():
             pass
 
 
+async def test_token_required_at_handshake():
+    """With --token the handshake must carry ?token=<secret> (401 otherwise),
+    so a non-browser client on the network, which the Origin check cannot
+    stop, cannot drive the fleet; the right token still flies."""
+    import socket
+    from websockets.asyncio.client import connect
+    from websockets.exceptions import InvalidStatus
+
+    mock_vehicles.WORLD = World()
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    server = asyncio.create_task(mock_vehicles.run("127.0.0.1", port, token="s3cret"))
+    uri = f"ws://127.0.0.1:{port}"
+    try:
+        for _ in range(200):
+            try:
+                async with connect(uri + "/?token=s3cret"):
+                    break
+            except OSError:
+                await asyncio.sleep(0.01)
+        for path, origin in (("", None), ("/?token=wrong", None), ("/?token=", "http://localhost:8000")):
+            try:
+                async with connect(uri + path, origin=origin):
+                    raise AssertionError(f"handshake {path!r} without the token was accepted")
+            except InvalidStatus as e:
+                assert e.response.status_code == 401, e
+        assert not mock_vehicles.WORLD.clients and not mock_vehicles.WORLD.vehicles
+        async with connect(uri + "/?token=s3cret", origin="http://localhost:8000") as ws:
+            await ws.send(json.dumps({"type": "init", "count": 1, "alt": 30.0}))
+            while json.loads(await asyncio.wait_for(ws.recv(), 2.0)).get("type") != "ready":
+                pass
+    finally:
+        server.cancel()
+        try:
+            await server
+        except (asyncio.CancelledError, Exception):
+            pass
+
+
+async def test_failed_landing_can_be_retried():
+    """Same as bridge.py: a landing that failed while the vehicle is still up
+    and armed may be retried under a new request id (it was SERVICE_BUSY)."""
+    w = World()
+    w.reset(1, alt=30.0)
+    v = w.vehicles["DR-1"]
+    for _ in range(300):
+        w.physics_tick(0.05)
+        if v.ready:
+            break
+    assert v.ready
+    assert v.service("svc-1", "land", {"groundAlt": 0.0})[0]
+    w.physics_tick(0.05)
+    v._fail("land", CLOCK())  # e.g. no descent progress
+    v.service_phase = "failed"
+    acc, err, code, _ = v.service("svc-2", "land", {"groundAlt": 0.0})
+    assert acc and v.service_phase == "landing" and v.service_id == "svc-2", (err, code)
+
+
 async def test_init_count_is_bounded():
     """An init's vehicle count comes off the network: a huge one is clamped
     instead of building millions of vehicles inside the event loop."""
@@ -579,7 +638,69 @@ async def test_malformed_messages_keep_connection():
         "the init after the malformed messages was never handled"
 
 
+async def test_reinit_keeps_vehicles():
+    """An init keeps every vehicle it still lists as it is, like bridge.py: a
+    vehicle parked mid-swap is not re-armed, a flying one is not teleported
+    back to the origin, and positionSeq keeps increasing (also for an id that
+    leaves and comes back), so a watcher tab never freezes."""
+    w = World()
+    w.reset(2, alt=30.0)
+    v1, v2 = w.vehicles["DR-1"], w.vehicles["DR-2"]
+    for _ in range(400):
+        w.physics_tick(0.05)
+        if v1.ready and v2.ready:
+            break
+    assert v1.ready and v2.ready
+    w.apply_goals([{"id": "DR-2", "x": 40.0, "y": -10.0, "alt": 30.0}])
+    acc, *_ = v1.service("svc-1", "land", {"groundAlt": 0.0})
+    assert acc
+    for _ in range(600):
+        w.physics_tick(0.05)
+        if v1.service_phase == "landed":
+            break
+    assert v1.service("svc-1", "authorize", {})[0] and v1.service_phase == "swapping"
+    seq1, seq2 = v1.position_seq, v2.position_seq
+
+    w.reset(2, alt=30.0)
+    for _ in range(100):
+        w.physics_tick(0.05)
+    assert w.vehicles["DR-1"] is v1 and v1.service_phase == "swapping", (v1.service_phase, v1.init_state)
+    assert not v1.armed and v1.alt == 0.0, "the re-init re-armed a vehicle parked mid-swap"
+    assert w.vehicles["DR-2"] is v2 and v2.ready and abs(v2.x - 40.0) < 0.5 and abs(v2.y + 10.0) < 0.5, (v2.x, v2.y)
+    assert v1.position_seq > seq1 and v2.position_seq > seq2
+
+    w.reset(1, alt=30.0)
+    seq2 = v2.position_seq
+    w.reset(2, alt=30.0)
+    assert w.vehicles["DR-2"].position_seq >= seq2, (w.vehicles["DR-2"].position_seq, seq2)
+
+
+async def test_malformed_init_refused_without_control():
+    """Same as bridge.py: an init with a malformed origin, count or alt is
+    refused with a status line and never makes its sender the controller."""
+    mock_vehicles.WORLD = World()
+    ws = MockWebSocket()
+    mock_vehicles.WORLD.clients.add(ws)
+    for bad in [
+        {"count": 1, "alt": 30.0, "origin": {"frame": "common-local-origin", "x": 0.0, "y": 0.0, "groundM": None}},
+        {"count": 1, "alt": 30.0, "origin": "here"},
+        {"count": "three", "alt": 30.0},
+        {"count": 1, "alt": 0.5},
+        {"count": 1, "alt": "high"},
+    ]:
+        ws.sent.clear()
+        try:
+            await mock_vehicles.handle_message(ws, json.dumps({"type": "init", **bad}))
+        except Exception:
+            pass  # the connection handler skips a message that raises
+        assert mock_vehicles.WORLD.controller is None, f"a malformed init took control: {bad}"
+        assert not mock_vehicles.WORLD.vehicles, bad
+        assert any("mock: init refused" in json.loads(m).get("msg", "") for m in ws.sent), (bad, ws.sent)
+
+
 SCENARIOS = [
+    ("Mock: a malformed init is refused with a status before it can take control", test_malformed_init_refused_without_control),
+    ("Mock: re-init keeps listed vehicles (parked stays parked, no teleport, seq continues)", test_reinit_keeps_vehicles),
     ("Mock: startup, physics tick, and telemetry schema", test_startup_physics_telemetry),
     ("Mock: origin coordinates not double-offset in apply_goals", test_origin_coordinates_not_double_offset),
     ("Mock: elevated and sunken landing, touchdown, and relaunch datum conversion", test_elevated_and_sunken_landing_and_relaunch),
@@ -589,7 +710,9 @@ SCENARIOS = [
     ("Mock: service ACKs, retryable rejection recovery, and duplicate suppression", test_service_acks_and_idempotency),
     ("Mock: two consecutive complete service cycles", test_two_consecutive_complete_service_cycles),
     ("Mock: foreign web Origin rejected at the handshake", test_foreign_origin_rejected_at_handshake),
+    ("Mock: --token required at the handshake", test_token_required_at_handshake),
     ("Mock: init vehicle count is bounded", test_init_count_is_bounded),
+    ("Mock: a failed landing can be retried under a new request id", test_failed_landing_can_be_retried),
     ("Mock: malformed messages are skipped without dropping the connection", test_malformed_messages_keep_connection),
 ]
 

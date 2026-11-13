@@ -64,8 +64,10 @@ Requests initialization and allocation of vehicles, and fixes the common local o
 }
 ```
 - `count` (integer $\ge 0$): Number of vehicles to initialize (`DR-1` through `DR-N`).
-- `alt` (float): Takeoff altitude in metres above each vehicle's launch point.
-- `origin` (object): The browser always sends it. When it is absent both servers use the zero origin; the bridge ignores an `init` whose `origin` is malformed (wrong `frame`, or non-finite `x`/`y`/`groundM`).
+- `alt` (float): Takeoff altitude in metres above each vehicle's launch point; must be above 1.0 m (`TAKEOFF_CONFIRM_ALT_M`).
+- `origin` (object): The browser always sends it. When it is absent both servers use the zero origin.
+- Both servers refuse an `init` whose `count` or `alt` is not a finite number, whose `alt` is 1.0 m or less, or whose `origin` is malformed (wrong `frame`, or non-finite `x`/`y`/`groundM`), with a `status` line, before it can take control.
+- An `init` is not a teardown. A vehicle it still lists keeps its link, flight and service state: a flying vehicle keeps flying, and one parked in a service phase stays parked (its `ready` entry and telemetry `state` name the phase); only the §5.2 handshake arms it again. The browser picks a parked vehicle's service up from telemetry (`serviceId`, phases `landing` to `swapped`) and finishes it. `positionSeq` and `landedSeq` never restart for an id, also for one that leaves the fleet and comes back. A vehicle the `init` drops leaves telemetry at once; the bridge first commands one that last reported armed to LAND and keeps watching it until it is down (an id that returns meanwhile comes back in that landing service), while the mock, having no aircraft, simply removes it.
 
 #### `goals`
 Commands waypoint setpoints for active vehicles. The browser sends them at about 2 Hz (at most once per 0.5 s of sim time).
@@ -102,7 +104,7 @@ Commands lifecycle and service transitions (landing, battery swap, relaunch, abo
 ### 3.2 Server to Client Messages
 
 #### `ready`
-Sent in response to `"init"`. The bridge waits (bounded) for each vehicle's first-pass outcome before replying; the mock replies at once with every vehicle in `wait-heartbeat`. Later per-vehicle progress arrives in telemetry.
+Sent in response to `"init"`. The bridge waits (bounded) for each vehicle's first-pass outcome before replying, and keeps answering the client's `goals` and `service` messages meanwhile (a newer `init` supersedes a reply still waiting); the mock replies at once with every vehicle in `wait-heartbeat`. Later per-vehicle progress arrives in telemetry.
 ```json
 {
   "type": "ready",
@@ -113,6 +115,7 @@ Sent in response to `"init"`. The bridge waits (bounded) for each vehicle's firs
   ]
 }
 ```
+- `ids` is the fleet that exists. When it is shorter than the `init` count (the bridge was started with `--count`, which overrides the message's count and says so in a `status` line), the browser marks every drone not in `ids` down at once and reports readiness against the count it asked for (e.g. `3/10`). A listed vehicle that never sends telemetry goes down after `EXT_LOST_DEAD_SEC`.
 
 #### `telemetry`
 Broadcast periodically (10 Hz) with the live state of all vehicles. `t` is server-monotonic seconds since start.
@@ -176,7 +179,7 @@ A rejection adds `retryable`, and `code`/`error` when the server has them:
 }
 ```
 - `accepted` (boolean): Whether the request was validated and adopted.
-- `duplicate` (boolean): `true` if this `(requestId, action)` was previously processed and accepted; the original outcome is replayed. The mock's replay always carries `code`, `error` and `retryable` (`null`/`false` when unset); the bridge's omits them.
+- `duplicate` (boolean): `true` if this `(requestId, action)` was previously processed and accepted; the original outcome is replayed, with the same keys from both servers.
 - `code` (string, optional): Machine-readable error code on failure (e.g. `INVALID_PHASE`, `INVALID_REQUEST_ID`, `SERVICE_BUSY`, `HOLD_NOT_READY`, `VEHICLE_NOT_READY`, `BAD_ALTITUDE`).
 - `retryable` (boolean, on rejections): `true` if the failure is temporary and can succeed on vehicle state change. Only accepted outcomes are cached for duplicate replay.
 - `error` (string, optional): Human-readable diagnostic description.
@@ -231,6 +234,8 @@ stateDiagram-v2
     confirm_mode --> ready: Complete climb to target altitude
 ```
 
+The bridge re-sends `MAV_CMD_NAV_LAND` every `STEP_RESEND_DT` until the autopilot ACKs it. A landing that fails anyway (rejected, or no descent progress for `INIT_STEP_TIMEOUT_S`: `state` `failed:land`, `servicePhase` `failed`) may be retried with a fresh `land` under a new `requestId` while the vehicle is still armed and reporting; both servers accept it. The browser reports the failure and retries after 3 s, up to 3 attempts in all.
+
 Touchdown is decided differently by the two servers:
 - **bridge**: the autopilot reports `EXTENDED_SYS_STATE.landed_state == MAV_LANDED_STATE_ON_GROUND` and a disarmed heartbeat. `groundAlt` is not used.
 - **mock**: `|alt - groundAlt| <= 0.05` m, which also disarms the simulated vehicle.
@@ -246,6 +251,7 @@ stateDiagram-v2
 ```
 
 - While in `confirm-abort` or `abort-hold`, all mission goals are strictly suppressed.
+- An `abort` of a grounded vehicle (landed, swapping or swapped, disarmed) parks it in `aborted`. `resume` refuses it (`CANNOT_RESUME_GROUNDED`, "relaunch required") and `relaunch` is accepted from there exactly as from `swapped`.
 - No automatic arming or takeoff commands may be issued from `abort-hold` or `aborted`.
 
 ---
@@ -258,5 +264,7 @@ stateDiagram-v2
 3. Stale heartbeat gating: an abort with an expired heartbeat enters `confirm-abort` and commands no hold until fresh heartbeat evidence arrives (`abort-hold`).
 4. Elevation datum conversion for relaunch (`takeoff_alt = launch_alt + requested_alt`).
 5. READY only at `takeoff_alt - 1.0 m`.
+6. A grounded abort exits through `relaunch` (§5.3).
+7. Shared failure semantics: a re-init keeps an airborne vehicle where it is; a relaunch whose arm the autopilot refuses parks the vehicle (`failed:arm`, never re-armed); an abort whose GUIDED request is refused never reports `abort-hold`. The mock models the refusals with its `arm_refused` and `stuck_mode` vehicle flags, and switches to LAND mode on `land` as ArduCopter does. The duplicate-replay `service_ack` carries the same keys from both servers.
 
 Not covered by this suite: non-caching of retryable rejections and touchdown detection (exercised per server in `sitl/test_bridge.py` and `sitl/test_mock_vehicles.py`), and the server differences called out in §3 and §5.2.

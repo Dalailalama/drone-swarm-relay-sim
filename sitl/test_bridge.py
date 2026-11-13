@@ -334,8 +334,10 @@ class FakeAutopilot:
         north: float = 0.0,
         east: float = 0.0,
         target_alt: float = None,
+        drop_lands: int = 0,  # this many NAV_LANDs are "lost on UDP": no ACK, no descent
     ):
         self.conn = conn
+        self.drop_lands = drop_lands
         self.gate = gate
         self.heartbeats = heartbeats
         self.accept_mode = accept_mode
@@ -354,6 +356,7 @@ class FakeAutopilot:
         self.mode = 0
         self.alt = 0.0
         self.climbing = False
+        self.landing = False  # NAV_LAND accepted: descend, disarm on the ground
         self.ticks = 0
         self._seen = 0
 
@@ -369,17 +372,30 @@ class FakeAutopilot:
                 self.conn.push(ack_msg(MAV_CMD_COMPONENT_ARM_DISARM, self.arm_result))
                 if self.arm_result == MAV_RESULT_ACCEPTED:
                     self.armed = True
+                    self.landing = False
             elif kind == "takeoff":
                 self.conn.push(ack_msg(MAV_CMD_NAV_TAKEOFF, self.takeoff_result))
                 if self.takeoff_result == MAV_RESULT_ACCEPTED and self.climbs:
                     self.climbing = True
                     self.commanded_alt = self.alt + float(detail)
+            elif kind == "land":
+                if self.drop_lands > 0:
+                    self.drop_lands -= 1
+                    continue
+                self.conn.push(ack_msg(MAV_CMD_NAV_LAND))
+                self.landing, self.climbing = True, False
         target = self.commanded_alt if self.cap_alt is None else min(self.commanded_alt, self.cap_alt)
         if self.climbing and self.alt < target:
             self.alt = min(target, self.alt + self.climb_per_tick)
+        if self.landing:
+            self.alt = max(0.0, self.alt - self.climb_per_tick)
+            if self.alt == 0.0:
+                self.armed = False
         if self.heartbeats:
             self.conn.push(hb_msg(armed=self.armed, custom_mode=self.mode))
         self.conn.push(pos_msg(self.north, self.east, -self.alt))
+        if self.landing and not self.armed:
+            self.conn.push(ext_state_msg(1))
 
     async def run(self, stop: asyncio.Event) -> None:
         if self.gate is not None:
@@ -427,13 +443,23 @@ class Harness:
         bridge.client_connected(ws)
         return ws
 
-    def init(self, ws: FakeWebsocket, count: int, alt: float, base_port: int = 14550) -> asyncio.Task:
-        """Send an "init" through the real message dispatcher, concurrently."""
+    def init(self, ws: FakeWebsocket, count: int, alt: float, base_port: int = 14550,
+             cli_count: int = None) -> asyncio.Task:
+        """Send an "init" through the real message dispatcher, concurrently.
+        The task ends once the init's "ready" reply (sent from a task of its
+        own, see bridge._reply_ready) is out or abandoned."""
         raw = json.dumps({"type": "init", "count": count, "alt": alt})
-        return asyncio.create_task(bridge.handle_message(ws, raw, None, base_port))
+
+        async def run():
+            reply = await bridge.handle_message(ws, raw, cli_count, base_port)
+            if reply is not None:
+                await asyncio.gather(reply, return_exceptions=True)
+        return asyncio.create_task(run())
 
     async def close(self) -> None:
         self.stop.set()
+        if bridge.STATE.init_reply is not None:
+            self.tasks.append(bridge.STATE.init_reply)
         for task in self.tasks:
             task.cancel()
         await asyncio.gather(*self.tasks, return_exceptions=True)
@@ -705,8 +731,10 @@ async def scenario_second_client_blocked() -> None:
     assert reply2["ids"] == ["DR-1", "DR-2"], reply2
     assert ready_entry(reply2, "DR-1")["ready"] is True, reply2
     assert ready_entry(reply2, "DR-2")["ready"] is True, reply2
-    assert bridge.STATE.vehicles["DR-1"] is not v1_before, "takeover must rebuild the fleet"
-    assert bridge.STATE.vehicles["DR-1"].takeoff_alt == 15.0
+    # A takeover is not a teardown: the flying DR-1 is kept as it is, never
+    # re-armed or re-commanded to take off (python-sitl/reinit-rearms-parked-vehicle).
+    assert bridge.STATE.vehicles["DR-1"] is v1_before, "takeover rebuilt a flying vehicle"
+    assert v1_before.takeoff_alt == 40.0 and conn_for(14550).count("takeoff") == 1, conn_for(14550).kinds()
 
     await h.close()
 
@@ -930,7 +958,7 @@ async def scenario_init_disconnect_races():
         entered = asyncio.Event()
         release = asyncio.Event()
         original_send = ws.send
-        original_stop = bridge._stop_all_vehicles
+        original_retire = bridge._retire_vehicles
 
         async def send(raw):
             msg = json.loads(raw)
@@ -942,14 +970,14 @@ async def scenario_init_disconnect_races():
                 await release.wait()
             await original_send(raw)
 
-        async def stop():
-            await original_stop()
+        async def retire(keep):
+            await original_retire(keep)
             if phase == "stop":
                 entered.set()
                 await release.wait()
 
         ws.send = send
-        with patch.object(bridge, "_stop_all_vehicles", stop):
+        with patch.object(bridge, "_retire_vehicles", retire):
             if phase == "lock":
                 await bridge.STATE.init_lock.acquire()
             task = h.init(ws, count=1 if phase == "first-pass" else 0, alt=30.0)
@@ -1904,6 +1932,59 @@ async def scenario_foreign_origin_rejected() -> None:
         assert check(Conn(), Req(origin)) is None, origin
 
 
+async def scenario_token_gate() -> None:
+    """With --token (or a non-loopback bind, which generates one) a handshake
+    must carry ?token=: the Origin check cannot stop a non-browser client,
+    and on a LAN bind every host is one. A loopback bind stays tokenless."""
+    captured, announced = {}, []
+
+    def fake_serve(handler, host, port, **kwargs):
+        captured.update(kwargs)
+        raise RuntimeError("stop after capturing serve() kwargs")
+
+    class Req:
+        def __init__(self, path, origin=None):
+            self.path = path
+            self.headers = {} if origin is None else {"Origin": origin}
+
+    class Conn:
+        def respond(self, status, body):
+            return (int(status), body)
+
+    async def check_for(host, token):
+        captured.clear()
+        args = argparse.Namespace(count=None, mav_base_port=14550, ws_host=host, ws_port=0,
+                                  allow_origin=[], token=token)
+        try:
+            await bridge.run(args)
+        except RuntimeError:
+            pass
+        return captured["process_request"]
+
+    real_serve = bridge.serve
+    bridge.serve = fake_serve
+    try:
+        with patch.dict(os.environ, {"BRIDGE_TOKEN": ""}), \
+                patch.object(bridge.log, "warning", lambda msg, *a: announced.append(msg % a if a else msg)):
+            check = await check_for("localhost", "s3cret")
+            for path, origin in (("/", None), ("/?token=wrong", None), ("/?token=", "http://localhost:8000")):
+                assert check(Conn(), Req(path, origin))[0] == 401, (path, origin)
+            assert check(Conn(), Req("/?token=s3cret", "https://evil.example"))[0] == 403
+            assert check(Conn(), Req("/?token=s3cret", "http://localhost:8000")) is None
+            assert check(Conn(), Req("/?a=1&token=s3cret")) is None
+
+            announced.clear()
+            check = await check_for("0.0.0.0", None)
+            assert check(Conn(), Req("/"))[0] == 401, "a LAN bind without --token must still need a token"
+            token = next(m.split("?token=")[1].split()[0] for m in announced if "?token=" in m)
+            assert len(token) >= 16 and check(Conn(), Req(f"/?token={token}")) is None, announced
+
+            check = await check_for("localhost", None)
+            assert check(Conn(), Req("/", "http://localhost:8000")) is None, "loopback default needs no token"
+    finally:
+        bridge.serve = real_serve
+
+
 async def scenario_init_count_bounded() -> None:
     """An init's count comes off the network: a huge one is clamped (with a
     status) instead of building a vehicle and UDP task per requested unit."""
@@ -1933,6 +2014,7 @@ async def scenario_malformed_messages_keep_connection() -> None:
         async def __aiter__(self):
             for raw in self.raws:
                 yield raw
+            await wait_until(lambda: self.of_type("ready"), timeout=1.0)  # stay connected for the reply
 
     bad = ["[]", "42", '{"type":"goals","goals":[1]}', '{"type":"goals","goals":null}',
            '{"type":"init","count":"three"}', '{"type":"service","id":["DR-1"],"requestId":"r","action":"land"}']
@@ -1942,6 +2024,65 @@ async def scenario_malformed_messages_keep_connection() -> None:
         assert ws.of_type("ready"), f"the init after the malformed messages was never handled: {ws.messages}"
     finally:
         await h.close()
+
+
+async def scenario_init_does_not_block_controller() -> None:
+    """handle_init used to hold the controller's message loop until every
+    vehicle's first pass was decided (up to 35 s): its services and 2 Hz goals
+    queued behind it and websockets' keepalive closed the socket (1011). A
+    service sent while the init waits is now answered at once."""
+    h = Harness()
+
+    class StreamWebsocket(FakeWebsocket):
+        def __init__(self, name, raws):
+            super().__init__(name)
+            self.raws = raws
+
+        async def __aiter__(self):
+            for raw in self.raws:
+                yield raw
+                await asyncio.sleep(0.02)
+            await wait_until(lambda: self.of_type("service_ack"), timeout=1.0)
+
+    ws = StreamWebsocket("browser-1", [
+        json.dumps({"type": "init", "count": 1, "alt": 30.0}),
+        json.dumps({"type": "service", "id": "DR-1", "requestId": "svc-1", "action": "land"}),
+    ])
+    with patch.object(bridge, "HEARTBEAT_WAIT_TIMEOUT_S", 60.0):  # DR-1 never boots: its first pass stays open
+        handler = asyncio.create_task(bridge.make_handler(None, 14550)(ws))
+        try:
+            assert await wait_until(lambda: ws.of_type("service_ack"), timeout=1.0), \
+                f"the service request waited behind the init: {ws.statuses()}"
+            ack = ws.of_type("service_ack")[0]
+            assert ack["accepted"] is False and ack["code"] == "VEHICLE_NOT_READY", ack
+            assert not ws.of_type("ready"), "the ready reply must still wait for DR-1's first pass"
+        finally:
+            handler.cancel()
+            await asyncio.gather(handler, return_exceptions=True)
+            await h.close()
+
+
+async def scenario_malformed_init_refused_without_control() -> None:
+    """An init with a malformed origin, count or alt is refused with a status
+    line before it can take control: it used to make its sender the
+    controller and then return without a word (or raise)."""
+    h = Harness()
+    ws = h.client("browser-1")
+    for bad in [
+        {"count": 1, "alt": 30.0, "origin": {"frame": "common-local-origin", "x": 0.0, "y": 0.0, "groundM": None}},
+        {"count": 1, "alt": 30.0, "origin": "here"},
+        {"count": "three", "alt": 30.0},
+        {"count": 1, "alt": 0.5},
+        {"count": 1, "alt": "high"},
+    ]:
+        ws.messages.clear()
+        await bridge.handle_message(ws, json.dumps({"type": "init", **bad}), None, 14550)
+        assert bridge.STATE.controller is None, f"a malformed init took control: {bad}"
+        assert not bridge.STATE.vehicles and ws.said("bridge: init refused"), (bad, ws.statuses())
+    other = h.client("browser-2")
+    await ready_reply(other, h.init(other, count=0, alt=30.0))
+    assert bridge.STATE.controller is other, "a well-formed init from another client is still free to take over"
+    await h.close()
 
 
 async def scenario_gcs_heartbeat_sent() -> None:
@@ -2091,7 +2232,153 @@ async def scenario_reinit_airborne_no_takeoff():
     await h.close()
 
 
+async def _service(ws, action: str, request_id: str = "svc-1", vid: str = "DR-1", **extra) -> None:
+    await bridge.handle_message(ws, json.dumps({
+        "type": "service", "id": vid, "requestId": request_id, "action": action, **extra,
+    }), None, 14550)
+
+
+async def scenario_reinit_keeps_parked_vehicle():
+    """An init (reset button, selector change, reconnect) must not arm a
+    vehicle parked mid battery swap: it stays parked, its state is named in
+    the ready reply, and only the service handshake relaunches it."""
+    h = Harness()
+    ws = h.client("browser-1")
+    h.telemetry()
+    ap = h.autopilot(14550)
+    conn = conn_for(14550)
+    reply = await ready_reply(ws, h.init(ws, count=1, alt=30.0))
+    assert ready_entry(reply, "DR-1")["ready"] is True, reply
+    v = vehicle("DR-1")
+    await _service(ws, "land")
+    assert await wait_until(lambda: v.service_phase == "landed", timeout=5.0), (v.service_phase, v.init_state)
+    await _service(ws, "authorize")
+    assert v.service_phase == "swapping" and not ap.armed, v.service_phase
+    arms, takeoffs = conn.count("arm"), conn.count("takeoff")
+
+    reply = await ready_reply(ws, h.init(ws, count=1, alt=30.0))
+    await asyncio.sleep(0.3)  # a rebuilt vehicle would be through GUIDED and arming by now
+    assert conn.count("arm") == arms and conn.count("takeoff") == takeoffs, conn.kinds()[-12:]
+    assert bridge.STATE.vehicles["DR-1"] is v and v.service_phase == "swapping", (v.service_phase, v.init_state)
+    assert not ap.armed and ap.alt == 0.0
+    assert ready_entry(reply, "DR-1") == {"id": "DR-1", "ready": False, "state": "swapping"}, reply
+
+    # The handshake itself still finishes the swap and relaunches it.
+    await _service(ws, "complete")
+    await _service(ws, "relaunch", alt=20.0)
+    assert await wait_until(lambda: v.ready, timeout=5.0), (v.service_phase, v.init_state)
+    assert v.service_phase is None and conn.count("arm") == arms + 1
+    await h.close()
+
+
+async def scenario_reinit_keeps_position_seq():
+    """positionSeq never restarts on an init: a watcher tab only takes a fix as
+    new when its seq beats the largest it has seen, so a restart froze it."""
+    h = Harness()
+    ws = h.client("browser-1")
+    h.autopilot(14550)
+    h.autopilot(14560)
+    await ready_reply(ws, h.init(ws, count=2, alt=30.0))
+    v1, v2 = vehicle("DR-1"), vehicle("DR-2")
+    seq1 = v1.position_seq
+    assert seq1 > 0
+    await ready_reply(ws, h.init(ws, count=2, alt=30.0))
+    assert vehicle("DR-1") is v1 and v1.position_seq >= seq1, (v1.position_seq, seq1)
+    await ready_reply(ws, h.init(ws, count=1, alt=30.0))  # DR-2 leaves the fleet...
+    seq2 = v2.position_seq
+    await ready_reply(ws, h.init(ws, count=2, alt=30.0))  # ...and comes back
+    assert vehicle("DR-2").position_seq >= seq2 > 0, (vehicle("DR-2").position_seq, seq2)
+    await h.close()
+
+
+async def scenario_shrinking_init_lands_dropped_vehicle():
+    """An init that drops an airborne vehicle commands it to LAND and keeps
+    watching it until it is down: closing its socket instead left it holding
+    its last GUIDED target forever, unmonitored."""
+    h = Harness()
+    ws = h.client("browser-1")
+    h.autopilot(14550)
+    ap2 = h.autopilot(14560, climb_per_tick=1.0)
+    await ready_reply(ws, h.init(ws, count=2, alt=30.0))
+    v2, conn2 = vehicle("DR-2"), conn_for(14560)
+    assert v2.ready and ap2.armed
+
+    reply = await ready_reply(ws, h.init(ws, count=1, alt=30.0))
+    assert reply["ids"] == ["DR-1"] and "DR-2" not in bridge.STATE.vehicles, reply
+    assert conn2.count("land") == 1, conn2.kinds()[-8:]
+    assert not conn2.closed and not v2.task.done(), "the dropped vehicle was abandoned in the air"
+    assert ws.said("DR-2: left the fleet while armed"), ws.statuses()
+    assert await wait_until(lambda: v2.task.done(), timeout=5.0), (v2.service_phase, v2.init_state, ap2.alt)
+    assert conn2.closed and not ap2.armed and ap2.alt == 0.0
+    assert "DR-2" not in bridge.STATE.retiring and v2.task not in bridge.STATE.vehicle_tasks
+    assert ws.said("DR-2: landed and disarmed after leaving the fleet"), ws.statuses()
+    await h.close()
+
+
+async def scenario_cli_count_override_reported():
+    """`bridge.py --count 3` under a 10-drone sim: the bridge says its --count
+    overrides the init's 10, so the operator knows 7 drones have no vehicle."""
+    h = Harness()
+    ws = h.client("browser-1")
+    for port in (14550, 14560, 14570):
+        h.autopilot(port)
+    reply = await ready_reply(ws, h.init(ws, count=10, alt=30.0, cli_count=3))
+    assert reply["ids"] == ["DR-1", "DR-2", "DR-3"], reply
+    assert ws.said("--count 3 overrides the 10 vehicles this init asked for"), ws.statuses()
+    await h.close()
+
+
+async def scenario_land_resent_until_acked():
+    """NAV_LAND used to be sent once: a lost datagram left the landing to time
+    out (failed:land) with the vehicle hovering over the pad. It is re-sent
+    every STEP_RESEND_DT until the autopilot ACKs it."""
+    h = Harness()
+    ws = h.client("browser-1")
+    h.autopilot(14550, drop_lands=1)
+    await ready_reply(ws, h.init(ws, count=1, alt=30.0))
+    v, conn = vehicle("DR-1"), conn_for(14550)
+    await _service(ws, "land")
+    assert await wait_until(lambda: conn.count("land") >= 2, timeout=2 * bridge.STEP_RESEND_DT + 0.2), \
+        (conn.kinds()[-6:], v.init_state)
+    assert await wait_until(lambda: v.service_phase == "landed", timeout=5.0), (v.service_phase, v.init_state)
+    assert conn.count("land") == 2, "NAV_LAND kept being re-sent after the ACK"
+    await h.close()
+
+
+async def scenario_failed_landing_can_be_retried():
+    """A landing the autopilot rejected leaves the vehicle hovering in service
+    phase 'failed': a land under a new request id is accepted (it used to be
+    SERVICE_BUSY forever), while a grounded or disarmed vehicle is not."""
+    h = Harness()
+    ws = h.client("controller")
+    await h.init(ws, count=0, alt=30.0)
+    clock = Clock()
+    with patch.object(bridge, "_now", clock):
+        v = current_vehicle()
+        conn = v.conn
+        await _service(ws, "land", "svc-1")
+        conn.push(ack_msg(MAV_CMD_NAV_LAND, MAV_RESULT_DENIED))
+        bridge._drain_messages(v)
+        await bridge._advance_init(v)
+        assert v.service_phase == "failed" and v.init_state == "failed:land", (v.service_phase, v.init_state)
+        clock.now += 0.1
+        conn.push(hb_msg(armed=True, custom_mode=GUIDED_MODE_ID))
+        conn.push(pos_msg(-8.0, 12.0, -30.0))
+        bridge._drain_messages(v)
+        await _service(ws, "land", "svc-2")
+        ack = ws.of_type("service_ack")[-1]
+        assert ack["accepted"] is True and ack["requestId"] == "svc-2", ack
+        assert v.service_phase == "landing" and v.service_id == "svc-2" and conn.count("land") == 2
+    await h.close()
+
+
 SCENARIOS = [
+    ("NAV_LAND is re-sent until the autopilot ACKs it", scenario_land_resent_until_acked),
+    ("a failed landing can be retried under a new request id", scenario_failed_landing_can_be_retried),
+    ("--count overriding the init's count is reported in a status line", scenario_cli_count_override_reported),
+    ("an init that drops an airborne vehicle lands it and watches it down", scenario_shrinking_init_lands_dropped_vehicle),
+    ("re-init keeps a vehicle parked mid-swap parked; only the handshake relaunches it", scenario_reinit_keeps_parked_vehicle),
+    ("re-init keeps positionSeq increasing, also for an id that leaves and returns", scenario_reinit_keeps_position_seq),
     ("A2: init of an airborne vehicle at altitude is READY without NAV_TAKEOFF", scenario_reinit_airborne_no_takeoff),
     ("A2: a failed relaunch stays parked and is never re-armed by the bridge", scenario_relaunch_failure_stays_parked),
     ("A2: a PX4 vehicle is reported unsupported, not failed:mode, and never retried", scenario_px4_reported_unsupported),
@@ -2124,9 +2411,12 @@ SCENARIOS = [
     ("ownership: a second client's init is refused while the controller is connected", scenario_second_client_blocked),
     ("ownership: goals from a non-controller are not forwarded", scenario_goals_ownership),
     ("CSWSH: a foreign web Origin is refused at the handshake", scenario_foreign_origin_rejected),
+    ("CSWSH: --token (or a LAN bind) requires ?token= at the handshake", scenario_token_gate),
     ("init: a huge vehicle count is clamped", scenario_init_count_bounded),
     ("malformed messages are skipped without dropping the connection", scenario_malformed_messages_keep_connection),
+    ("a malformed init is refused with a status before it can take control", scenario_malformed_init_refused_without_control),
     ("the bridge sends a GCS HEARTBEAT once it hears the vehicle", scenario_gcs_heartbeat_sent),
+    ("an init waiting on first passes does not block the controller's messages", scenario_init_does_not_block_controller),
     ("MAVLink from a GCS or another system id is ignored", scenario_foreign_mavlink_source_ignored),
 ]
 

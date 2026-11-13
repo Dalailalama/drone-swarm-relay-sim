@@ -10,12 +10,34 @@ Only the `main` branch is supported; there are no tagged releases yet.
 
 ## What is in scope
 
-- `sitl/bridge.py` and `sitl/tak_bridge.py`: WebSocket servers that accept
-  commands and telemetry. `bridge.py` binds `localhost` by default;
-  `tak_bridge.py` binds all interfaces.
-- `tools/server.js`: the batch HTTP API, which listens on all interfaces.
+- `sitl/bridge.py`, `sitl/mock_vehicles.py` and `sitl/tak_bridge.py`:
+  WebSocket servers that accept vehicle commands (arm, take off, fly, land)
+  or CoT for a TAK network, and send telemetry.
+- `tools/server.js`: the batch HTTP API.
 - The browser page: scenario, capture and preset files it loads are
   untrusted input.
+
+## Threat model
+
+- All three WebSocket servers and the batch API bind loopback
+  (`localhost` / `127.0.0.1`) by default.
+- A web page open in the operator's browser can still reach a loopback
+  WebSocket (cross-site WebSocket hijacking). The servers therefore refuse,
+  with HTTP 403, any handshake whose `Origin` is not the sim's own: loopback
+  http(s), `file://` (`null`), the GitHub Pages demo, or one added with
+  `--allow-origin`. See `sitl/ws_origin.py`.
+- The Origin check does not stop a non-browser client, which can send any
+  `Origin`. With `--token SECRET` (or `$BRIDGE_TOKEN`), a handshake must
+  also carry `?token=SECRET` in its URL, or it gets HTTP 401. Put the token
+  in the sim's Bridge URL field, e.g. `ws://host:8765/?token=SECRET`. A
+  server bound beyond loopback (`--ws-host 0.0.0.0`) with no token
+  generates one and prints it, because every host on that network is such a
+  client.
+- `ws://` is plaintext, token included. Beyond a trusted LAN, use an SSH or
+  VPN tunnel, or a TLS (`wss://`) proxy.
+- Anyone who holds the token, or who can reach a loopback server from the
+  same machine, can command the fleet. Treat the bridge host as part of the
+  vehicles' control link.
 
 Do not expose the bridges or the batch API to an untrusted network.
 
