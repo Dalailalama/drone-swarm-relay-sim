@@ -125,7 +125,7 @@ main { flex: 1; display: flex; min-height: 0; }
   gap: 10px;
 }
 #mapHint b { color: var(--text); font-weight: 600; }
-#mapHint button { flex: none; padding: 6px 12px; font-size: 11px; }
+#mapHint button { flex: none; width: auto; padding: 6px 12px; font-size: 11px; }
 
 #legend span::before {
   content: '';
