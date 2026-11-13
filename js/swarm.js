@@ -1142,11 +1142,14 @@ function relaysRequired(D, span) {
 // --- C2 ground station -------------------------------------------------------
 function c2Step(s) {
   // Ingest telemetry that physically arrived. Every received report is also
-  // a coverage measurement: the link provably worked at that position.
+  // a coverage measurement: the link provably worked at that position —
+  // unless the drone says it has no GNSS fix, when the position is dead
+  // reckoning that can sit cells away from where the packet really left
+  // (audit C2-08).
   for (const p of s.c2.inbox) {
     s.c2.known[p.src] = { ...p.payload, at: s.time };
     s.c2.everHeard.add(p.src);
-    covMark(s, p.payload.x, p.payload.y, 'good');
+    if (p.payload.gps !== 'denied') covMark(s, p.payload.x, p.payload.y, 'good');
     if (p.payload.deadLog && p.payload.deadLog.length) {
       s.c2.covSeqApplied = s.c2.covSeqApplied || new Map();
       const session = p.payload.deadLogSession;
@@ -1191,6 +1194,9 @@ function c2Step(s) {
   const staleAfter = c2StaleAfterSec(s);
   const forgetAfter = Math.max(C2.forgetSec, 4 * staleAfter);
   const fresh = id => known[id] && (s.time - known[id].at) <= staleAfter;
+  // A position reported with a GNSS fix; a denied one is dead reckoning that
+  // C2 must not place coverage, call-offs, anchors or elections on (C2-08).
+  const fixed = id => known[id].gps !== 'denied';
 
   // Operator display: log contact changes, and REMEMBER where the lost were
   // last heard — that memory is what rescue dispatch works from.
@@ -1204,8 +1210,8 @@ function c2Step(s) {
         logEvent(s, 'C2: ' + id + ' out of contact on its way home (RTB, expected)', 'info');
       } else {
         logEvent(s, 'C2 lost telemetry from ' + id, 'warn');
-        s.c2.lost[id] = { x: known[id].x, y: known[id].y, at: s.time };
-        covMark(s, known[id].x, known[id].y, 'bad', 2); // weaker than a dead log, but evidence
+        s.c2.lost[id] = { x: known[id].x, y: known[id].y, at: s.time, uncertain: !fixed(id) };
+        if (fixed(id)) covMark(s, known[id].x, known[id].y, 'bad', 2); // weaker than a dead log, but evidence
       }
     }
     if (!s.c2.wasFresh[id] && f) {
@@ -1315,7 +1321,7 @@ function c2Step(s) {
       let best = null, bestScore = -Infinity;
       for (const id of candidates) {
         const score = 0.6 * (known[id].battery / 100)
-                    + 0.4 * (1 - Math.min(1, dist2d(known[id], slot) / (usable * 2)));
+                    + (fixed(id) ? 0.4 * (1 - Math.min(1, dist2d(known[id], slot) / (usable * 2))) : 0);
         if (score > bestScore) { bestScore = score; best = id; }
       }
       if (!wing.length && !s.c2.wingFallbackWarned) {
@@ -1351,7 +1357,7 @@ function c2Step(s) {
   for (const id of Object.keys(s.c2.lost)) {
     const L = s.c2.lost[id];
     if (s.time - L.at < RESCUE.delaySec) continue;
-    const covered = Object.keys(known).some(k => k !== id && fresh(k) &&
+    const covered = Object.keys(known).some(k => k !== id && fresh(k) && fixed(k) &&
       !s.c2.rescuers.includes(k) && dist2d(known[k], L) < usable * 0.5);
     if (covered) {
       delete s.c2.lost[id];
@@ -1403,7 +1409,7 @@ function c2Step(s) {
       const c = lostCentroid(s);
       let best = null, bestD = Infinity;
       for (const id of candidates) {
-        const dd = dist2d(known[id], c);
+        const dd = dist2d(known[id], c) + (fixed(id) ? 0 : 1e9); // a fix outranks any dead-reckoned position
         if (dd < bestD) { bestD = dd; best = id; }
       }
       s.c2.rescuers.push(best);
@@ -1445,7 +1451,7 @@ function c2Step(s) {
     s.c2.rescueOrder = ordered.slice();
     let anchor = s.base, anchorId = 'C2', aD = dist2d(s.base, c);
     for (const id of Object.keys(known)) {
-      if (!fresh(id) || s.c2.rescuers.includes(id)) continue;
+      if (!fresh(id) || !fixed(id) || s.c2.rescuers.includes(id)) continue;
       const dd = dist2d(known[id], c);
       if (dd < aD) { aD = dd; anchor = known[id]; anchorId = id; }
     }
@@ -1453,7 +1459,7 @@ function c2Step(s) {
     const incA = s.c2.rescueAnchorId;
     if (incA && incA !== anchorId) {
       const incPos = incA === 'C2' ? s.base
-        : (fresh(incA) && !s.c2.rescuers.includes(incA) ? known[incA] : null);
+        : (fresh(incA) && fixed(incA) && !s.c2.rescuers.includes(incA) ? known[incA] : null);
       if (incPos && dist2d(incPos, c) <= aD * 1.25) { anchor = incPos; anchorId = incA; }
     }
     s.c2.rescueAnchorId = anchorId;
@@ -1467,7 +1473,7 @@ function c2Step(s) {
       rescueOrders[rid] = { goto, upstream: anchorId };
       // the next link anchors on this one: its live position if fresh,
       // otherwise where it was told to go
-      anchor = fresh(rid) && known[rid] ? known[rid] : goto;
+      anchor = fresh(rid) && known[rid] && fixed(rid) ? known[rid] : goto;
       anchorId = rid;
     }
   }
