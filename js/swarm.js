@@ -1103,6 +1103,12 @@ function groundSpeedAlong(af, wind, fromP, toP) {
 // scalar "max(1, maxV − |wind|)" floor used to accept short impossible
 // returns on battery cost and reject easy downwind runs at stall speed.
 function orderFeasible(s, d, order) {
+  return d.energyWh > orderEnergyWh(s, d, order);
+}
+
+// Energy the order's backup plan needs: out to the goal, home with the
+// pessimism margin, reserve intact. Infinity when a leg can't be flown.
+function orderEnergyWh(s, d, order) {
   const af = afOf(s, d);
   const goal = orderGoal(s, order);
   // Drone-side: plan from beliefs (nav position, last-known base), never truth.
@@ -1111,11 +1117,11 @@ function orderFeasible(s, d, order) {
   const homeK = d.baseKnown || s.base;
   const gOut = groundSpeedAlong(af, s.wind, here, goal);
   const gHome = groundSpeedAlong(af, s.wind, goal, homeK);
-  if (gOut < 0.5 || gHome < 0.5) return false; // a leg that can't be flown fails every backup plan
+  if (gOut < 0.5 || gHome < 0.5) return Infinity; // a leg that can't be flown fails every backup plan
   const pw = flightPowerW(af, af.maxSpeedMs);
   const whToGoal = pw * (dist2d(here, goal) / gOut) / 3600;
   const whGoalHome = pw * (dist2d(goal, homeK) / gHome) / 3600 * BATTERY.homeMargin;
-  return d.energyWh > whToGoal + whGoalHome + usableWh(af) * BATTERY.reserveFrac;
+  return whToGoal + whGoalHome + usableWh(af) * BATTERY.reserveFrac;
 }
 
 // Slot i of k relays: fraction (i+1)/(k+1) along base → ordered target.
@@ -1609,7 +1615,11 @@ function droneComms(s, d) {
     }
 
     // Commitment rule: refuse a NEW tasking whose recovery plan doesn't
-    // close; keep flying the current (previously vetted) order instead.
+    // close; keep flying the current order instead — but only while the
+    // current order closes. The preflight mission was never vetted, and an
+    // order can stop closing as the battery drains: keeping a farther
+    // non-closing order over a cheaper new one inverted the rule (audit
+    // C2-06), so then the cheaper of the two wins.
     // The signature keys on the RESOLVED goal (relay slotPos / rescue goto /
     // mission target), not just the role/slot label — otherwise a slot that
     // migrates after a replan, or a rescue goto that steps deeper, keeps the
@@ -1625,7 +1635,8 @@ function droneComms(s, d) {
     const og = orderGoal(s, o), cg = orderGoal(s, d.order);
     const sig = o.role + '/' + Math.round(og.x) + ',' + Math.round(og.y);
     const changed = sig !== (d.order.role + '/' + Math.round(cg.x) + ',' + Math.round(cg.y));
-    if (changed && !orderFeasible(s, d, o)) {
+    if (changed && !orderFeasible(s, d, o) &&
+        (orderFeasible(s, d, d.order) || orderEnergyWh(s, d, o) > orderEnergyWh(s, d, d.order))) {
       d.rejectedRole = o.role;
       if (d.rejectedSig !== sig) {
         d.rejectedSig = sig;
