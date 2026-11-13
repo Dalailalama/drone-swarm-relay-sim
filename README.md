@@ -167,9 +167,10 @@ all tested:
   at fleet size minus one, so at least one tactical drone always flies.
 - **GPS-denied navigation** (*Interference → Add GPS outage*) — inside a
   denial zone drones fly on dead reckoning: their believed position integrates
-  airspeed with Ornstein-Uhlenbeck drift, they steer by that belief (and miss
-  slots by exactly their nav error), and telemetry poisons C2's picture of
-  where they are. The planner hedges: relay slots sidestep zones it cannot
+  airspeed plus the wind estimate frozen when GNSS was lost, with
+  Ornstein-Uhlenbeck drift (so a wind change during the outage becomes nav
+  error), they steer by that belief (and miss slots by exactly their nav
+  error), and telemetry poisons C2's picture of where they are. The planner hedges: relay slots sidestep zones it cannot
   trust positions in, and C2 reads each report's GNSS flag, so a
   dead-reckoned position paints no coverage, calls off no search, anchors no
   rescue chain and earns no election credit, and a drone lost there is

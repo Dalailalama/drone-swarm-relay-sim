@@ -75,7 +75,10 @@ python bridge.py --count 3
 Then point the browser sim (external-vehicle mode) at `ws://localhost:8765`.
 The bridge binds `localhost` by default; for a browser on another machine
 start it with `--ws-host 0.0.0.0` and connect with the token it prints
-(see [Connecting safely](#connecting-safely)). The bridge will, per vehicle: wait for a
+(see [Connecting safely](#connecting-safely)). If that browser loads the sim
+from another host (for example `http://<box>:8000`), the page's origin is
+not loopback, so also pass `--allow-origin http://<box>:8000` or the
+handshake gets HTTP 403. The bridge will, per vehicle: wait for a
 MAVLink heartbeat, switch it to `GUIDED` mode, arm it, command takeoff to
 the requested altitude, then forward `goals` as MAVLink position setpoints
 and stream back `telemetry` from the vehicle's real position.
@@ -107,7 +110,8 @@ the handshake gate in `ws_origin.py`:
   (`https://dalailalama.github.io`), and clients that send no Origin header
   (Python tools). Add more with the repeatable `--allow-origin ORIGIN`;
   `--allow-origin '*'` turns the check off. Allowing `null` also admits
-  sandboxed iframes on any site.
+  sandboxed iframes on any site, so use `--token` when other pages open in
+  the operator's browser are not trusted.
 - **Token.** `--token SECRET` (or `$BRIDGE_TOKEN`) makes every client
   connect with `?token=SECRET` in its URL, e.g.
   `ws://<box>:8765/?token=SECRET` typed into the sim's Bridge URL field;
