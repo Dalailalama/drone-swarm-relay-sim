@@ -1,5 +1,5 @@
 // Anti-jam spectrum agility + LPI/LPD tests — the quantified-recovery story:
-// hopping radios shed a datasheet-class amount of interference, LPI trades
+// agile radios shed an assumed (estimated, not datasheet) amount of interference, LPI trades
 // link budget for survivability, and the net effect is measurable uptime.
 
 const { test } = require('node:test');
@@ -11,7 +11,7 @@ const { loadCore } = require('./helpers/sim.js');
 const ctx = loadCore();
 const AGILITY = ctx.consts.AGILITY;
 
-// The frequency-hopping radio under test: Doodle Labs Mesh Rider, +13 dB.
+// The agile radio under test: Doodle Labs Mesh Rider, +13 dB (estimate).
 const DOODLE = R.RADIOS.find(r => r.id === 'doodle-rm');
 
 function makeSw(opts) {

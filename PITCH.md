@@ -61,8 +61,9 @@ buyer's checklist.
   drones act on *believed* positions while truth diverges; planner hedges relay
   placement accordingly. *Why it sells:* appears in essentially every autonomy
   RFP; cheap to build (drift term on the belief state) and instantly quotable.
-- **Anti-jam spectrum agility (LPI/LPD)** — frequency-hopping radio presets,
-  low-probability-of-intercept toggle, and quantified recovery: "frequency
+- **Anti-jam spectrum agility (LPI/LPD)** — anti-jam / spectrum-agile radio
+  presets (only ELRS is frequency-hopping; their 12–16 dB gain is a modelling
+  estimate), low-probability-of-intercept toggle, and quantified recovery: "frequency
   agility restored X% of chain throughput under Y dBm jamming." *Why it sells:*
   converts the interference demo from "it suffers honestly" into "we have
   countermeasures and numbers."

@@ -144,21 +144,28 @@ all tested:
   (*Mixed fleet* in Mission setup): an endurance relay wing on long-range
   radios holds the backhaul while tactical drones fly the objective on cheap
   short-range hardware. Link budgets between different radios are computed per
-  direction over each radio's own calibrated curve; band-incompatible nodes
-  simply cannot hear each other. C2 elects wing units for relay duty, keeps
+  direction from each transmitter's own power and calibration, over one
+  shared path-loss exponent per link (the larger of the two range fits, so
+  the path stays reciprocal; a jammer reaching either end uses the same one);
+  band- or protocol-incompatible nodes simply cannot hear each other (radios
+  link only when they share a preset's `air` protocol key, e.g. SiK and
+  RFD900x). C2 elects wing units for relay duty, keeps
   them off rescue tasking, and always plans a *tactical-tail slot* so the
-  short-legged flock can actually hang off the chain.
+  short-legged flock can actually hang off the chain. The panel caps the wing
+  at fleet size minus one, so at least one tactical drone always flies.
 - **GPS-denied navigation** (*Interference → Add GPS outage*) — inside a
   denial zone drones fly on dead reckoning: their believed position integrates
   airspeed with Ornstein-Uhlenbeck drift, they steer by that belief (and miss
   slots by exactly their nav error), and telemetry poisons C2's picture of
   where they are. The planner hedges: relay slots sidestep zones it cannot
   trust positions in.
-- **Anti-jam spectrum agility + LPI/LPD** (*Mission setup*) — frequency-hopping
-  presets (Doodle Mesh Rider, Silvus, ELRS) shed a datasheet-class amount of
-  interference when agility is on; LPI waveforms trade 3 dB of link budget for
-  6 dB of denial rejection; denial zones visibly shrink for agile chains; link
-  uptime is measured so recovery is a number, not an adjective.
+- **Anti-jam spectrum agility + LPI/LPD** (*Mission setup*) — anti-jam /
+  agile presets (FHSS for ELRS; interference avoidance and cancellation for
+  Silvus and Doodle Mesh Rider) shed an assumed processing gain of 12–16 dB
+  when agility is on (a modelling estimate: no vendor publishes such a
+  figure, see [RADIOS.md](RADIOS.md)); LPI waveforms trade 3 dB of link
+  budget for 6 dB of denial rejection; denial zones visibly shrink for agile
+  chains; link uptime is measured so recovery is a number, not an adjective.
 - **Payload/video backhaul** (*Mission setup → Video backhaul*) — streamed
   chunks are real packets paying real airtime on the one shared channel.
   C2 grants ONE streamer at a time in round-robin turns delivered inside order
@@ -220,10 +227,13 @@ Five features that make this hard to copy — all software-only, all tested:
 
 Every radio preset is a real product with datasheet numbers — TX power,
 receiver sensitivity, frequency, air rate, and the vendor's claimed
-line-of-sight range (sources in [RADIOS.md](RADIOS.md)).
+line-of-sight range — where the vendor publishes them. Fields that are
+estimates (for example Doodle's RF figures, the MANET ranges and air rates,
+and every anti-jam `hopGainDb`) are marked *(estimate)* in
+[RADIOS.md](RADIOS.md), next to the sources.
 
 Free-space path loss alone would predict absurd ranges (a 100 mW SiK radio
-"reaches" 290 km in free space; in the field it does 300 m near the ground).
+"reaches" ~73 km in free space; in the field it does 300 m near the ground).
 So the model uses **log-distance path loss with a per-radio exponent
 calibrated so the link margin hits exactly 0 dB at the vendor's rated LOS
 range**. That single fitted parameter absorbs ground reflection, Fresnel
@@ -232,11 +242,19 @@ losses, and antenna reality. On top of that sit:
 - **Log-normal shadowing** — an Ornstein-Uhlenbeck dB offset per link
   (σ = 2.5 dB open field → 6.5 dB urban), so links breathe and flicker
 - **Packet error curve** — success probability is logistic in margin
-  (50% at +2 dB, ~95% at +6 dB), with per-hop link-layer retries
+  (~16% at 0 dB, 50% at +2 dB, ~97% at +6 dB), with per-hop link-layer
+  retries; at 0 dB or below nothing is delivered. Datasheet sensitivity is
+  quoted at a low error rate, so the rated range is the model's ~84%-loss
+  edge ([RADIOS.md](RADIOS.md))
+- **Interference** — a source's ERP is converted to EIRP and adds to the
+  receiver's noise in milliwatts, against a per-preset required
+  signal-to-interference ratio ([MODEL.md](MODEL.md) §3.3)
 - **3D slant range** and a **4/3-Earth radio horizon** — beyond
   `4.12(√h₁+√h₂) km` the planet blocks the link no matter the power
 - **Shared-channel contention** — every transmission (and retry) occupies
-  the one frequency; C2 traffic overhead visibly eats chain throughput
+  the one frequency; C2 traffic overhead visibly eats chain throughput.
+  Each channel is one perfectly serialized swarm-wide timeline: there are no
+  collisions, but no spatial reuse either
 - **Regulatory duty cycle** (EU868 LoRa preset) — throttles telemetry and
   command rates; failsafe timeouts scale to match, like PX4's `COM_DL_LOSS_T`
 
@@ -246,17 +264,30 @@ calibrated exponent is a modeling choice, stated here so you can judge it.
 
 ## The energy model
 
-No endurance sliders. Airframes are defined by mass, rotor disc area, and
-battery watt-hours; hover power comes from actuator-disc momentum theory at
-a lumped 0.55 powertrain efficiency, forward flight adds a cubic drag term,
-and endurance *emerges* — within a couple of minutes of the real aircraft
-each preset is modeled on (sub-250 g micro ≈ 36 min, 450-class ≈ 22 min,
-endurance X8 ≈ 46 min). Drones run wind-aware smart-RTH: energy to get home
-is continuously re-estimated, and they leave while they still can.
+No endurance sliders. Airframes are defined by mass, rotor disc area, drag
+area and battery watt-hours; hover power comes from actuator-disc momentum
+theory over a lumped powertrain efficiency (0.55 by default; the micro
+carries 0.24, fitted to its reference aircraft), and forward flight is
+level-flight momentum theory: induced power falls with airspeed while
+parasite drag on each preset's drag area rises with its cube. Endurance
+*emerges*: on the usable pack, about 24 min of hover for the sub-250 g micro
+(the DJI Mini 4 Pro's published 30 min on the full pack), 22 min for the
+450-class and 36 min for the endurance X8. Only the micro is fitted to a real
+aircraft; the q450 and X8 are class-typical estimates. Drones run wind-aware
+smart-RTH: energy to get home is continuously re-estimated, and they leave
+while they still can.
+
+The battery model is deliberately simple: a constant-energy pack, of which
+80% of the nominal watt-hours is usable (100% on screen is that 80%), and a
+drone that runs the usable energy out is down. Smart-RTH keeps a reserve of
+7% of usable energy and bills the home leg at maximum-speed power with a 1.3
+margin. Voltage sag, C-rate, temperature and ageing are not modeled (see
+[MODEL.md](MODEL.md) §5 and §7).
 
 Wind is a ground-frame/air-frame split: speed limits and power draw are paid
-in airspeed, so holding a relay slot in a 10 m/s wind costs real watts, and
-a 16 m/s gale blows a 14 m/s quad backwards.
+in airspeed, so wind changes power in both directions (moderate airspeed
+lowers it below hover; it climbs toward maximum speed), and a 16 m/s gale
+blows a 14 m/s quad backwards.
 
 ## Terrain and the learned coverage map
 
@@ -264,7 +295,9 @@ Terrain (Mission setup → Terrain) is a fractal-noise heightfield — endless
 seeded rolling hills and valleys, sampled analytically at any point — plus
 procedural city districts: street grids of low-rise blocks with a
 scattering of 60-140 m towers. Radio links need genuine line of sight over
-both (with a Fresnel clearance that tapers at the antennas). Drones fly
+both (a clearance of 0.6 of the first Fresnel zone at the link frequency,
+shrinking to zero at the antennas; the test is pass/fail, with no partial
+diffraction loss). Drones fly
 terrain-following (AGL), so ridges between valleys cut links even though
 nobody crashes; buildings taller than the flight altitude are no-fly boxes
 the drones steer around (they carry a terrain database, like real
