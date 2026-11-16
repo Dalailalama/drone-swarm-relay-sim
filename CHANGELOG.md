@@ -169,13 +169,16 @@ the commit messages carry the per-finding detail.
   prints k/N arrived and a censored median arrival time (">duration" when
   half or fewer seeds arrive), and by default runs for twice the longest
   transit.
-- The batch API server derives its per-run time budget from the batch limits
-  (twice the estimated cost of the largest batch they admit) instead of a
-  fixed 5 minutes, its 504 says how to split the batch or run it with the
-  CLI, and its usage line names `--host`. The cost rates behind that budget
-  are the documented ~1 ms per drone-second, which `tools/batch.js` itself
-  notes is out of date, so a large or jammed batch the limits admit can
-  still run past the budget and get that 504 until the rates are re-measured.
+- The batch API server's time budget follows each request's own pace instead
+  of a fixed 5 minutes: the worker reports progress every few sim-seconds
+  and the server allows twice the batch's projected total at the pace it has
+  shown, never under 5 minutes (a hang is caught no later than before) and
+  never over twice the cost of the largest batch the limits admit (~36
+  minutes at `tools/batch.js`'s documented rates). Those rates are stale, so
+  they stand in only until the first progress report; a batch that needs
+  more than the ceiling still gets a 504, which says whether it stalled or
+  hit the ceiling and how to split the batch or run it with the CLI. The
+  usage line names `--host`.
 - The benchmark's `droppedPct` is the control-plane loss that batch, compare
   and the after-action report state, not the aggregate that counts video
   fragments.

@@ -15,7 +15,7 @@
 const http = require('node:http');
 const { Worker } = require('node:worker_threads');
 const path = require('node:path');
-const { validateConfig, LIMITS, maxBatchWallMs } = require('./batch.js');
+const { validateConfig, LIMITS, maxBatchWallMs, estimateWallMs } = require('./batch.js');
 
 // Oversize bodies are answered, not hung up on (soak finding R13): the old
 // code destroyed the socket mid-upload, so the client saw ECONNRESET instead
@@ -51,23 +51,70 @@ function send(res, code, body, type) {
 // `workers` concurrent runs, a bounded wait queue (overflow answers 429), a
 // hard per-run time budget (504 + terminate), and a client who hangs up
 // takes their worker down with them.
-// The time budget follows the work budgets the validator admits (review): a
-// fixed 5 min sat under the ~18 min the largest admissible batch takes at
-// batch.js's rates, so an accepted batch could hold a worker for 5 minutes
-// and then 504. Twice that estimate leaves room for a slower machine.
+// The time budget follows each request's own pace (review). A fixed 5 min sat
+// under the ~18 min the largest admissible batch takes at batch.js's rates, and
+// one global figure derived from those rates is only as good as the rates,
+// which batch.js says are stale (a jammed batch can run an order of magnitude
+// slower). So the worker reports progress every few sim-seconds and the server
+// re-arms the kill timer from it: the budget is TIMEOUT_MARGIN x the batch's
+// projected total at the pace it has actually shown, where the absolute rate
+// cancels out. Only before the first report does the static per-request
+// estimate stand in. The budget is never under FLOOR_MS (the old 5 min, so a
+// hang is caught no later than before) nor over CEILING_MS (twice the largest
+// batch the validator admits, ~36 min at those rates).
 const TIMEOUT_MARGIN = 2;
-const POOL_DEFAULTS = { workers: 2, queue: 8, timeoutMs: Math.ceil(TIMEOUT_MARGIN * maxBatchWallMs()) };
+const FLOOR_MS = 5 * 60 * 1000;
+const POOL_DEFAULTS = {
+  workers: 2, queue: 8, floorMs: FLOOR_MS,
+  ceilingMs: Math.ceil(TIMEOUT_MARGIN * maxBatchWallMs()),
+};
+
+// Wall ms a running batch may take in all, counted from when its worker
+// started. `fraction` is the share of the batch its worker last reported
+// done (0 = nothing yet), `elapsedMs` the wall time so far.
+function batchBudgetMs(state, policy) {
+  const f = Math.min(1, state.fraction || 0);
+  const raw = f > 0
+    ? policy.margin * state.elapsedMs / f
+    : policy.margin * state.estimateMs;
+  // A missing or garbled input must not reach setTimeout (NaN fires at once).
+  return Math.min(policy.ceilingMs, Math.max(policy.floorMs, Number.isFinite(raw) ? raw : policy.floorMs));
+}
+
+const SPLIT_ADVICE = ' — split it into smaller batches (fewer runs, a shorter duration or a smaller ' +
+  'fleet), or run it with tools/batch.js, which has none';
+
+// Which limit tripped, so the 504 tells the client what to change.
+function overBudgetMessage(why) {
+  if (why.fixedMs != null) return 'batch run exceeded the ' + why.fixedMs + ' ms time budget' + SPLIT_ADVICE;
+  if (why.budgetMs >= why.ceilingMs) {
+    return 'batch run exceeded the ' + why.ceilingMs + ' ms limit the server gives any batch' + SPLIT_ADVICE;
+  }
+  if (why.fraction > 0) {
+    return 'batch run stopped making progress (' + Math.round(why.fraction * 100) + '% done after ' +
+      why.elapsedMs + ' ms)' + SPLIT_ADVICE;
+  }
+  return 'batch run reported no progress within ' + why.budgetMs + ' ms' + SPLIT_ADVICE;
+}
 
 function makePool(opts, stats) {
   const workers = opts.workers != null ? opts.workers : POOL_DEFAULTS.workers;
   const queueMax = opts.queue != null ? opts.queue : POOL_DEFAULTS.queue;
-  const timeoutMs = opts.timeoutMs != null ? opts.timeoutMs : POOL_DEFAULTS.timeoutMs;
-  const batchPath = path.resolve(__dirname, 'batch.js').replace(/\\/g, '/');
+  // An explicit timeoutMs is one fixed hard budget for every batch (progress is
+  // ignored); otherwise the budget follows each batch's pace within [floor, ceiling].
+  const fixedMs = opts.timeoutMs != null ? opts.timeoutMs : null;
+  const ceilingMs = fixedMs != null ? fixedMs : (opts.ceilingMs != null ? opts.ceilingMs : POOL_DEFAULTS.ceilingMs);
+  const policy = {
+    margin: TIMEOUT_MARGIN,
+    floorMs: Math.min(ceilingMs, opts.floorMs != null ? opts.floorMs : POOL_DEFAULTS.floorMs),
+    ceilingMs,
+  };
+  const batchPath = path.resolve(opts.workerBatchPath || path.join(__dirname, 'batch.js')).replace(/\\/g, '/');
   const workerScript = `
     const { parentPort, workerData } = require('node:worker_threads');
     const { runBatch } = require('${batchPath}');
     try {
-      const result = runBatch(workerData);
+      const result = runBatch(workerData, null, f => parentPort.postMessage({ progress: f }));
       parentPort.postMessage({ ok: true, result });
     } catch (err) {
       parentPort.postMessage({ ok: false, error: err.message });
@@ -90,7 +137,9 @@ function makePool(opts, stats) {
   function start(job) {
     return new Promise(done => {
       const worker = new Worker(workerScript, { eval: true, workerData: job.cfg });
+      const startedAt = Date.now();
       let settled = false;
+      let fraction = 0, budgetMs = 0, killTimer = null;
       const finish = (fn, arg) => {
         if (settled) return;
         settled = true;
@@ -98,20 +147,36 @@ function makePool(opts, stats) {
         fn(arg);
         done();
       };
-      const killTimer = setTimeout(() => {
+      const expire = () => {
         stats.timedOut++;
         worker.terminate();
-        // Past a budget sized for the largest admissible batch, say what to
-        // do: this machine runs slower than the limits assume.
-        finish(job.reject, err('batch run exceeded the ' + timeoutMs + ' ms time budget — split it into smaller ' +
-          'batches (fewer runs, a shorter duration or a smaller fleet), or run it with tools/batch.js, which has none', 504));
-      }, timeoutMs);
+        finish(job.reject, err(overBudgetMessage({
+          fixedMs, budgetMs, ceilingMs, fraction, elapsedMs: Date.now() - startedAt,
+        }), 504));
+      };
+      // (Re)arm the kill timer for the budget the batch's pace allows right now.
+      const arm = () => {
+        const elapsedMs = Date.now() - startedAt;
+        budgetMs = fixedMs != null ? fixedMs
+          : batchBudgetMs({ estimateMs: job.estimateMs, elapsedMs, fraction }, policy);
+        clearTimeout(killTimer);
+        killTimer = setTimeout(expire, Math.max(0, startedAt + budgetMs - Date.now()));
+      };
+      arm();
       job.cancel = () => {
         stats.terminated++;
         worker.terminate();
         finish(job.reject, err('client disconnected', 499));
       };
       worker.on('message', msg => {
+        if (msg && typeof msg.progress === 'number') {
+          // A pace report: only the pace-following budget reads it.
+          if (!settled && fixedMs == null && msg.progress > fraction) {
+            fraction = Math.min(1, msg.progress);
+            arm();
+          }
+          return;
+        }
         if (msg.ok) finish(job.resolve, msg.result);
         else finish(job.reject, err(msg.error, 500));
       });
@@ -124,7 +189,7 @@ function makePool(opts, stats) {
   }
 
   return {
-    timeoutMs,
+    timeoutMs: ceilingMs,
     submit(cfg, req, res) {
       return new Promise((resolve, reject) => {
         if (active >= workers && waiting.length >= queueMax) {
@@ -133,7 +198,7 @@ function makePool(opts, stats) {
         }
         let finished = false;
         const job = {
-          cfg, cancelled: false, cancel: null,
+          cfg, estimateMs: estimateWallMs(cfg), cancelled: false, cancel: null,
           resolve: v => { finished = true; resolve(v); },
           reject: e => { finished = true; reject(e); },
         };
@@ -231,7 +296,7 @@ function createApp(opts) {
 // machine needs --host plus a reverse proxy that authenticates.
 const DEFAULT_HOST = '127.0.0.1';
 
-module.exports = { createApp, DEFAULT_HOST };
+module.exports = { createApp, DEFAULT_HOST, batchBudgetMs };
 
 // --- CLI ----------------------------------------------------------------------
 if (require.main === module) {

@@ -94,6 +94,46 @@ function plannerGridCells(cfg, cell) {
   return nx * ny;
 }
 
+// The two quantities LIMITS caps. validateConfig enforces the caps on exactly
+// these numbers and estimateWallMs prices them, so the limit and the estimate
+// cannot drift apart. Both read a config validateConfig has accepted (or is
+// part-way through accepting: the work term needs no mission, the planning
+// term does, so each has its own function and validateConfig keeps its order).
+function workDroneSec(cfg) {
+  const cells = Array.isArray(cfg.sweep) && cfg.sweep.length ? cfg.sweep : [{ name: 'base' }];
+  const seeds = Array.isArray(cfg.seeds) && cfg.seeds.length ? cfg.seeds : [101, 102, 103];
+  const dur = cfg.durationSec != null ? cfg.durationSec : 300;
+  const count = cfg.count != null ? cfg.count : 10;
+  // Weighted by the active jammers each tick has to evaluate.
+  return Math.round(cells.length * seeds.length * dur * count * (1 + activeJammers(cfg) / 8));
+}
+
+function planCellReplans(cfg) {
+  const cells = Array.isArray(cfg.sweep) && cfg.sweep.length ? cfg.sweep : [{ name: 'base' }];
+  const seeds = Array.isArray(cfg.seeds) && cfg.seeds.length ? cfg.seeds : [101, 102, 103];
+  const dur = cfg.durationSec != null ? cfg.durationSec : 300;
+  let worstGrid = 0, planWork = 0;
+  for (const c of cells) {
+    const grid = plannerGridCells(cfg, c);
+    worstGrid = Math.max(worstGrid, grid);
+    planWork += grid * seeds.length * Math.ceil(dur / PLAN_REPLAN_SEC);
+  }
+  planWork *= 1 + activeJammers(cfg); // inDenialZone runs per probed cell per jammer
+  return { planWork, worstGrid };
+}
+
+function batchCost(cfg) {
+  return { work: workDroneSec(cfg), planWork: planCellReplans(cfg).planWork };
+}
+
+// This batch's estimated wall ms at the rates above (their caveats apply:
+// the rates are stale, so tools/server.js uses this only until the worker's
+// own progress reports give it the real pace).
+function estimateWallMs(cfg) {
+  const c = batchCost(cfg);
+  return c.work * MS_PER_DRONE_SEC + c.planWork * MS_PER_PLAN_CELL_REPLAN;
+}
+
 function normalizeConfig(cfg) {
   if (!cfg || typeof cfg !== 'object') return null;
   const cells = Array.isArray(cfg.sweep) && cfg.sweep.length ? cfg.sweep : [{ name: 'base' }];
@@ -251,8 +291,7 @@ function validateConfig(cfg) {
 
   // Work budget in drone-seconds — the quantity that predicts compute —
   // weighted by the active jammers each tick has to evaluate.
-  const jammers = activeJammers(cfg);
-  const work = Math.round(totalRuns * dur * count * (1 + jammers / 8));
+  const work = workDroneSec(cfg);
   if (work > LIMITS.maxTotalWorkDroneSec) {
     return 'total workload (' + work + ' jammer-weighted drone-seconds) exceeds the ' +
       LIMITS.maxTotalWorkDroneSec + ' budget — fewer runs, shorter duration, or a smaller fleet';
@@ -272,13 +311,7 @@ function validateConfig(cfg) {
   // Planning budget (soak finding R8): drone-seconds don't see it — one
   // drone for 30 s toward a 100 km objective on a short-range radio held a
   // worker until the 5-min timeout.
-  let worstGrid = 0, planWork = 0;
-  for (const c of cells) {
-    const grid = plannerGridCells(cfg, c);
-    worstGrid = Math.max(worstGrid, grid);
-    planWork += grid * seeds.length * Math.ceil(dur / PLAN_REPLAN_SEC);
-  }
-  planWork *= 1 + jammers; // inDenialZone runs per probed cell per jammer
+  const { planWork, worstGrid } = planCellReplans(cfg);
   if (worstGrid > LIMITS.maxPlanGridCells) {
     return 're-planning the relay chain to a ' + (Math.hypot(t.targetX, t.targetY) / 1000).toFixed(1) + ' km objective on ' +
       cfg.radio + ' searches a ' + worstGrid + '-cell grid every ' + PLAN_REPLAN_SEC + ' sim-s (limit ' + LIMITS.maxPlanGridCells +
@@ -296,7 +329,14 @@ function validateConfig(cfg) {
 // names the load the runs actually carried.
 const DEFAULT_VIDEO_KBPS = 500;
 
-function runOne(ctx, cfg, cell, seed) {
+// A worker reports progress about every this many sim-seconds, so a parent
+// can tell a batch that is working from one that has stopped. Reporting only
+// reads the clock: it never touches the RNG or the swarm, so results are
+// identical with and without a listener.
+const HEARTBEAT_SIM_SEC = 5;
+const HEARTBEAT_TICKS = Math.max(1, Math.round(HEARTBEAT_SIM_SEC / SIM_DT_SEC));
+
+function runOne(ctx, cfg, cell, seed, beat) {
   const envMap = { open: [1, 2.5], suburban: [0.45, 4.5], urban: [0.2, 6.5] };
   const [envFactor, sigma] = envMap[cfg.env];
   const f = cfg.features || {};
@@ -331,6 +371,7 @@ function runOne(ctx, cfg, cell, seed) {
   while (s.time < cfg.durationSec) {
     st = ctx.stepSwarm(s, SIM_DT_SEC);
     freshSum += st.freshCount; ticks++;
+    if (beat && ticks % HEARTBEAT_TICKS === 0) beat(Math.min(1, s.time / cfg.durationSec));
   }
   const vidTotal = s.net.vid.framesDelivered + s.net.vid.droppedFrames;
   return {
@@ -347,8 +388,11 @@ function runOne(ctx, cfg, cell, seed) {
   };
 }
 
-// Run a full batch. Returns plain data + rendered artifacts.
-function runBatch(rawCfg, progress) {
+// Run a full batch. Returns plain data + rendered artifacts. `progress(done,
+// total)` fires after each run; `heartbeat(fraction)` fires every few
+// sim-seconds inside a run with the share of the whole batch finished, in
+// (0, 1] and never going backwards.
+function runBatch(rawCfg, progress, heartbeat) {
   const err = validateConfig(rawCfg);
   if (err) throw new Error('invalid config: ' + err);
   const cfg = normalizeConfig(rawCfg);
@@ -358,9 +402,10 @@ function runBatch(rawCfg, progress) {
   const rows = [];
   let done = 0;
   const total = cells.length * seeds.length;
+  const beat = heartbeat ? f => heartbeat((done + f) / total) : null;
   for (const cell of cells) {
     for (const seed of seeds) {
-      rows.push(runOne(ctx, cfg, cell, seed));
+      rows.push(runOne(ctx, cfg, cell, seed, beat));
       done++;
       if (progress) progress(done, total);
     }
@@ -379,7 +424,7 @@ function runBatch(rawCfg, progress) {
   return { rows, summary, md, csv };
 }
 
-module.exports = { runBatch, validateConfig, normalizeConfig, LIMITS, maxBatchWallMs };
+module.exports = { runBatch, validateConfig, normalizeConfig, LIMITS, maxBatchWallMs, batchCost, estimateWallMs };
 
 // --- CLI ----------------------------------------------------------------------
 if (require.main === module) {
