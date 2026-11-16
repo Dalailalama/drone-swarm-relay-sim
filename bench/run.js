@@ -78,7 +78,9 @@ function runOnce(n, seedOffset) {
     msPerTick: wallMs / (SIM_SECONDS / SIM_DT_SEC),
     speedup: SIM_SECONDS / (wallMs / 1000),
     delivered: s.net.delivered,
-    droppedPct: 100 * s.net.dropped / Math.max(1, s.net.delivered + s.net.dropped),
+    // Control-plane loss, as tools/batch.js, tools/compare.js and the after-action
+    // report state it; the aggregate counters also hold the video fragments.
+    droppedPct: ctx.controlLossPct(s),
     uptimePct: 100 * (s.stats.fleetConnSec || 0) / s.stats.tSec,
     heapMb: mem1 / 1e6,
     heapDeltaMb: (mem1 - mem0) / 1e6,
