@@ -60,8 +60,10 @@ function send(res, code, body, type) {
 // projected total at the pace it has actually shown, where the absolute rate
 // cancels out. Only before the first report does the static per-request
 // estimate stand in. The budget is never under FLOOR_MS (the old 5 min, so a
-// hang is caught no later than before) nor over CEILING_MS (twice the largest
-// batch the validator admits, ~36 min at those rates).
+// hang is caught no later than before), a silent stretch after any report is
+// never allowed less than FLOOR_MS either, and the total is never over
+// CEILING_MS (twice the largest batch the validator admits, ~36 min at those
+// rates).
 const TIMEOUT_MARGIN = 2;
 const FLOOR_MS = 5 * 60 * 1000;
 const POOL_DEFAULTS = {
@@ -79,6 +81,16 @@ function batchBudgetMs(state, policy) {
     : policy.margin * state.estimateMs;
   // A missing or garbled input must not reach setTimeout (NaN fires at once).
   return Math.min(policy.ceilingMs, Math.max(policy.floorMs, Number.isFinite(raw) ? raw : policy.floorMs));
+}
+
+// When the kill timer should fire, in ms after the worker started: the pace
+// budget, but never less than FLOOR_MS of silence from now (a batch that is
+// mostly done must not be killed over one slow step just because 2e/f has
+// dipped under now + floor), and never past the ceiling.
+function batchDeadlineMs(state, policy) {
+  const budget = batchBudgetMs(state, policy);
+  const quiet = (Number.isFinite(state.elapsedMs) ? state.elapsedMs : 0) + policy.floorMs;
+  return Math.min(policy.ceilingMs, Math.max(budget, quiet));
 }
 
 const SPLIT_ADVICE = ' — split it into smaller batches (fewer runs, a shorter duration or a smaller ' +
@@ -158,7 +170,7 @@ function makePool(opts, stats) {
       const arm = () => {
         const elapsedMs = Date.now() - startedAt;
         budgetMs = fixedMs != null ? fixedMs
-          : batchBudgetMs({ estimateMs: job.estimateMs, elapsedMs, fraction }, policy);
+          : batchDeadlineMs({ estimateMs: job.estimateMs, elapsedMs, fraction }, policy);
         clearTimeout(killTimer);
         killTimer = setTimeout(expire, Math.max(0, startedAt + budgetMs - Date.now()));
       };
@@ -296,7 +308,7 @@ function createApp(opts) {
 // machine needs --host plus a reverse proxy that authenticates.
 const DEFAULT_HOST = '127.0.0.1';
 
-module.exports = { createApp, DEFAULT_HOST, batchBudgetMs };
+module.exports = { createApp, DEFAULT_HOST, batchBudgetMs, batchDeadlineMs };
 
 // --- CLI ----------------------------------------------------------------------
 if (require.main === module) {

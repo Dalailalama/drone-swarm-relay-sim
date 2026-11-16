@@ -174,8 +174,10 @@ the commit messages carry the per-finding detail.
   and the server allows twice the batch's projected total at the pace it has
   shown, never under 5 minutes (a hang is caught no later than before) and
   never over twice the cost of the largest batch the limits admit (~36
-  minutes at `tools/batch.js`'s documented rates). Those rates are stale, so
-  they stand in only until the first progress report; a batch that needs
+  minutes at `tools/batch.js`'s documented rates, which its own comment says
+  have moved since they were measured). Those rates stand in only until the
+  first progress report, and a silent stretch is never allowed under 5
+  minutes after any report; a batch that needs
   more than the ceiling still gets a 504, which says whether it stalled or
   hit the ceiling and how to split the batch or run it with the CLI. The
   usage line names `--host`.

@@ -80,6 +80,21 @@ test('batchBudgetMs: the static estimate only sets the budget until progress arr
   assert.strictEqual(f({ estimateMs: NaN, elapsedMs: NaN, fraction: 0.3 }, policy), 300000);
 });
 
+test('batchDeadlineMs: after any report a batch gets at least the floor of silence, within the ceiling', () => {
+  const policy = { margin: 2, floorMs: 300000, ceilingMs: 2160000 };
+  const d = S.batchDeadlineMs;
+  // Mid-batch, mostly done, 160 s old: the pace budget (2 x 160/0.9 = 355 s)
+  // would leave only 195 s of silence; the floor guarantees 300 s.
+  assert.strictEqual(d({ estimateMs: 1, elapsedMs: 160000, fraction: 0.9 }, policy), 460000);
+  // Once the pace budget leaves more than the floor, the pace budget rules.
+  assert.strictEqual(d({ estimateMs: 1, elapsedMs: 400000, fraction: 0.5 }, policy), 1600000);
+  // Before any report the deadline is the static budget (never under the floor).
+  assert.strictEqual(d({ estimateMs: 600000, elapsedMs: 0, fraction: 0 }, policy), 1200000);
+  assert.strictEqual(d({ estimateMs: 1, elapsedMs: 0, fraction: 0 }, policy), 300000);
+  // The ceiling still bounds the total, however old the batch.
+  assert.strictEqual(d({ estimateMs: 1, elapsedMs: 2000000, fraction: 0.9 }, policy), 2160000);
+});
+
 test('runBatch gives the same results with and without a heartbeat, and the heartbeat is monotonic', () => {
   const cfg = { ...GOOD, durationSec: 60, seeds: [1, 2] };
   const plain = B.runBatch(cfg);
@@ -94,11 +109,11 @@ test('runBatch gives the same results with and without a heartbeat, and the hear
 });
 
 test('a batch that keeps reporting progress outlives the floor; one that stalls is killed with a message that says so', async () => {
-  await withApp({ workers: 1, queue: 1, floorMs: 500, ceilingMs: 60000, workerBatchPath: STUB }, async port => {
+  await withApp({ workers: 1, queue: 1, floorMs: 1000, ceilingMs: 60000, workerBatchPath: STUB }, async port => {
     const t0 = Date.now();
     const steady = await post(port, { ...GOOD, label: 'steady' });
     assert.strictEqual(steady.code, 200, steady.body);
-    assert.ok(Date.now() - t0 > 700, 'premise: the steady job runs well past the 500 ms floor');
+    assert.ok(Date.now() - t0 > 1000, 'premise: the steady job runs past the 1000 ms floor');
 
     const stall = await post(port, { ...GOOD, label: 'stall' });
     assert.strictEqual(stall.code, 504);
@@ -110,7 +125,7 @@ test('a batch that keeps reporting progress outlives the floor; one that stalls 
 });
 
 test('a batch over the ceiling is killed at the ceiling even while it reports progress', async () => {
-  await withApp({ workers: 1, queue: 1, floorMs: 100, ceilingMs: 700, workerBatchPath: STUB }, async (port, app) => {
+  await withApp({ workers: 1, queue: 1, floorMs: 700, ceilingMs: 700, workerBatchPath: STUB }, async (port, app) => {
     assert.strictEqual(app.batchTimeoutMs, 700);
     const r = await post(port, { ...GOOD, label: 'steady' });
     assert.strictEqual(r.code, 504);
