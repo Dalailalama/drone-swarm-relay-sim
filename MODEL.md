@@ -101,7 +101,7 @@ $$M = \min_{\text{dir}}\left(P_{\text{rx,dir}} - S_{\text{rx}} - I_{\text{rx}}\r
 - $I_{\text{rx}}$: the interference penalty at the receiver of that direction (§3.3). Each receiver's interference degrades only the direction it hears.
 
 ### 3.3 Interference Sources
-Source: `interferenceFloorDbm`, `floorPenaltyDb` and `jammerDenialRadiusM` in `js/swarm.js`. An interference source is a band-wide barrage emitter at height `altM` (default 15 m) above the ground. Its `erpDbm` is ERP, referenced to a half-wave dipole, so it is converted to EIRP (+2.15 dB) and heard through the receiver's own antenna. The interference floor at a receiver is
+Source: `interferenceFloorDbm`, `floorPenaltyDb` and `jammerDenialRadiusM` in `js/swarm.js`. An interference source is a band-wide barrage emitter at height `altM` (default 15 m) above the ground; a source that names no `altM` gets that same default wherever it is read, including a red-team hunter's direction-finding receiver, the TAK RF-denial hazard mark and the 3-D mast. Its `erpDbm` is ERP, referenced to a half-wave dipole, so it is converted to EIRP (+2.15 dB) and heard through the receiver's own antenna. The interference floor at a receiver is
 
 $$N_j = 10 \log_{10} \sum_{\text{sources}} 10^{\left(\text{ERP}_j + 2.15 + G_{\text{rx}} - G_{\text{agility}} - \text{PL}_r(d_j)\right)/10} + \text{SIR}_{\text{req}}$$
 

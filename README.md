@@ -81,7 +81,9 @@ the link last worked:
   before the mission position is abandoned — base is the last resort, not
   the first one. Each point is flown by the drone's own navigation belief,
   and an attempt that cannot reach its point (inside a tower, say) expires
-  after twice its straight-line transit time plus the listening time. A
+  after twice its transit time (flown at the ground speed the wind leaves
+  along the leg) plus the listening time (three announced order rounds, never
+  under 35 s, so a slow unicast link has time to reach it). A
   drone that reaches its last-known home with the link still dead lands
   there; the ground crew swaps its battery only if the base really is there
   (if the operator moved in radio silence, it stays landed).
@@ -110,7 +112,8 @@ declines the order, keeps flying its current one while that one still
 closes (if neither closes, it takes the cheaper of the two), and reports the
 refusal; C2 benches it for a while and elects a drone that can
 actually afford the job. A drone that says yes has proven it can also say
-goodbye safely.
+goodbye safely. A drone already flying home on RTB ignores in-flight orders
+without logging or reporting a refusal.
 
 ### The tether rule
 
@@ -384,7 +387,9 @@ part the swarm has to learn: while disconnected, every drone's black box
 logs where the silence happened; on reconnect the samples upload, and C2
 paints a coverage grid — green where packets provably arrived, red where
 drones sat in silence, unpainted where nobody has checked (FASTER's
-known-free / unknown / occupied space, in radio form). Relay slots that
+known-free / unknown / occupied space, in radio form). A sample logged while the drone's GNSS
+was denied is uploaded flagged, and C2 does not paint it, as it ignores the
+position of a denied live report. Relay slots that
 land in measured-bad cells get sidestepped to the nearest trusted cell —
 so after a few minutes of honest struggle, the chain physically bends
 around the hill and stays connected.
@@ -558,8 +563,8 @@ swarm maps it, holds its connected frontier, and reports it.
   `radioPreset`/`relayRadioPreset` defines it), malformed numbers, and bad
   jammer or zone entries are rejected with one alert.
 - **After-action report** exports a Markdown mission summary — did the link
-  hold, how many relays and failsafes, what dead zones were mapped, packet
-  loss, interference survived — the artifact a planner or customer actually
+  hold, how many relays and failsafes, what dead zones were mapped, control-plane
+  packet loss (video is reported on its own line), interference survived — the artifact a planner or customer actually
   wants out of a run (clearly marked as a simulation result, not flight data).
 
 ## Packet capture

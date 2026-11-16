@@ -8,7 +8,9 @@ send an Origin header on a WebSocket handshake, so each server rejects a
 handshake whose Origin is not one of the sim's own:
 
 - http(s) on localhost / 127.0.0.1 / [::1], any port (`python -m http.server`);
-- "null", what a page opened from file:// sends;
+- "null", what a page opened from file:// sends (a sandboxed iframe on any
+  site sends it too, so use --token if other pages in that browser are
+  untrusted);
 - the GitHub Pages live demo, https://dalailalama.github.io;
 - anything added with --allow-origin (repeatable; "*" disables the check).
 

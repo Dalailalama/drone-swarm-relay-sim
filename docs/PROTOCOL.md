@@ -242,9 +242,11 @@ stateDiagram-v2
     confirm_mode --> ready: Complete climb to target altitude
 ```
 
-The bridge re-sends `MAV_CMD_NAV_LAND` every `STEP_RESEND_DT` until the autopilot ACKs it. A landing that fails anyway (rejected, or no descent progress for `INIT_STEP_TIMEOUT_S`: `state` `failed:land`, `servicePhase` `failed`) may be retried with a fresh `land` under a new `requestId` while the vehicle is still armed and reporting; both servers accept it. The browser reports the failure and retries after 3 s, up to 3 attempts in all.
+The bridge re-sends `MAV_CMD_NAV_LAND` every `STEP_RESEND_DT` until the autopilot ACKs it. A landing that fails anyway (rejected, or no descent progress for `INIT_STEP_TIMEOUT_S`: `state` `failed:land`, `servicePhase` `failed`) may be retried with a fresh `land` under a new `requestId` while the vehicle is still armed and reporting; both servers accept it. The browser reports the failure and retries after 3 s, up to 3 attempts in all. If the vehicle touches down anyway and the server reports it `landed` again under that landing's `requestId` (including when the retry was refused because the vehicle was already down), the browser carries on with `authorize` as after a normal touchdown.
 
-A relaunch whose mode, arm or climb step fails parks the vehicle (`state` `failed:<step>`, `servicePhase` `failed`). Neither server retries it; once the vehicle again shows the touchdown evidence below it returns to `landed`, from where `authorize`, `complete` and `relaunch` (same `requestId`) can be repeated.
+A relaunch whose mode, arm or climb step fails parks the vehicle (`state` `failed:<step>`, `servicePhase` `failed`). Neither server retries it; once the vehicle again shows the touchdown evidence below it returns to `landed`, from where `authorize`, `complete` and `relaunch` (same `requestId`) can be repeated. The browser reports a refused relaunch and, once the vehicle is back in `landed`, repeats `authorize`, `complete` and `relaunch` under the same `requestId` after 3 s, up to 3 relaunches in all; after the third refusal it reports the vehicle left on the pad and stops.
+
+The browser asks for `land` when the drone's own navigation belief is within 25 m (`DRONE.landThresholdM`) of the base it last learned, the rule the internal physics uses, not the live base. It sends `authorize` only when the vehicle's telemetry shows it set down within 25 m of the true base, where the ground crew is: a vehicle that landed at a stale last-known home gets no battery swap and stays `landed`.
 
 Touchdown is decided differently by the two servers:
 - **bridge**: the autopilot reports `EXTENDED_SYS_STATE.landed_state == MAV_LANDED_STATE_ON_GROUND` and a disarmed heartbeat. `groundAlt` is not used.
